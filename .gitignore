@@ -1,0 +1,43 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment
+.env
+*.env.local
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+
+# Build artefacts
+*.egg-info/
+.eggs/
+dist/
+
+# Docker volumes (host-mapped)
+data/uploads/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Alembic
+backend/alembic/versions/*.pyc
+
+# Logs
+*.log
+celerybeat-schedule
