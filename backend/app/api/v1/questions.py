@@ -6,6 +6,8 @@ from app.models.models import Question
 from app.schemas.schemas import QuestionCreate, QuestionUpdate, QuestionOut
 from app.services.question_generator import generate_questions
 from app.services.llm_service import llm_service
+from app.services.pdf_service import extract_text_from_pdf, get_pdf_info
+from app.core.config import settings
 from typing import List, Optional
 import uuid
 
@@ -84,15 +86,54 @@ async def generate_from_upload(
     count: int = Query(20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
 ):
-    content = (await file.read()).decode("utf-8", errors="ignore")
-    questions = await generate_questions(content, question_type, count)
+    """
+    Generate questions from an uploaded file.
+    Accepts .txt (plain text) and .pdf files.
+    PDF text is extracted automatically (up to 100 pages).
+    """
+    raw_bytes = await file.read()
+    filename = (file.filename or "").lower()
+
+    # ── Extract content ────────────────────────────────────────────────────────
+    if filename.endswith(".pdf"):
+        # Validate size
+        max_bytes = settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024
+        if len(raw_bytes) > max_bytes:
+            raise HTTPException(
+                413,
+                f"PDF exceeds maximum upload size of {settings.UPLOAD_MAX_SIZE_MB} MB.",
+            )
+        info = get_pdf_info(raw_bytes)
+        content = extract_text_from_pdf(raw_bytes, max_pages=100)
+        if not content.strip():
+            raise HTTPException(
+                422,
+                "Could not extract text from the PDF. "
+                "Ensure it is a text-based PDF (not a scanned image).",
+            )
+    elif filename.endswith(".txt"):
+        content = raw_bytes.decode("utf-8", errors="ignore")
+    else:
+        raise HTTPException(
+            415,
+            "Unsupported file type. Please upload a .pdf or .txt file.",
+        )
+
+    # ── Generate via LLM ──────────────────────────────────────────────────────
+    questions_data = await generate_questions(content, question_type, count)
 
     created = []
-    for q_data in questions:
+    for q_data in questions_data:
         q = Question(**{k: v for k, v in q_data.items() if hasattr(Question, k)})
-        q.embedding = await llm_service.embed(f"{q.question_text} {q.model_answer}")
+        q.embedding = await llm_service.embed(
+            f"{q.question_text} {q.model_answer}"
+        )
         db.add(q)
         created.append(q)
 
     await db.commit()
-    return {"generated": len(created)}
+    return {
+        "generated": len(created),
+        "source_file": file.filename,
+        "source_pages": info.get("pages") if filename.endswith(".pdf") else None,
+    }

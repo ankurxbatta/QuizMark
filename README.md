@@ -1,6 +1,6 @@
 # Automated Web-Based Quiz Generation and Answer Evaluation System
 
-An offline, privacy-first platform that uses a **local LLM (Ollama / llama3)** and a **RAG pipeline** to automatically generate statistics quiz questions from uploaded content, collect student answers, and mark them using AI — with full instructor review, override, and audit capabilities.
+An offline, privacy-first platform that uses a **local LLM (Ollama / llama3)** and a **RAG pipeline** to automatically generate statistics quiz questions from uploaded content — including **PDF textbooks** — collect student answers, and mark them using AI, with full instructor review, override, and audit capabilities.
 
 > All AI inference runs on-premises via Ollama. No data ever leaves your infrastructure.
 
@@ -15,10 +15,14 @@ An offline, privacy-first platform that uses a **local LLM (Ollama / llama3)** a
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Usage](#usage)
+  - [Uploading a PDF Textbook](#uploading-a-pdf-textbook)
+  - [Instructor Workflow](#instructor-workflow)
+  - [Student Workflow](#student-workflow)
 - [API Reference](#api-reference)
 - [Architecture](#architecture)
 - [Data Files](#data-files)
 - [Security](#security)
+- [Offline vs Online Models](#offline-vs-online-models)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap](#roadmap)
@@ -28,35 +32,36 @@ An offline, privacy-first platform that uses a **local LLM (Ollama / llama3)** a
 ## Features
 
 ### Question Generation
-- Upload a plain-text content file; the LLM generates **Short Answer, MCQ, or True/False** questions with model answers and rubrics in one step
+- Upload a **PDF textbook** or plain-text `.txt` file; the LLM generates **Short Answer, MCQ, or True/False** questions with model answers and rubrics automatically
+- PDF text is extracted in-backend (pdfplumber + pypdf) — no external tools needed
 - Batch generate up to **50 questions per upload** (configurable)
 - Full CRUD management of the Q&A bank with topic tags and difficulty levels
 - Seed bank of **200 pilot statistics questions** included in `data/questions_bank.json`
+- Compatible with the **OpenStax Introductory Business Statistics** textbook (631 pages, included as sample)
 
 ### Auto-Marking (RAG Pipeline)
 - Student answers are **embedded** (nomic-embed-text via Ollama) and matched against the vector store (pgvector)
 - Top-K similar model answers are retrieved and used as context for the LLM marking prompt
 - LLM returns a **structured JSON** response: `{mark, feedback, flagged}`
-- Marks are validated against `max_marks` and stored asynchronously (Celery + Redis)
-- Low-confidence responses are automatically **flagged** for human review
+- Marks validated against `max_marks`, stored asynchronously via Celery + Redis
+- Low-confidence responses automatically **flagged** for human review
 
 ### Instructor Dashboard
 - Overview stats: total questions, pending marking, flagged submissions, last backup date
 - Full Q&A bank manager: create, edit, delete questions
-- Marking review queue with **flag/unflag**, **override mark**, **override feedback**, and **override reason**
+- Marking review queue with **override mark**, **override feedback**, and **override reason**
 - Complete **audit log** for every override event
 - CSV export for marks and audit log
 
 ### Student Portal
 - Clean, mobile-friendly assessment interface
-- Loads questions from the live Q&A bank
-- Submit answers; receive confirmation; marking runs in the background
+- Submit answers; marking happens in the background
+- Confirmation screen on submission
 
 ### Security & Compliance
 - **JWT authentication** (HS256, 30-minute expiry)
 - **bcrypt** password hashing
 - **Account lockout** after 3 failed attempts (5-minute cooldown)
-- Session timeout enforcement
 - Full **audit trail** of all marking overrides
 - UUID-based student identification (no PII in default schema)
 
@@ -70,6 +75,7 @@ An offline, privacy-first platform that uses a **local LLM (Ollama / llama3)** a
 | Backend | FastAPI (Python 3.11), Pydantic v2, SQLAlchemy (async) |
 | Database | PostgreSQL 16 + pgvector extension |
 | LLM Inference | Ollama (llama3 for generation/marking, nomic-embed-text for embeddings) |
+| PDF Extraction | pdfplumber + pypdf |
 | Task Queue | Celery 5 + Redis 7 |
 | Containerisation | Docker Compose |
 | Migrations | Alembic |
@@ -82,200 +88,201 @@ An offline, privacy-first platform that uses a **local LLM (Ollama / llama3)** a
 ```
 automated_web_based_quiz_generation_and_answer_evaluation_system/
 │
-├── docker-compose.yml          # Orchestrates all 6 services
-├── .env.example                # Environment variable template
-├── setup.sh / setup.bat        # First-run initialisation scripts
+├── docker-compose.yml
+├── .env.example
+├── setup.sh / setup.bat
+├── LICENSE
 │
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── alembic.ini
-│   ├── alembic/
-│   │   ├── env.py
-│   │   └── versions/
-│   │       └── 0001_initial_schema.py
+│   ├── alembic/versions/0001_initial_schema.py
 │   └── app/
-│       ├── main.py             # FastAPI application entry point
+│       ├── main.py
 │       ├── core/
-│       │   ├── config.py       # Pydantic settings (reads .env)
-│       │   ├── database.py     # Async SQLAlchemy engine + session
-│       │   └── security.py     # JWT creation/validation, bcrypt hashing
-│       ├── models/
-│       │   └── models.py       # SQLAlchemy ORM: User, Question, Submission, AuditLog
-│       ├── schemas/
-│       │   └── schemas.py      # Pydantic request/response models
+│       │   ├── config.py
+│       │   ├── database.py
+│       │   └── security.py
+│       ├── models/models.py
+│       ├── schemas/schemas.py
 │       ├── services/
-│       │   ├── llm_service.py       # Ollama HTTP adapter (generate + embed)
-│       │   ├── rag_pipeline.py      # RAG marking pipeline
-│       │   └── question_generator.py # LLM question generation from text
+│       │   ├── llm_service.py          # Ollama adapter
+│       │   ├── rag_pipeline.py         # RAG auto-marking
+│       │   ├── question_generator.py   # LLM question generation
+│       │   └── pdf_service.py          # PDF text extraction ← NEW
 │       ├── tasks/
-│       │   ├── celery_app.py        # Celery configuration
-│       │   └── marking_tasks.py     # Async marking Celery task
+│       │   ├── celery_app.py
+│       │   └── marking_tasks.py
 │       └── api/v1/
-│           ├── auth.py         # POST /auth/login
-│           ├── questions.py    # GET/POST/PUT/DELETE /questions/ + /generate
-│           ├── submissions.py  # POST/GET /submissions/
-│           ├── marking.py      # PUT /marking/{id}/override + audit log
-│           └── export.py       # GET /export/marks + /export/audit (CSV)
+│           ├── auth.py
+│           ├── questions.py    # .pdf + .txt upload support ← UPDATED
+│           ├── submissions.py
+│           ├── marking.py
+│           └── export.py
 │
-├── frontend/
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── next.config.js
-│   ├── tailwind.config.ts
-│   └── src/
-│       ├── app/
-│       │   ├── layout.tsx           # Root layout
-│       │   ├── globals.css
-│       │   ├── page.tsx             # Login page (role selector)
-│       │   ├── (instructor)/
-│       │   │   ├── dashboard/       # Stats overview + quick actions
-│       │   │   ├── questions/       # Q&A bank CRUD
-│       │   │   ├── generate/        # Upload content → generate questions
-│       │   │   ├── marking/         # Review submissions + override marks
-│       │   │   └── export/          # Download CSV reports
-│       │   └── (student)/
-│       │       └── assessment/      # Student quiz submission portal
-│       └── lib/
-│           └── api.ts               # Axios instance with JWT interceptor
+├── frontend/src/app/
+│   ├── page.tsx                        # Login
+│   ├── (instructor)/
+│   │   ├── dashboard/page.tsx
+│   │   ├── questions/page.tsx
+│   │   ├── generate/page.tsx           # PDF + TXT upload UI ← UPDATED
+│   │   ├── marking/page.tsx
+│   │   └── export/page.tsx
+│   └── (student)/assessment/page.tsx
 │
 ├── data/
-│   ├── questions_bank.json     # 200 pilot statistics Q&A (run scripts/generate_data.py)
-│   └── sample_submissions.csv  # 30 gold-marked student submissions for testing
+│   ├── questions_bank.json             # 200 pilot Q&A records
+│   └── sample_submissions.csv          # 30 gold-marked submissions
 │
-├── scripts/
-│   └── generate_data.py        # Generates data/ files (run once)
-│
+├── scripts/generate_data.py
 └── docs/
-    ├── ARCHITECTURE.md         # System architecture and data flow diagrams
-    └── API.md                  # Full REST API reference
+    ├── ARCHITECTURE.md
+    ├── API.md
+    └── MODEL_COMPARISON.md             # Offline vs Online guide ← NEW
 ```
 
 ---
 
 ## Prerequisites
 
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| Docker Desktop | ≥ 4.28 | Ensure ≥ 8 GB RAM allocated |
-| Docker Compose | ≥ 2.24 | Included with Docker Desktop |
-| Python 3.11+ | Optional | Only needed to run `scripts/generate_data.py` locally |
-| Free disk space | ≥ 10 GB | Ollama model weights (llama3 ≈ 4.7 GB, nomic-embed-text ≈ 274 MB) |
+| Requirement | Minimum Version | Notes |
+|-------------|----------------|-------|
+| Docker Desktop | 4.28+ | Allocate ≥ 8 GB RAM |
+| Docker Compose | 2.24+ | Included with Docker Desktop |
+| Free disk space | 10 GB+ | llama3 ≈ 4.7 GB, nomic-embed-text ≈ 274 MB |
+| Python 3.11+ | Optional | Only for `scripts/generate_data.py` |
 
 ---
 
 ## Quick Start
 
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
 git clone https://github.com/ankurbatta/automated_web_based_quiz_generation_and_answer_evaluation_system.git
 cd automated_web_based_quiz_generation_and_answer_evaluation_system
 ```
 
-### 2. Run the setup script
+### 2. Setup
 
 **macOS / Linux:**
 ```bash
-chmod +x setup.sh
-./setup.sh
+chmod +x setup.sh && ./setup.sh
 ```
 
-**Windows (PowerShell or CMD):**
+**Windows:**
 ```bat
 setup.bat
 ```
 
-The setup script will:
-1. Copy `.env.example` → `.env` (edit secrets before continuing)
-2. Pull and build all Docker images
-3. Run Alembic database migrations
-4. Pull the LLM and embedding models via Ollama
-5. Start all six services
+The script: copies `.env`, builds images, runs Alembic migrations, pulls LLM models, starts all six services.
 
-### 3. Seed the data (optional but recommended)
+### 3. Seed data (recommended)
 
 ```bash
 python3 scripts/generate_data.py
 ```
 
-This writes `data/questions_bank.json` (200 questions) and `data/sample_submissions.csv` (30 gold submissions). Import questions via the instructor UI or POST to `/api/v1/questions/`.
+Creates `data/questions_bank.json` (200 questions) and `data/sample_submissions.csv` (30 gold submissions).
 
-### 4. Open the application
+### 4. Open
 
 | Service | URL |
 |---------|-----|
-| Frontend (UI) | http://localhost:3000 |
-| Backend API docs | http://localhost:8000/docs |
+| Frontend | http://localhost:3000 |
+| API docs (Swagger) | http://localhost:8000/docs |
 | Ollama | http://localhost:11434 |
 
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and edit before first run:
-
 ```bash
-cp .env.example .env
+cp .env.example .env   # then edit SECRET_KEY and POSTGRES_PASSWORD
 ```
-
-Key variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SECRET_KEY` | **Change this** — JWT signing key (min 32 chars) | — |
-| `POSTGRES_PASSWORD` | **Change this** — database password | — |
-| `LLM_MODEL_NAME` | Ollama model for generation and marking | `llama3` |
+| `SECRET_KEY` | **Change this** — JWT signing key | — |
+| `POSTGRES_PASSWORD` | **Change this** | — |
+| `LLM_MODEL_NAME` | Ollama model for generation & marking | `llama3` |
 | `EMBEDDING_MODEL` | Ollama model for embeddings | `nomic-embed-text` |
-| `JWT_EXPIRY_MINUTES` | Token lifetime in minutes | `30` |
-| `MAX_FAILED_LOGIN_ATTEMPTS` | Before account lockout | `3` |
-| `BATCH_SIZE_LIMIT` | Max questions generated per upload | `50` |
-| `SIMILARITY_THRESHOLD` | Below this cosine similarity → flag for review | `0.75` |
-| `TOP_K_RETRIEVAL` | Number of similar Q&As retrieved for RAG context | `5` |
+| `UPLOAD_MAX_SIZE_MB` | Max PDF/TXT upload size | `25` |
+| `JWT_EXPIRY_MINUTES` | Token lifetime | `30` |
+| `MAX_FAILED_LOGIN_ATTEMPTS` | Before lockout | `3` |
+| `SIMILARITY_THRESHOLD` | Below this → flag for review | `0.75` |
+| `TOP_K_RETRIEVAL` | RAG context window size | `5` |
 
 ---
 
 ## Usage
 
+### Uploading a PDF Textbook
+
+The platform accepts **PDF textbooks directly** — no manual conversion needed.
+
+1. Go to **Dashboard → Upload Content & Generate Questions**
+2. Click the upload zone and select your `.pdf` file (e.g. `IntroductoryBusinessStatistics-OP.pdf`)
+3. The backend automatically:
+   - Extracts text from up to **100 pages** using `pdfplumber`
+   - Feeds the extracted content to the local LLM
+   - Generates questions with model answers, rubrics, topic tags, and difficulty levels
+4. Choose question type (Short Answer / MCQ / True-False) and quantity (1–50)
+5. Click **Generate Questions**
+
+**PDF requirements:**
+- Must be a **text-based PDF** (not a scanned/image-only PDF)
+- Maximum **25 MB** (configurable via `UPLOAD_MAX_SIZE_MB`)
+- First 100 pages are used (sufficient for most textbook chapters)
+
+**Tested with:** *Introductory Business Statistics* (OpenStax, 631 pages) — text extracts cleanly.
+
 ### Instructor Workflow
 
-1. **Log in** at http://localhost:3000 → select **Instructor** → enter credentials
-2. **Generate questions**: Dashboard → *Upload Content & Generate Questions* → upload a `.txt` file, select type and count → click Generate
-3. **Manage Q&A bank**: Dashboard → *Manage Q&A Bank* → create, edit, or delete questions manually
-4. **Review marking**: Dashboard → *Review & Mark Submissions* → view auto-marks, override where needed, provide feedback and reason
-5. **Export results**: Dashboard → *Export Results* → download marks CSV or audit log CSV
+1. Log in → select **Instructor**
+2. **Generate** questions from a PDF or TXT upload
+3. **Manage Q&A bank** — review, edit, or delete generated questions
+4. **Review Marking** — view auto-marks, override where needed with feedback and reason
+5. **Export** — download marks CSV or audit log CSV
 
 ### Student Workflow
 
-1. **Log in** at http://localhost:3000 → select **Student** → enter credentials
-2. Questions load automatically from the live Q&A bank
-3. Write answers in each text area and click **Submit Assessment**
-4. Marking runs asynchronously; results visible to instructor once complete
+1. Log in → select **Student**
+2. Answer questions in the assessment portal
+3. Submit — marking runs in the background via the LLM pipeline
 
 ---
 
 ## API Reference
 
-Full documentation: http://localhost:8000/docs (Swagger UI) or [docs/API.md](docs/API.md)
+Full docs at http://localhost:8000/docs or [docs/API.md](docs/API.md).
 
 ### Key Endpoints
 
 ```
-POST   /api/v1/auth/login                  Authenticate → JWT
-GET    /api/v1/questions/                  List questions (filter by topic, difficulty)
-POST   /api/v1/questions/                  Create question
-POST   /api/v1/questions/generate          Generate from text file upload
-PUT    /api/v1/questions/{id}              Update question
-DELETE /api/v1/questions/{id}              Delete question
-POST   /api/v1/submissions/                Submit answer (triggers async marking)
-GET    /api/v1/submissions/                List all submissions
-PUT    /api/v1/marking/{id}/override       Override auto-mark
-GET    /api/v1/marking/flagged             List flagged submissions
-GET    /api/v1/marking/audit-log           Full audit trail (JSON)
-GET    /api/v1/export/marks                Download marks CSV
-GET    /api/v1/export/audit                Download audit log CSV
-GET    /health                             Service health check
+POST   /api/v1/auth/login
+GET    /api/v1/questions/
+POST   /api/v1/questions/                    Create question manually
+POST   /api/v1/questions/generate            Generate from .pdf or .txt upload
+PUT    /api/v1/questions/{id}
+DELETE /api/v1/questions/{id}
+POST   /api/v1/submissions/                  Submit answer → async marking
+GET    /api/v1/submissions/
+PUT    /api/v1/marking/{id}/override
+GET    /api/v1/marking/flagged
+GET    /api/v1/marking/audit-log
+GET    /api/v1/export/marks                  CSV download
+GET    /api/v1/export/audit                  CSV download
+GET    /health
 ```
+
+**Generate endpoint — accepted file types:**
+
+| Type | Extension | Notes |
+|------|-----------|-------|
+| PDF textbook | `.pdf` | Text extracted automatically, up to 100 pages |
+| Plain text | `.txt` | Used directly |
 
 ---
 
@@ -290,16 +297,26 @@ Browser ──► Next.js 14 (3000)
                         ├──► PostgreSQL + pgvector (5432)
                         ├──► Celery Worker ──► Redis (6379)
                         └──► Ollama LLM (11434)
-                                 ├── llama3 (generation & marking)
-                                 └── nomic-embed-text (embeddings)
+                                 ├── llama3
+                                 └── nomic-embed-text
 ```
 
-**RAG Marking Pipeline:**
-1. Embed the student answer using `nomic-embed-text`
-2. Retrieve top-K most similar question+model-answer pairs from pgvector
-3. Construct a rubric-anchored LLM prompt with retrieved context
-4. Call `llama3` → parse structured JSON: `{mark, feedback, flagged}`
-5. Persist results; auto-flag low-confidence responses
+**PDF → Questions pipeline:**
+```
+Upload .pdf
+    │
+    ▼
+pdf_service.py (pdfplumber → pypdf fallback)
+    │  Extract text from up to 100 pages
+    ▼
+question_generator.py
+    │  LLM prompt → structured JSON array
+    ▼
+Embed each Q+A (nomic-embed-text)
+    │
+    ▼
+INSERT into questions table with pgvector embedding
+```
 
 ---
 
@@ -307,13 +324,10 @@ Browser ──► Next.js 14 (3000)
 
 | File | Description |
 |------|-------------|
-| `data/questions_bank.json` | 200 statistics Q&A records across 10 topics, 3 difficulties, 3 question types |
-| `data/sample_submissions.csv` | 30 synthetic student submissions with gold marks (for evaluation/testing) |
+| `data/questions_bank.json` | 200 statistics Q&A records, 10 topics, 3 difficulties, 3 types |
+| `data/sample_submissions.csv` | 30 synthetic gold-marked student submissions |
 
-Regenerate:
-```bash
-python3 scripts/generate_data.py
-```
+Regenerate: `python3 scripts/generate_data.py`
 
 ---
 
@@ -321,59 +335,60 @@ python3 scripts/generate_data.py
 
 | Control | Implementation |
 |---------|----------------|
-| Password hashing | bcrypt via passlib |
-| Token authentication | JWT (HS256), 30-min expiry |
+| Password hashing | bcrypt (passlib) |
+| Authentication | JWT HS256, 30-min expiry |
 | Brute-force protection | 3-attempt lockout, 5-min cooldown |
-| Audit trail | Every mark override logged with actor, change, reason, timestamp |
-| Data privacy | Student IDs as UUIDs; no PII in default schema |
-| Offline inference | All LLM calls go to local Ollama — no external API keys |
+| Audit trail | Every override logged with actor, delta, reason, timestamp |
+| Data privacy | UUIDs for student IDs; all inference local |
+| Offline inference | All LLM calls go to Ollama — zero external data transmission |
+
+---
+
+## Offline vs Online Models
+
+See the full analysis in [docs/MODEL_COMPARISON.md](docs/MODEL_COMPARISON.md).
+
+**Summary:**
+
+| Factor | Offline (Ollama/llama3) | Online (GPT-4o, Claude) |
+|--------|------------------------|------------------------|
+| Data privacy | ✅ Complete — nothing leaves your server | ⚠️ Data sent to third-party API |
+| Cost at scale | ✅ Zero per-call cost after hardware | ❌ Pay per token (can be significant) |
+| Marking quality | ⚠️ Good for structured rubrics; weaker on nuance | ✅ Significantly better on complex, open-ended answers |
+| Question generation | ⚠️ Adequate; occasional JSON formatting issues | ✅ More consistent, richer questions |
+| Latency | ⚠️ 5–30s per marking call on CPU | ✅ 1–3s with API |
+| Setup complexity | ⚠️ Requires Docker + 5–10 GB disk | ✅ Just an API key |
+| Internet dependency | ✅ Fully offline | ❌ Requires internet |
+| Compliance (FERPA/GDPR) | ✅ Inherently compliant | ⚠️ Requires DPA with vendor |
+
+**Recommendation:** Start with **Ollama (offline)** for development, testing, and institutions with strict data governance requirements. Switch to **Claude or GPT-4o** for production marking if quality is the top priority and a data processing agreement is in place. The codebase is designed so switching only requires changing `LLM_MODEL_NAME` and pointing `OLLAMA_BASE_URL` to an OpenAI-compatible proxy.
 
 ---
 
 ## Development
 
-### Run backend locally
-
 ```bash
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+# Backend only
+cd backend && pip install -r requirements.txt
+uvicorn app.main:app --reload
 
-### Run frontend locally
-
-```bash
-cd frontend
-npm install
+# Frontend only
+cd frontend && npm install
 NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
-```
 
-### Run Celery worker locally
+# Celery worker
+cd backend && celery -A app.tasks.celery_app worker --loglevel=info
 
-```bash
-cd backend
-celery -A app.tasks.celery_app worker --loglevel=info
-```
-
-### Apply database migrations
-
-```bash
-cd backend
-alembic upgrade head
-
-# After model changes:
-alembic revision --autogenerate -m "your description"
-```
-
-### Rebuild a single service
-
-```bash
-docker compose up --build backend
+# Migrations
+cd backend && alembic upgrade head
 ```
 
 ---
 
 ## Troubleshooting
+
+**PDF extraction returns empty text**
+The PDF may be scanned (image-only). Open it in a PDF viewer — if you can't select text, it's a scan. Use a text-based PDF or OCR the document first.
 
 **Ollama model not found**
 ```bash
@@ -384,45 +399,38 @@ docker compose exec llm ollama pull nomic-embed-text
 **Database connection refused**
 ```bash
 docker compose logs db
-# Check POSTGRES_USER / POSTGRES_PASSWORD in .env match the db service environment
+# Check POSTGRES_USER / POSTGRES_PASSWORD match in .env
 ```
-
-**Celery worker not picking up tasks**
-```bash
-docker compose logs worker
-# Ensure CELERY_BROKER_URL=redis://broker:6379/0 in .env
-```
-
-**Frontend cannot reach backend**
-- In Docker: `NEXT_PUBLIC_API_URL=http://backend:8000`
-- Local dev: `NEXT_PUBLIC_API_URL=http://localhost:8000`
 
 **Marking stuck as pending**
 ```bash
-docker compose ps        # verify worker is running
+docker compose ps          # confirm worker is running
 docker compose logs worker
 ```
+
+**413 error on PDF upload**
+Increase `UPLOAD_MAX_SIZE_MB` in `.env` (default 25 MB).
 
 ---
 
 ## Roadmap
 
+- [ ] OCR fallback for scanned PDFs (pytesseract)
+- [ ] Chapter-range selector for large PDF textbooks
 - [ ] Role-based access control (RBAC) for multi-instructor deployments
-- [ ] Batch submission upload (CSV import) for large cohorts
 - [ ] Student results portal (view own marks and feedback)
 - [ ] Per-question analytics (difficulty calibration, discrimination index)
-- [ ] Configurable rubric editor with drag-and-drop criteria
 - [ ] PDF report export (per-student and cohort summary)
-- [ ] AWS Secrets Manager integration for production deployments
+- [ ] OpenAI-compatible API mode (swap Ollama for GPT-4o / Claude)
+- [ ] AWS Secrets Manager integration for production
 - [ ] Kubernetes Helm chart for horizontal scaling
-- [ ] Support for additional LLM backends (vLLM, AWS Bedrock, OpenAI-compatible)
 - [ ] Plagiarism / similarity detection across student answers
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
 
 ---
 
