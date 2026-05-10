@@ -32,7 +32,9 @@ class OllamaClient:
                 "num_predict": self.max_tokens,
             },
         }
-        async with httpx.AsyncClient(timeout=120) as client:
+        # Use long timeout for offline generation - local models can be very slow
+        timeout = 600 if self.model in ["phi3:mini", "llama3"] else 120
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{self.base_url}/api/generate", json=payload)
             resp.raise_for_status()
             return resp.json()["response"]
@@ -103,6 +105,38 @@ class OpenAIClient:
             return resp.json()["data"][0]["embedding"]
 
 
+class GeminiClient:
+    """Calls the Google Gemini Generative Language API."""
+
+    async def generate(self, prompt: str) -> str:
+        if not settings.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is not set.")
+        endpoint = (
+            f"{settings.GEMINI_BASE_URL}/models/"
+            f"{settings.ONLINE_LLM_MODEL}:generateContent"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": settings.LLM_TEMPERATURE,
+                "maxOutputTokens": settings.LLM_MAX_TOKENS,
+            },
+        }
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(
+                endpoint,
+                params={"key": settings.GEMINI_API_KEY},
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    async def embed(self, text: str) -> list[float]:
+        # Use local embeddings for consistency with pgvector length
+        return await slm_service.embed(text)
+
+
 # ── Module-level singletons ────────────────────────────────────────────────────
 
 # Tier-1: SLM — small, fast, deterministic
@@ -119,7 +153,7 @@ llm_service = OllamaClient(
     max_tokens=settings.LLM_MAX_TOKENS,
 )
 
-# Tier-3 online (optional)
+# Tier-3 online (optional, for marking fallback)
 def _build_online_client():
     if not settings.ONLINE_LLM_ENABLED:
         return None
@@ -127,6 +161,34 @@ def _build_online_client():
         return AnthropicClient()
     if settings.ONLINE_LLM_PROVIDER == "openai":
         return OpenAIClient()
+    if settings.ONLINE_LLM_PROVIDER == "gemini":
+        return GeminiClient()
     return None
 
 online_service = _build_online_client()
+
+# Generation service (for question generation) — uses small model for memory efficiency
+def _build_generation_client():
+    # Use phi3:mini (2.3 GiB) instead of llama3 (4.7 GiB) to avoid memory issues
+    # Generation doesn't need the largest model - phi3:mini is perfectly capable
+    if not settings.GENERATION_LLM_ENABLED:
+        # Use phi3:mini for generation (small but capable for structured output)
+        return OllamaClient(
+            model="phi3:mini",
+            temperature=0.2,  # Allow some variability for question generation
+            max_tokens=512,    # Reduced for faster generation on limited resources
+        )
+    if settings.GENERATION_LLM_PROVIDER == "anthropic":
+        return AnthropicClient()
+    if settings.GENERATION_LLM_PROVIDER == "openai":
+        return OpenAIClient()
+    if settings.GENERATION_LLM_PROVIDER == "gemini":
+        return GeminiClient()
+    # Default fallback: use local phi3:mini
+    return OllamaClient(
+        model="phi3:mini",
+        temperature=0.2,
+        max_tokens=2048,
+    )
+
+generation_service = _build_generation_client()

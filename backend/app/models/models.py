@@ -44,7 +44,7 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[UserRole] = mapped_column(SAEnum(UserRole), nullable=False)
+    role: Mapped[UserRole] = mapped_column(SAEnum(UserRole, native_enum=False), nullable=False)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -55,12 +55,15 @@ class Question(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     question_text: Mapped[str] = mapped_column(Text, nullable=False)
-    question_type: Mapped[QuestionType] = mapped_column(SAEnum(QuestionType), nullable=False)
+    question_type: Mapped[QuestionType] = mapped_column(
+        SAEnum(QuestionType, native_enum=False),
+        nullable=False,
+    )
     model_answer: Mapped[str] = mapped_column(Text, nullable=False)
     rubric: Mapped[str] = mapped_column(Text, nullable=False)
     max_marks: Mapped[float] = mapped_column(Float, nullable=False)
     topic_tag: Mapped[str] = mapped_column(String(100))
-    difficulty: Mapped[Difficulty] = mapped_column(SAEnum(Difficulty))
+    difficulty: Mapped[Difficulty] = mapped_column(SAEnum(Difficulty, native_enum=False))
     source_page_range: Mapped[str | None] = mapped_column(String(20), nullable=True)   # NEW e.g. "45-52"
     source_chunk: Mapped[str | None] = mapped_column(String(120), nullable=True)        # NEW e.g. "Ch2 § Measures of Spread"
     embedding: Mapped[list | None] = mapped_column(Vector(768), nullable=True)
@@ -114,7 +117,10 @@ class IngestJob(Base):
     total_pages: Mapped[int] = mapped_column(Integer, default=0)
     question_type: Mapped[str] = mapped_column(String(20), default="short_answer")
     count_per_chapter: Mapped[int] = mapped_column(Integer, default=10)
-    status: Mapped[IngestJobStatus] = mapped_column(SAEnum(IngestJobStatus), default=IngestJobStatus.queued)
+    status: Mapped[IngestJobStatus] = mapped_column(
+        SAEnum(IngestJobStatus, native_enum=False),
+        default=IngestJobStatus.queued,
+    )
     chapters_done: Mapped[int] = mapped_column(Integer, default=0)
     questions_created: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

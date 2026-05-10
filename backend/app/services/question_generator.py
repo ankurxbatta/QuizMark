@@ -6,12 +6,14 @@ Pipeline:
   2. Score and rank chunks by teaching value
   3. Group chunks by topic so questions are spread across all chapters
   4. For each topic group, run Two-Stage generation:
-       Stage A — SLM (phi3:mini): rapid concept extraction from chunk
-       Stage B — LLM (llama3):   rich question construction with rubric
+       Stage A — Online LLM: rapid concept extraction from chunk
+       Stage B — Online LLM: rich question construction with rubric
   5. Post-process: validate JSON, deduplicate, assign final metadata
   6. Return sorted list of question dicts ready for DB insertion
 
 For plain-text (.txt) input, falls back to the original single-stage approach.
+
+Note: Question generation now uses online LLM (Claude/GPT/Gemini) for better speed and reliability.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import json
 import re
 from typing import Optional
 
-from app.services.llm_service import slm_service, llm_service
+from app.services.llm_service import generation_service
 from app.services.pdf_service import TextChunk
 
 
@@ -28,7 +30,7 @@ from app.services.pdf_service import TextChunk
 #  Prompt templates
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Stage A: SLM extracts raw concept skeletons from a single chunk
+# Stage A: Online LLM extracts raw concept skeletons from a single chunk
 _SLM_CONCEPT_PROMPT = """\
 You are a statistics exam question author reading a textbook section.
 
@@ -185,13 +187,13 @@ def _select_chunks(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _slm_extract_concepts(chunk: TextChunk, count: int) -> list[str]:
-    """Stage A: use SLM to extract concept skeletons from one chunk."""
+    """Stage A: use online LLM to extract concept skeletons from one chunk."""
     prompt = _SLM_CONCEPT_PROMPT.format(
         chunk_text=chunk.text[:2500],
         count=count,
     )
     try:
-        raw = await slm_service.generate(prompt)
+        raw = await generation_service.generate(prompt)
         lines = []
         for line in raw.strip().splitlines():
             line = line.strip()
@@ -209,7 +211,7 @@ async def _llm_enrich_chunk(
     skeletons: list[str],
     question_type: str,
 ) -> list[dict]:
-    """Stage B: use LLM to build full questions from skeletons + chunk context."""
+    """Stage B: use online LLM to build full questions from skeletons + chunk context."""
     if not skeletons:
         return []
 
@@ -219,7 +221,7 @@ async def _llm_enrich_chunk(
         qtype=question_type,
     )
     try:
-        raw = await llm_service.generate(prompt)
+        raw = await generation_service.generate(prompt)
         return _parse_json_array(raw)
     except Exception:
         return []
@@ -231,18 +233,18 @@ async def _generate_from_chunk(
     questions_per_chunk: int,
 ) -> list[dict]:
     """Full two-stage pipeline for a single chunk."""
-    # Stage A — SLM concept extraction
+    # Stage A — concept extraction
     skeletons = await _slm_extract_concepts(chunk, questions_per_chunk)
 
     if not skeletons:
-        # SLM failed — go direct to LLM with chunk context only
+        # Stage A failed — go direct to LLM with chunk context only
         prompt = _PLAIN_TEXT_PROMPT.format(
             content=chunk.to_prompt_block(),
             count=questions_per_chunk,
             qtype=question_type,
         )
         try:
-            raw = await llm_service.generate(prompt)
+            raw = await generation_service.generate(prompt)
             questions = _parse_json_array(raw)
         except Exception:
             return []
@@ -275,15 +277,21 @@ async def generate_questions_from_chunks(
     Uses two-stage SLM+LLM pipeline per chunk.
     Spreads questions across topics unless topic_filter is set.
     """
+    print(f"[GEN] generate_questions_from_chunks: {len(chunks)} chunks, qtype={question_type}, count={count}")
+    
     if not chunks:
+        print("[GEN] No chunks provided!")
         return []
 
     # How many chunks to process and questions per chunk
     # Use more chunks for larger counts to ensure diversity
     num_chunks = min(max(count // 3, 3), len(chunks), 15)
     questions_per_chunk = max(2, (count // num_chunks) + 1)
+    
+    print(f"[GEN] Processing {num_chunks} chunks, {questions_per_chunk} questions per chunk")
 
     selected = _select_chunks(chunks, num_chunks, topic_filter)
+    print(f"[GEN] Selected {len(selected)} chunks")
 
     # Process chunks concurrently (up to 3 at a time to avoid OOM on Ollama)
     all_questions: list[dict] = []
@@ -296,6 +304,8 @@ async def generate_questions_from_chunks(
     results = await asyncio.gather(*[_bounded(c) for c in selected])
     for r in results:
         all_questions.extend(r)
+    
+    print(f"[GEN] Generated {len(all_questions)} questions from all chunks")
 
     # Deduplicate by question_text similarity (simple prefix check)
     seen: set[str] = set()
@@ -305,9 +315,12 @@ async def generate_questions_from_chunks(
         if key and key not in seen:
             seen.add(key)
             deduped.append(q)
+    
+    print(f"[GEN] After dedup: {len(deduped)} questions")
 
     # Validate required fields
     valid = _validate_questions(deduped, question_type)
+    print(f"[GEN] After validation: {len(valid)} questions")
 
     return valid[:count]
 
@@ -318,50 +331,42 @@ async def generate_questions(
     count: int = 20,
 ) -> list[dict]:
     """
-    Legacy entry point for plain-text content (non-PDF).
-    Uses the original two-stage approach with the full text.
+    Simplified direct generation without intermediate skeleton extraction.
+    Uses the fallback approach that works better with limited resources.
     """
-    # Stage A: SLM skeleton extraction from plain text
-    slm_prompt = _SLM_CONCEPT_PROMPT.format(
-        chunk_text=content[:3000],
+    print(f"[GEN] Starting direct question generation with question_type={question_type}, count={count}")
+    print(f"[GEN] Content length: {len(content)} chars")
+    
+    # Direct LLM generation without skeleton extraction
+    # This is more reliable on resource-constrained systems
+    prompt = _PLAIN_TEXT_PROMPT.format(
+        content=content[:4000],
         count=count,
+        qtype=question_type,
     )
     try:
-        slm_raw = await slm_service.generate(slm_prompt)
-        skeletons = []
-        for line in slm_raw.strip().splitlines():
-            line = line.strip()
-            if "|" in line:
-                parts = line.split("|", 1)
-                if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                    skeletons.append(f"- {parts[0].strip()} | {parts[1].strip()}")
-    except Exception:
-        skeletons = []
-
-    if not skeletons:
-        # Direct LLM fallback
-        prompt = _PLAIN_TEXT_PROMPT.format(
-            content=content[:4000],
-            count=count,
-            qtype=question_type,
-        )
-        raw = await llm_service.generate(prompt)
-        return _validate_questions(_parse_json_array(raw), question_type)[:count]
-
-    # Stage B: LLM enrichment in batches of 15 skeletons
-    all_questions: list[dict] = []
-    batch_size = 15
-    for i in range(0, len(skeletons), batch_size):
-        batch = skeletons[i: i + batch_size]
-        prompt = _LLM_ENRICH_PROMPT.format(
-            chunk_text=content[:2000],
-            skeletons="\n".join(batch),
-            qtype=question_type,
-        )
-        raw = await llm_service.generate(prompt)
-        all_questions.extend(_parse_json_array(raw))
-
-    return _validate_questions(all_questions, question_type)[:count]
+        print("[GEN] Generating questions directly...")
+        raw = await generation_service.generate(prompt)
+        print(f"[GEN] LLM response length: {len(raw)}")
+        all_questions = _parse_json_array(raw)
+        print(f"[GEN] Generated {len(all_questions)} questions")
+    except Exception as e:
+        print(f"[GEN] Direct generation failed: {e}")
+        all_questions = []
+    
+    result = _validate_questions(all_questions, question_type)[:count]
+    print(f"[GEN] Valid after validation: {len(result)}")
+    return result
+            batch_questions = _parse_json_array(raw)
+            print(f"[GEN] Batch generated {len(batch_questions)} questions")
+            all_questions.extend(batch_questions)
+        except Exception as e:
+            print(f"[GEN] Batch failed: {e}")
+    
+    print(f"[GEN] Total questions from all batches: {len(all_questions)}")
+    result = _validate_questions(all_questions, question_type)[:count]
+    print(f"[GEN] Valid questions after validation: {len(result)}")
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

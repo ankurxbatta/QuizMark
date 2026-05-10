@@ -20,7 +20,8 @@ export default function LoginPage() {
       const { data } = await api.post("/auth/login", { username, password });
       Cookies.set("token", data.access_token, { expires: 1 / 48 }); // 30 min
       Cookies.set("role", role);
-      router.push(role === "instructor" ? "/instructor/dashboard" : "/student/assessment");
+      // Route groups are not part of the URL path in the App Router.
+      router.push(role === "instructor" ? "/dashboard" : "/assessment");
     } catch (err: any) {
       setError(err.response?.data?.detail || "Login failed. Please try again.");
     } finally {

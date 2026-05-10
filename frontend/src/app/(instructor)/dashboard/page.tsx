@@ -39,18 +39,18 @@ export default function InstructorDashboard() {
   }, []);
 
   const cards = [
-    { label: "Q&A Bank", value: stats.total_questions, icon: Database, href: "/instructor/questions", color: "bg-indigo-50 text-indigo-700" },
-    { label: "Pending Marking", value: stats.pending_marking, icon: Clock, href: "/instructor/marking", color: "bg-yellow-50 text-yellow-700" },
-    { label: "Flagged Reviews", value: stats.flagged, icon: Flag, href: "/instructor/marking?tab=flagged", color: "bg-red-50 text-red-700" },
+    { label: "Q&A Bank", value: stats.total_questions, icon: Database, href: "/questions", color: "bg-indigo-50 text-indigo-700" },
+    { label: "Pending Marking", value: stats.pending_marking, icon: Clock, href: "/marking", color: "bg-yellow-50 text-yellow-700" },
+    { label: "Flagged Reviews", value: stats.flagged, icon: Flag, href: "/marking?tab=flagged", color: "bg-red-50 text-red-700" },
     { label: "Last Backup", value: stats.last_backup || "Never", icon: CheckSquare, href: "#", color: "bg-green-50 text-green-700" },
   ];
 
   const quickActions = [
-    { label: "Upload Content & Generate Questions", icon: Upload, href: "/instructor/generate" },
-    { label: "Manage Q&A Bank", icon: BookOpen, href: "/instructor/questions" },
-    { label: "Review & Mark Submissions", icon: CheckSquare, href: "/instructor/marking" },
-    { label: "Pipeline Analytics", icon: BarChart2, href: "/instructor/analytics" },
-    { label: "Export Results", icon: Download, href: "/instructor/export" },
+    { label: "Upload Content & Generate Questions", icon: Upload, href: "/generate" },
+    { label: "Manage Q&A Bank", icon: BookOpen, href: "/questions" },
+    { label: "Review & Mark Submissions", icon: CheckSquare, href: "/marking" },
+    { label: "Pipeline Analytics", icon: BarChart2, href: "/analytics" },
+    { label: "Export Results", icon: Download, href: "/export" },
   ];
 
   return (

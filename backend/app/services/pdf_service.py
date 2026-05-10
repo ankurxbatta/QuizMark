@@ -25,25 +25,9 @@ import pdfplumber
 from pypdf import PdfReader
 
 
-# ── Textbook chapter map (OpenStax Introductory Business Statistics) ──────────
-# Maps chapter title keywords → canonical topic tag
-CHAPTER_TOPIC_MAP = {
-    "sampling and data":             "Sampling and Data",
-    "descriptive statistics":        "Descriptive Statistics",
-    "probability topics":            "Probability",
-    "discrete random variables":     "Discrete Random Variables",
-    "continuous random variables":   "Continuous Random Variables",
-    "normal distribution":           "Normal Distribution",
-    "central limit theorem":         "Central Limit Theorem",
-    "confidence intervals":          "Confidence Intervals",
-    "hypothesis testing with one":   "Hypothesis Testing (One Sample)",
-    "hypothesis testing with two":   "Hypothesis Testing (Two Samples)",
-    "chi-square":                    "Chi-Square Tests",
-    "f distribution":                "F Distribution and ANOVA",
-    "anova":                         "ANOVA",
-    "linear regression":             "Linear Regression and Correlation",
-    "correlation":                   "Linear Regression and Correlation",
-}
+# ── No built-in topic mapping ──────────────────────────────────────────────────
+# Topics are extracted directly from chapter titles in the PDF
+# No normalization is applied — raw chapter titles are used as topic tags
 
 # Patterns that identify TEACHING content worth keeping
 _TEACHING_SIGNALS = re.compile(
@@ -189,11 +173,8 @@ def _detect_chapter(text: str) -> tuple[int, str]:
 
 
 def _resolve_topic(chapter_title: str) -> str:
-    title_lower = chapter_title.lower()
-    for keyword, topic in CHAPTER_TOPIC_MAP.items():
-        if keyword in title_lower:
-            return topic
-    return chapter_title
+    """Return chapter title as-is as the topic. No normalization applied."""
+    return chapter_title.strip() if chapter_title else "General"
 
 
 def _extract_key_terms(text: str) -> list[str]:

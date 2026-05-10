@@ -28,12 +28,19 @@ class Settings(BaseSettings):
     SLM_TEMPERATURE: float = 0.0
     SLM_MAX_TOKENS: int = 256
 
-    # ── Online LLM (optional) ────────────────────────────────────────────────
+    # ── Online LLM (optional, for marking fallback) ──────────────────────────
     ONLINE_LLM_ENABLED: bool = False
     ONLINE_LLM_PROVIDER: str = "anthropic"
     ONLINE_LLM_MODEL: str = "claude-sonnet-4-20250514"
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
+
+    # ── Generation LLM (for question generation) ─────────────────────────────
+    GENERATION_LLM_ENABLED: bool = True
+    GENERATION_LLM_PROVIDER: str = "anthropic"
+    GENERATION_LLM_MODEL: str = "claude-sonnet-4-20250514"
 
     # ── RAG ──────────────────────────────────────────────────────────────────
     EMBEDDING_MODEL: str = "nomic-embed-text"

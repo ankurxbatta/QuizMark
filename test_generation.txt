@@ -1,0 +1,15 @@
+Chapter 1: Statistics Basics
+
+Statistics is the science of collecting, analyzing, and interpreting data.
+A population is the entire group being studied.
+A sample is a subset of the population.
+The mean is the average of all values in a dataset.
+The median is the middle value when data is ordered.
+The mode is the value that appears most frequently.
+
+The range measures the spread from minimum to maximum.
+Variance measures how spread out values are from the mean.
+Standard deviation is the square root of variance.
+
+A z-score tells us how many standard deviations a value is from the mean.
+The normal distribution is bell-shaped and symmetric around the mean.
