@@ -21,6 +21,8 @@ class QuestionUpdate(QuestionCreate):
 
 class QuestionOut(QuestionCreate):
     id: UUID
+    source_page_range: Optional[str] = None
+    source_chunk: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -37,10 +39,12 @@ class SubmissionOut(BaseModel):
     student_id: UUID
     question_id: UUID
     answer_text: str
-    auto_mark: Optional[float]
-    auto_feedback: Optional[str]
-    override_mark: Optional[float]
-    override_feedback: Optional[str]
+    auto_mark: Optional[float] = None
+    auto_feedback: Optional[str] = None
+    auto_confidence: Optional[float] = None
+    marking_route: Optional[str] = None
+    override_mark: Optional[float] = None
+    override_feedback: Optional[str] = None
     is_flagged: bool
     is_marked: bool
     submitted_at: datetime
