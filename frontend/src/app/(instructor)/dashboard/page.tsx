@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import Link from "next/link";
 import {
-  BookOpen, Upload, CheckSquare, Flag, Download, Clock, Database
+  BookOpen, Upload, CheckSquare, Flag,
+  Download, Clock, Database, BarChart2
 } from "lucide-react";
 
 interface Stats {
@@ -24,7 +25,7 @@ export default function InstructorDashboard() {
   useEffect(() => {
     Promise.all([
       api.get("/questions/count"),
-      api.get("/submissions?flagged_only=false"),
+      api.get("/submissions/"),
       api.get("/marking/flagged"),
     ]).then(([qCount, subs, flagged]) => {
       const submissions = subs.data as any[];
@@ -48,20 +49,23 @@ export default function InstructorDashboard() {
     { label: "Upload Content & Generate Questions", icon: Upload, href: "/instructor/generate" },
     { label: "Manage Q&A Bank", icon: BookOpen, href: "/instructor/questions" },
     { label: "Review & Mark Submissions", icon: CheckSquare, href: "/instructor/marking" },
+    { label: "Pipeline Analytics", icon: BarChart2, href: "/instructor/analytics" },
     { label: "Export Results", icon: Download, href: "/instructor/export" },
   ];
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700">QuizMark — Instructor Dashboard</h1>
+        <div>
+          <h1 className="text-xl font-bold text-indigo-700">QuizMark — Instructor Dashboard</h1>
+          <p className="text-xs text-gray-400 mt-0.5">Hybrid SLM + RAG + LLM auto-marking</p>
+        </div>
         <Link href="/" className="text-sm text-gray-500 hover:text-red-600 transition-colors">Sign out</Link>
       </header>
 
       <main className="max-w-6xl mx-auto px-8 py-10 space-y-10">
-        {/* Stats */}
         <section>
-          <h2 className="text-lg font-semibold text-gray-700 mb-4">Overview</h2>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Overview</h2>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
             {cards.map(({ label, value, icon: Icon, href, color }) => (
               <Link key={label} href={href}
@@ -74,9 +78,8 @@ export default function InstructorDashboard() {
           </div>
         </section>
 
-        {/* Quick Actions */}
         <section>
-          <h2 className="text-lg font-semibold text-gray-700 mb-4">Quick Actions</h2>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Quick Actions</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {quickActions.map(({ label, icon: Icon, href }) => (
               <Link key={label} href={href}
@@ -85,6 +88,34 @@ export default function InstructorDashboard() {
                 <span className="font-medium text-gray-700">{label}</span>
               </Link>
             ))}
+          </div>
+        </section>
+
+        {/* Hybrid pipeline explainer */}
+        <section className="bg-white rounded-xl border p-6 space-y-3">
+          <h2 className="text-sm font-semibold text-gray-700">How the hybrid pipeline works</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+            <div className="flex gap-3 items-start">
+              <span className="mt-0.5 w-5 h-5 rounded-full bg-green-100 text-green-700 text-xs font-bold flex items-center justify-center flex-shrink-0">H</span>
+              <div>
+                <p className="font-medium text-gray-700">HIGH confidence ≥85%</p>
+                <p className="text-gray-500 text-xs mt-0.5">SLM mark accepted directly. No LLM call. ~2s per answer.</p>
+              </div>
+            </div>
+            <div className="flex gap-3 items-start">
+              <span className="mt-0.5 w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center flex-shrink-0">M</span>
+              <div>
+                <p className="font-medium text-gray-700">MID confidence 55–85%</p>
+                <p className="text-gray-500 text-xs mt-0.5">RAG retrieves similar answers. Offline LLM (llama3) marks with context.</p>
+              </div>
+            </div>
+            <div className="flex gap-3 items-start">
+              <span className="mt-0.5 w-5 h-5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold flex items-center justify-center flex-shrink-0">L</span>
+              <div>
+                <p className="font-medium text-gray-700">LOW confidence &lt;55%</p>
+                <p className="text-gray-500 text-xs mt-0.5">Wide RAG retrieval. Online LLM if enabled. Always flagged for review.</p>
+              </div>
+            </div>
           </div>
         </section>
       </main>

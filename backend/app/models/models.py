@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import String, Text, Float, Integer, DateTime, Boolean, ForeignKey, Enum as SAEnum
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID
 from pgvector.sqlalchemy import Vector
 from app.core.database import Base
@@ -23,6 +23,12 @@ class Difficulty(str, enum.Enum):
 class UserRole(str, enum.Enum):
     instructor = "instructor"
     student = "student"
+
+
+class MarkingRoute(str, enum.Enum):
+    HIGH = "HIGH"       # SLM only, no LLM call
+    MID = "MID"         # RAG + offline LLM
+    LOW = "LOW"         # RAG + online LLM or flagged
 
 
 class User(Base):
@@ -59,11 +65,23 @@ class Submission(Base):
     student_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("questions.id"))
     answer_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Auto-marking outputs
     auto_mark: Mapped[float | None] = mapped_column(Float, nullable=True)
     auto_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)   # NEW
+    marking_route: Mapped[str | None] = mapped_column(String(10), nullable=True)  # NEW HIGH/MID/LOW
+
+    # SLM pre-scorer signals (stored for analytics / model improvement)
+    slm_keyword_coverage: Mapped[float | None] = mapped_column(Float, nullable=True)   # NEW
+    slm_semantic_sim: Mapped[float | None] = mapped_column(Float, nullable=True)        # NEW
+    slm_raw_score: Mapped[float | None] = mapped_column(Float, nullable=True)           # NEW
+
+    # Instructor override
     override_mark: Mapped[float | None] = mapped_column(Float, nullable=True)
     override_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     is_marked: Mapped[bool] = mapped_column(Boolean, default=False)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
