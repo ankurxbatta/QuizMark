@@ -1,93 +1,121 @@
-# Marking tools
+# PDF Quiz Question Generator
 
+This is my final year project — a web app that lets instructors upload a PDF textbook and automatically generate exam questions from it using AI. It parses the PDF into sections, figures out which parts are actually teaching content, and uses an LLM (I'm using Claude but it works with GPT or Gemini too) to write proper questions with model answers and marking rubrics.
 
+I built this because our department wastes a lot of time writing questions by hand from the same textbooks every year. The idea is that an instructor uploads a chapter, picks how many questions they want and what type (short answer, MCQ, or true/false), and gets back a question bank they can review and edit before using.
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## What it does
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+- Upload a `.pdf` or `.txt` file
+- Detects chapters and sections automatically from the PDF structure
+- Filters out exercises, glossaries, and boilerplate — only keeps actual teaching content
+- Sends content chunks to an LLM which returns questions in structured JSON
+- Each question comes with a model answer, a rubric (one criterion per mark), difficulty level, and a reference back to which pages it came from
+- Questions are saved to a database so you can browse, edit, and manage them
 
-## Add your files
+---
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Tech stack
+
+I used:
+
+- **Next.js 14** with TypeScript and Tailwind for the frontend
+- **FastAPI** (Python 3.11) for the backend API
+- **PostgreSQL** with the pgvector extension to store questions and their embeddings
+- **Ollama** running locally for embeddings (nomic-embed-text) and as a fallback LLM
+- **Claude / GPT-4o / Gemini** for the actual question generation (configurable)
+- **Celery + Redis** for the async background jobs when processing large textbooks
+- **Docker Compose** to run everything together
+- **Alembic** for database migrations
+
+---
+
+## Running it locally
+
+You need Docker Desktop (allocate at least 6 GB RAM) and an API key from one of the LLM providers.
+
+```bash
+git clone <repo-url>
+cd marking-tools
+cp .env.example .env
+```
+
+Open `.env` and fill in at minimum:
+
+```env
+SECRET_KEY=somethinglong
+POSTGRES_PASSWORD=yourpassword
+GENERATION_LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Then:
+
+```bash
+# Mac/Linux
+chmod +x setup.sh && ./setup.sh
+
+# Windows
+setup.bat
+```
+
+Once everything is up, go to http://localhost:3000 and log in with the default admin credentials (set in `.env`).
+
+---
+
+## How to generate questions
+
+1. Log in as instructor
+2. Go to **Generate Questions**
+3. Upload a PDF or text file
+4. Optionally scan for chapters first so you can filter to one topic
+5. Choose question type and how many you want (up to 50 at a time)
+6. Hit Generate — takes around 15–30 seconds for a chapter
+7. Review the results in the Questions bank and edit anything that needs fixing
+
+For a full textbook I added an async mode that runs as a background job — you submit it and come back later to check progress.
+
+---
+
+## Project structure
+
+The important bits:
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/monicais/marking-tools.git
-git branch -M main
-git push -uf origin main
+backend/app/services/
+    pdf_service.py          — PDF parsing and chunking
+    question_generator.py   — chunk ranking, LLM prompting, validation
+    llm_service.py          — provider clients (Anthropic, OpenAI, Gemini, Ollama)
+
+backend/app/api/v1/
+    questions.py            — all the API endpoints
+
+backend/app/tasks/
+    ingest_tasks.py         — background Celery job for large PDFs
+
+frontend/src/app/(instructor)/
+    generate/               — upload and generate UI
+    questions/              — question bank browser
 ```
 
-## Integrate with your tools
+---
 
-* [Set up project integrations](https://gitlab.com/monicais/marking-tools/-/settings/integrations)
+## Known issues / things I'd improve
 
-## Collaborate with your team
+- Scanned PDFs (image-based) don't work — you need a text-based PDF
+- The chapter detection regex works on most textbooks I've tested but will probably miss some edge cases
+- The fallback questions (when the LLM fails) are pretty basic — just recall-level
+- No export to CSV or Word yet, that's on the to-do list
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+---
 
-## Test and Deploy
+## Docs
 
-Use the built-in continuous integration in GitLab.
+More detail on how things work internally:
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- [docs/GENERATION_PIPELINE.md](docs/GENERATION_PIPELINE.md) — how the PDF parsing and generation pipeline works
+- [docs/API.md](docs/API.md) — API endpoints reference
+- [docs/GENERATION_LLM.md](docs/GENERATION_LLM.md) — setting up and switching LLM providers
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — all the environment variables
