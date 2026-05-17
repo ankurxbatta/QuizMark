@@ -78,14 +78,18 @@ For mcq:
 - Provide exactly 4 options labelled A, B, C, D.
 - Only one option is correct; distractors must be plausible but clearly wrong.
 - Model answer: state the correct letter and explain why it is correct.
+- Rubric: single criterion - full marks if the correct option is selected.
 
 For true_false:
 - Write a precise statement that is clearly true OR clearly false.
 - Model answer: state "True" or "False" and give a 1-2 sentence justification.
+- Rubric: single criterion - full marks if the correct truth value is selected.
 
 For ALL question types also provide:
-- rubric: one criterion per mark, stated as what the student must include.
-  Format: "1 mark: <criterion>. 1 mark: <criterion>. ..."
+- rubric:
+    - short_answer: one criterion per mark, stated as what the student must include.
+        Format: "1 mark: <criterion>. 1 mark: <criterion>. ..."
+    - mcq/true_false: single criterion that awards full marks for the correct choice.
 - max_marks: integer (2 for trivial recall, 4 for standard, 6 for analysis, 8 for multi-step)
 - topic_tag: the chapter/topic this question comes from (e.g. "Normal Distribution")
 - difficulty: easy | medium | hard
@@ -113,7 +117,8 @@ Rules:
 - For short_answer: 2-5 sentence model answers.
 - For mcq: 4 options, one correct, explain why in model_answer.
 - For true_false: clear statement + True/False justification.
-- Include detailed rubrics (one criterion per mark).
+- For short_answer: rubric is one criterion per mark.
+- For mcq/true_false: rubric is a single criterion that awards full marks for the correct choice.
 - Spread questions across different concepts in the source.
 - max_marks: 2-8 depending on complexity.
 - difficulty: easy | medium | hard.
@@ -547,10 +552,13 @@ def _fallback_questions_from_text(
     for i in range(count):
         sentence = sentences[i % len(sentences)]
         term = _choose_term(sentence, terms, i)
-        rubric = (
-            "1 mark: identifies the relevant concept. "
-            "1 mark: explains it consistently with the source text."
-        )
+        if question_type in {"mcq", "true_false"}:
+            rubric = "Full marks: selects the correct option."
+        else:
+            rubric = (
+                "1 mark: identifies the relevant concept. "
+                "1 mark: explains it consistently with the source text."
+            )
 
         if question_type == "mcq":
             if term != "the concept" and re.search(rf"\b{re.escape(term)}\b", sentence, re.IGNORECASE):

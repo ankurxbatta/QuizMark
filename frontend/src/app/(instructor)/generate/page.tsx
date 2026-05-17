@@ -32,8 +32,16 @@ interface AsyncJob {
   filename: string;
   total_pages: number;
   status: "queued" | "processing" | "done" | "failed";
+  total_chapters: number;
   chapters_done: number;
+  current_chapter?: number | null;
+  current_chapter_title?: string | null;
   questions_created: number;
+  progress_message?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  last_heartbeat_at?: string | null;
   error?: string;
 }
 
@@ -77,6 +85,7 @@ export default function GeneratePage() {
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [asyncJob, setAsyncJob] = useState<AsyncJob | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [pollError, setPollError] = useState("");
 
   const inputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -129,13 +138,14 @@ export default function GeneratePage() {
         try {
           const { data } = await api.get(`/questions/jobs/${asyncJobId}`);
           setAsyncJob(data);
+          setPollError("");
           if (data.status === "done" || data.status === "failed") {
             clearInterval(pollRef.current!);
             setStatus(data.status === "done" ? "done" : "error");
             if (data.status === "failed") setErrorMsg(data.error || "Ingestion failed.");
           }
         } catch {
-          clearInterval(pollRef.current!);
+          setPollError("Live status check failed. Retrying…");
         }
       }, 3000);
     }
@@ -148,6 +158,7 @@ export default function GeneratePage() {
     setSyncResult(null);
     setAsyncJob(null);
     setErrorMsg("");
+    setPollError("");
     setChapters([]);
     setTopicFilter("All chapters");
     if (pollRef.current) clearInterval(pollRef.current);
@@ -170,7 +181,7 @@ export default function GeneratePage() {
           `/questions/generate/async?question_type=${qtype}&count_per_chapter=${countPerChapter}`,
           fd
         );
-        setAsyncJob({ ...data, chapters_done: 0, questions_created: 0 });
+        setAsyncJob(data);
         setStatus("loading"); // will transition to "done" via polling
       } else {
         // Synchronous quick generate
@@ -193,13 +204,28 @@ export default function GeneratePage() {
 
   // ── Job progress display ──────────────────────────────────────────────────
   const totalChapters = chapters.length || 13; // fallback estimate
+  const totalChaptersForJob =
+    asyncJob && asyncJob.total_chapters > 0 ? asyncJob.total_chapters : totalChapters;
   const jobPct = asyncJob
     ? asyncJob.status === "done"
       ? 100
       : asyncJob.total_pages > 0
-      ? Math.min((asyncJob.chapters_done / totalChapters) * 100, 95)
+      ? Math.min((asyncJob.chapters_done / totalChaptersForJob) * 100, 95)
       : 0
     : 0;
+  const now = Date.now();
+  const queuedForSeconds =
+    asyncJob?.status === "queued" && asyncJob.created_at
+      ? Math.max(0, Math.floor((now - Date.parse(asyncJob.created_at)) / 1000))
+      : 0;
+  const heartbeatAgeSeconds =
+    asyncJob?.last_heartbeat_at
+      ? Math.max(0, Math.floor((now - Date.parse(asyncJob.last_heartbeat_at)) / 1000))
+      : 0;
+  const stalled =
+    asyncJob?.status === "processing" &&
+    asyncJob.last_heartbeat_at &&
+    heartbeatAgeSeconds > 180;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -451,8 +477,32 @@ export default function GeneratePage() {
 
               <ProgressBar
                 pct={jobPct}
-                label={`Chapters processed: ${asyncJob.chapters_done} / ${totalChapters}`}
+                label={`Chapters processed: ${asyncJob.chapters_done} / ${totalChaptersForJob}`}
               />
+
+              {pollError && (
+                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  {pollError}
+                </p>
+              )}
+
+              {asyncJob.progress_message && (
+                <p className="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                  {asyncJob.progress_message}
+                </p>
+              )}
+
+              {asyncJob.status === "queued" && queuedForSeconds > 120 && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  This job has been queued for over 2 minutes. Worker may be offline.
+                </p>
+              )}
+
+              {stalled && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  No worker heartbeat for over 3 minutes. The worker may be stuck.
+                </p>
+              )}
 
               <div className="grid grid-cols-3 gap-3 text-center text-sm">
                 <div className="bg-gray-50 rounded-lg p-3">
@@ -460,14 +510,25 @@ export default function GeneratePage() {
                   <p className="text-xs text-gray-500 mt-0.5">Questions created</p>
                 </div>
                 <div className="bg-gray-50 rounded-lg p-3">
-                  <p className="text-2xl font-bold text-gray-700">{asyncJob.chapters_done}</p>
-                  <p className="text-xs text-gray-500 mt-0.5">Chapters done</p>
+                  <p className="text-2xl font-bold text-gray-700">{asyncJob.current_chapter ?? "—"}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Current chapter</p>
                 </div>
                 <div className="bg-gray-50 rounded-lg p-3">
                   <p className="text-2xl font-bold text-gray-400">{asyncJob.total_pages}</p>
                   <p className="text-xs text-gray-500 mt-0.5">Total pages</p>
                 </div>
               </div>
+
+              {(asyncJob.current_chapter_title || asyncJob.last_heartbeat_at) && (
+                <div className="text-xs text-gray-500 space-y-1">
+                  {asyncJob.current_chapter_title && (
+                    <p>Working on: <span className="text-gray-700">{asyncJob.current_chapter_title}</span></p>
+                  )}
+                  {asyncJob.last_heartbeat_at && (
+                    <p>Last worker heartbeat: {new Date(asyncJob.last_heartbeat_at).toLocaleString()}</p>
+                  )}
+                </div>
+              )}
 
               {asyncJob.status === "done" && (
                 <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-5 py-4 text-green-700">
@@ -476,6 +537,13 @@ export default function GeneratePage() {
                     <p className="font-semibold">{asyncJob.questions_created} questions generated from {asyncJob.filename}</p>
                     <p className="text-sm text-green-600 mt-0.5">All chapters processed. View them in the Q&amp;A bank.</p>
                   </div>
+                </div>
+              )}
+
+              {asyncJob.status === "done" && asyncJob.error && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 text-amber-700 text-sm">
+                  <p className="font-semibold mb-1">Completed with warnings</p>
+                  <p>{asyncJob.error}</p>
                 </div>
               )}
             </div>

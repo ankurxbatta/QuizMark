@@ -117,7 +117,15 @@ Returns immediately with a job ID:
   "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "filename": "bigstatisticsbook.pdf",
   "total_pages": 631,
-  "status": "queued"
+  "status": "queued",
+  "total_chapters": 0,
+  "chapters_done": 0,
+  "current_chapter": null,
+  "current_chapter_title": null,
+  "questions_created": 0,
+  "progress_message": "Queued for worker pickup.",
+  "last_heartbeat_at": "2026-05-10T12:00:00Z",
+  "created_at": "2026-05-10T12:00:00Z"
 }
 ```
 
@@ -135,15 +143,25 @@ Check how an async job is going.
   "filename": "bigstatisticsbook.pdf",
   "total_pages": 631,
   "status": "processing",
+  "total_chapters": 12,
   "chapters_done": 4,
+  "current_chapter": 5,
+  "current_chapter_title": "Normal Distribution",
   "questions_created": 83,
+  "progress_message": "Processing Chapter 5: Normal Distribution (5/12).",
+  "last_heartbeat_at": "2026-05-10T12:12:10Z",
   "error": null,
+  "created_at": "2026-05-10T12:00:00Z",
   "started_at": "2026-05-10T12:00:00Z",
   "completed_at": null
 }
 ```
 
-Status goes: `queued` → `processing` → `completed` or `failed`. If it fails, `error` will have a message.
+Status goes: `queued` → `processing` → `done` or `failed`.
+
+- `progress_message` tells you what stage/chapter is currently running.
+- `last_heartbeat_at` is updated by the worker while processing.
+- A `done` job may still include an `error` value if some chapters failed but others succeeded.
 
 ---
 

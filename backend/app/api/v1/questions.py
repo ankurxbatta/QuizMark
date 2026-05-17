@@ -10,7 +10,9 @@ from app.services.pdf_service import parse_pdf_into_chunks, extract_text_from_pd
 from app.core.config import settings
 from app.tasks.ingest_tasks import ingest_pdf_task
 from typing import List, Optional
+import base64
 import uuid
+from datetime import datetime, timezone
 
 router = APIRouter()
 
@@ -75,18 +77,32 @@ async def generate_async(
         question_type=question_type,
         count_per_chapter=count_per_chapter,
         status=IngestJobStatus.queued,
+        progress_message="Queued for worker pickup.",
+        last_heartbeat_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
-    ingest_pdf_task.delay(str(job.id), raw_bytes, question_type, count_per_chapter)
+    pdf_b64 = base64.b64encode(raw_bytes).decode("utf-8")
+    ingest_pdf_task.delay(str(job.id), pdf_b64, question_type, count_per_chapter)
 
     return {
         "job_id": str(job.id),
         "filename": file.filename,
         "total_pages": info.get("pages"),
         "status": "queued",
+        "total_chapters": 0,
+        "chapters_done": 0,
+        "current_chapter": None,
+        "current_chapter_title": None,
+        "questions_created": 0,
+        "progress_message": "Queued for worker pickup.",
+        "last_heartbeat_at": job.last_heartbeat_at.isoformat() if job.last_heartbeat_at else None,
+        "error": None,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": None,
+        "completed_at": None,
         "message": "Processing started. Poll /questions/jobs/{job_id} for progress.",
     }
 
@@ -187,9 +203,15 @@ async def get_job_status(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         "filename": job.filename,
         "total_pages": job.total_pages,
         "status": job.status.value,
+        "total_chapters": job.total_chapters,
         "chapters_done": job.chapters_done,
+        "current_chapter": job.current_chapter,
+        "current_chapter_title": job.current_chapter_title,
         "questions_created": job.questions_created,
+        "progress_message": job.progress_message,
+        "last_heartbeat_at": job.last_heartbeat_at.isoformat() if job.last_heartbeat_at else None,
         "error": job.error_message,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }

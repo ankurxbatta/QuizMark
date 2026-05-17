@@ -12,6 +12,7 @@ This runs entirely in the Celery worker so the API stays responsive
 even while processing a 600-page textbook.
 """
 import asyncio
+import base64
 import uuid
 from datetime import datetime
 from collections import defaultdict
@@ -23,12 +24,15 @@ from app.services.pdf_service import parse_pdf_into_chunks
 from app.services.question_generator import generate_questions_from_chunks
 from app.services.llm_service import llm_service
 
+_ALLOWED_QTYPES = {"mcq", "true_false", "short_answer"}
+_ALLOWED_DIFFICULTIES = {"easy", "medium", "hard"}
 
-@celery_app.task(bind=True, max_retries=2, time_limit=3600)
+
+@celery_app.task(bind=True, max_retries=0, time_limit=3600)
 def ingest_pdf_task(
     self,
     job_id: str,
-    pdf_bytes: bytes,
+    pdf_b64: str,
     question_type: str,
     count_per_chapter: int,
 ):
@@ -39,12 +43,12 @@ def ingest_pdf_task(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        pdf_bytes = base64.b64decode(pdf_b64)
         loop.run_until_complete(
             _run_ingest(job_id, pdf_bytes, question_type, count_per_chapter)
         )
     except Exception as exc:
         loop.run_until_complete(_mark_failed(job_id, str(exc)))
-        raise self.retry(exc=exc, countdown=30)
     finally:
         loop.close()
 
@@ -60,8 +64,18 @@ async def _run_ingest(
         if not job:
             return
 
+        now = datetime.utcnow()
         job.status = IngestJobStatus.processing
-        job.started_at = datetime.utcnow()
+        job.started_at = now
+        job.completed_at = None
+        job.error_message = None
+        job.chapters_done = 0
+        job.questions_created = 0
+        job.total_chapters = 0
+        job.current_chapter = None
+        job.current_chapter_title = None
+        job.progress_message = "Parsing PDF into teaching chunks."
+        job.last_heartbeat_at = now
         await db.commit()
 
         # ── Step 1: Parse PDF into structured chunks ─────────────────────────
@@ -69,6 +83,9 @@ async def _run_ingest(
         if not chunks:
             job.status = IngestJobStatus.failed
             job.error_message = "No usable text chunks extracted from PDF."
+            job.progress_message = "Parsing finished with no usable chunks."
+            job.completed_at = datetime.utcnow()
+            job.last_heartbeat_at = datetime.utcnow()
             await db.commit()
             return
 
@@ -78,19 +95,40 @@ async def _run_ingest(
         for chunk in chunks:
             chapters_map[chunk.chapter_num].append(chunk)
 
-        # Sort chapters in order (skip chapter 0 = preface/boilerplate)
-        chapter_nums = sorted(k for k in chapters_map.keys() if k > 0)
+        # Sort chapters in order (include chapter 0 for fallback parses)
+        chapter_nums = sorted(chapters_map.keys())
+        job.total_chapters = len(chapter_nums)
+        job.progress_message = (
+            f"Parsed {len(chunks)} chunks across {len(chapter_nums)} chapters. "
+            "Starting chapter generation."
+        )
+        job.last_heartbeat_at = datetime.utcnow()
+        await db.commit()
 
         total_created = 0
+        chapter_failures: list[str] = []
 
         # ── Step 3: Process each chapter ─────────────────────────────────────
-        for ch_num in chapter_nums:
+        for idx, ch_num in enumerate(chapter_nums, start=1):
             ch_chunks = chapters_map[ch_num]
             if not ch_chunks:
+                job.chapters_done = idx
+                job.progress_message = f"Skipped chapter {ch_num} because no chunks were available."
+                job.last_heartbeat_at = datetime.utcnow()
+                await db.commit()
                 continue
 
             chapter_title = ch_chunks[0].chapter_title
             topic_tag = ch_chunks[0].topic_tag
+            chapter_label = f"Chapter {ch_num}: {chapter_title}"
+
+            job.current_chapter = ch_num
+            job.current_chapter_title = chapter_title
+            job.progress_message = (
+                f"Processing {chapter_label} ({idx}/{len(chapter_nums)})."
+            )
+            job.last_heartbeat_at = datetime.utcnow()
+            await db.commit()
 
             try:
                 questions_data = await generate_questions_from_chunks(
@@ -98,25 +136,44 @@ async def _run_ingest(
                     question_type=question_type,
                     count=count_per_chapter,
                 )
-            except Exception as e:
-                # Log but continue with next chapter
+            except Exception as exc:
+                message = f"{chapter_label} generation failed: {str(exc)[:180]}"
+                chapter_failures.append(message)
+                job.chapters_done = idx
+                job.progress_message = message
+                job.last_heartbeat_at = datetime.utcnow()
+                await db.commit()
                 continue
 
             # ── Step 4: Embed and persist ─────────────────────────────────────
+            chapter_created = 0
             for q_data in questions_data:
                 q_text = q_data.get("question_text", "").strip()
                 m_answer = q_data.get("model_answer", "").strip()
                 if not q_text or not m_answer:
                     continue
 
+                qtype = q_data.get("question_type", question_type)
+                if qtype not in _ALLOWED_QTYPES:
+                    qtype = question_type
+
+                difficulty = q_data.get("difficulty", "medium")
+                if difficulty not in _ALLOWED_DIFFICULTIES:
+                    difficulty = "medium"
+
+                try:
+                    max_marks = float(q_data.get("max_marks", 5))
+                except (TypeError, ValueError):
+                    max_marks = 5.0
+
                 q = Question(
                     question_text=q_text,
-                    question_type=q_data.get("question_type", question_type),
+                    question_type=qtype,
                     model_answer=m_answer,
                     rubric=q_data.get("rubric", ""),
-                    max_marks=float(q_data.get("max_marks", 5)),
+                    max_marks=max_marks,
                     topic_tag=q_data.get("topic_tag", topic_tag),
-                    difficulty=q_data.get("difficulty", "medium"),
+                    difficulty=difficulty,
                     source_page_range=q_data.get("_page_range", ""),
                     source_chunk=q_data.get("_source_chunk", ""),
                 )
@@ -126,19 +183,58 @@ async def _run_ingest(
                     q.embedding = None
 
                 db.add(q)
-                total_created += 1
+                chapter_created += 1
 
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                message = f"{chapter_label} persistence failed: {str(exc)[:180]}"
+                chapter_failures.append(message)
+                job.chapters_done = idx
+                job.progress_message = message
+                job.last_heartbeat_at = datetime.utcnow()
+                await db.commit()
+                continue
+
+            total_created += chapter_created
 
             # ── Step 5: Update job progress ───────────────────────────────────
-            job.chapters_done += 1
+            job.chapters_done = idx
             job.questions_created = total_created
+            job.progress_message = (
+                f"Finished {chapter_label}. Added {chapter_created} questions. "
+                f"Total created: {total_created}."
+            )
+            job.last_heartbeat_at = datetime.utcnow()
             await db.commit()
 
         # ── Done ─────────────────────────────────────────────────────────────
-        job.status = IngestJobStatus.done
+        job.current_chapter = None
+        job.current_chapter_title = None
         job.completed_at = datetime.utcnow()
         job.questions_created = total_created
+        job.last_heartbeat_at = datetime.utcnow()
+        if total_created == 0:
+            job.status = IngestJobStatus.failed
+            if chapter_failures:
+                job.error_message = "No questions generated. " + " | ".join(chapter_failures[:3])
+            else:
+                job.error_message = "No valid questions were produced from extracted content."
+            job.progress_message = job.error_message
+        else:
+            job.status = IngestJobStatus.done
+            if chapter_failures:
+                job.error_message = (
+                    f"Completed with {len(chapter_failures)} chapter failures. "
+                    f"{' | '.join(chapter_failures[:2])}"
+                )
+                job.progress_message = (
+                    f"Completed with partial failures. Created {total_created} questions."
+                )
+            else:
+                job.error_message = None
+                job.progress_message = f"Completed successfully. Created {total_created} questions."
         await db.commit()
 
 
@@ -148,4 +244,7 @@ async def _mark_failed(job_id: str, error: str):
         if job:
             job.status = IngestJobStatus.failed
             job.error_message = error[:1000]
+            job.progress_message = f"Ingest failed: {error[:500]}"
+            job.completed_at = datetime.utcnow()
+            job.last_heartbeat_at = datetime.utcnow()
             await db.commit()
