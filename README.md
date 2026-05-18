@@ -64,6 +64,12 @@ setup.bat
 
 Once everything is up, go to http://localhost:3000 and log in with the admin credentials you set in `.env`.
 
+To load demo student accounts:
+
+```bash
+docker compose run --rm --no-deps backend python -m app.seed_demo_data
+```
+
 ---
 
 ## How to generate questions

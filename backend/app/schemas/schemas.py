@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 from uuid import UUID
 from datetime import datetime
@@ -27,7 +27,31 @@ class QuestionOut(QuestionCreate):
     id: UUID
     source_page_range: Optional[str] = None
     source_chunk: Optional[str] = None
+    assigned_student_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime
+
+
+class AssessmentQuestionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    question_text: str
+    question_type: QuestionType
+    max_marks: float
+    topic_tag: Optional[str] = None
+    difficulty: Optional[Difficulty] = None
+    source_page_range: Optional[str] = None
+    source_chunk: Optional[str] = None
+    created_at: datetime
+
+
+class QuestionAssigneeUpdate(BaseModel):
+    student_ids: list[UUID] = Field(default_factory=list)
+
+
+class QuestionAssigneeOut(BaseModel):
+    question_id: UUID
+    student_ids: list[UUID] = Field(default_factory=list)
 
 
 class QuestionGenerateResponse(BaseModel):
@@ -79,3 +103,12 @@ class TokenResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    username: str
+    role: str
+    created_at: datetime

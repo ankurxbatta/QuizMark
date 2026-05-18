@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, Float, Integer, DateTime, Boolean, ForeignKey, Enum as SAEnum
+from sqlalchemy import String, Text, Float, Integer, DateTime, Boolean, ForeignKey, Enum as SAEnum, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID
 from pgvector.sqlalchemy import Vector
@@ -67,6 +67,18 @@ class Question(Base):
     source_page_range: Mapped[str | None] = mapped_column(String(20), nullable=True)   # NEW e.g. "45-52"
     source_chunk: Mapped[str | None] = mapped_column(String(120), nullable=True)        # NEW e.g. "Ch2 § Measures of Spread"
     embedding: Mapped[list | None] = mapped_column(Vector(768), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class QuestionAssignment(Base):
+    __tablename__ = "question_assignments"
+    __table_args__ = (
+        UniqueConstraint("question_id", "student_id", name="uq_question_assignments_question_student"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"), nullable=False, index=True)
+    student_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

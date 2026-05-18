@@ -46,7 +46,7 @@ export default function AssessmentPage() {
   };
 
   useEffect(() => {
-    api.get("/questions/").then((r) => setQuestions(r.data.slice(0, 10))).catch(() => {});
+    api.get("/questions/assessment").then((r) => setQuestions(r.data)).catch(() => {});
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -104,7 +104,7 @@ export default function AssessmentPage() {
 
       <main className="max-w-3xl mx-auto px-8 py-10">
         {questions.length === 0 && (
-          <div className="text-center text-gray-400 py-20">No questions available yet. Please check back later.</div>
+          <div className="text-center text-gray-400 py-20">No questions assigned yet. Please check back later.</div>
         )}
         <form onSubmit={handleSubmit} className="space-y-6">
           {questions.map((q, i) => (

@@ -3,12 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime, timedelta, timezone
 from app.core.database import get_db
-from app.core.security import verify_password, hash_password, create_access_token
+from app.core.security import verify_password, hash_password, create_access_token, require_instructor
 from app.models.models import User, UserRole
-from app.schemas.schemas import LoginRequest, TokenResponse
+from app.schemas.schemas import LoginRequest, TokenResponse, UserOut
 from app.core.config import settings
 from pydantic import BaseModel
-from typing import Optional
 
 router = APIRouter()
 
@@ -16,30 +15,40 @@ router = APIRouter()
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    role: str = "student"  # "instructor" or "student"
 
 
-@router.post("/register", status_code=201)
+@router.post("/register", response_model=UserOut, status_code=201)
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """Create a new user account (instructor or student)."""
-    # Validate role
-    if payload.role not in ("instructor", "student"):
-        raise HTTPException(400, "Role must be 'instructor' or 'student'")
+    """Create a new student account."""
+    username = payload.username.strip()
+    if not username:
+        raise HTTPException(400, "Username is required")
+    if len(payload.password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
 
-    # Check for duplicate
-    result = await db.execute(select(User).where(User.username == payload.username))
+    result = await db.execute(select(User).where(User.username == username))
     if result.scalar_one_or_none():
         raise HTTPException(409, "Username already taken")
 
     user = User(
-        username=payload.username,
+        username=username,
         hashed_password=hash_password(payload.password),
-        role=UserRole(payload.role),
+        role=UserRole.student,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    return {"id": str(user.id), "username": user.username, "role": user.role}
+    return user
+
+
+@router.get("/students", response_model=list[UserOut])
+async def list_students(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
+    result = await db.execute(
+        select(User)
+        .where(User.role == UserRole.student)
+        .order_by(User.username.asc())
+    )
+    return result.scalars().all()
 
 
 @router.post("/login", response_model=TokenResponse)

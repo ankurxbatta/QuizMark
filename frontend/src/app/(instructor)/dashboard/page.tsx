@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import Link from "next/link";
 import {
   BookOpen, Upload, CheckSquare, Flag,
-  Download, Clock, Database, BarChart2
+  Download, Clock, Database, BarChart2, Users
 } from "lucide-react";
 
 interface Stats {
@@ -14,6 +14,18 @@ interface Stats {
   last_backup: string | null;
 }
 
+interface Question {
+  id: string;
+  question_text: string;
+  topic_tag: string;
+  assigned_student_ids?: string[];
+}
+
+interface Student {
+  id: string;
+  username: string;
+}
+
 export default function InstructorDashboard() {
   const [stats, setStats] = useState<Stats>({
     total_questions: 0,
@@ -21,22 +33,88 @@ export default function InstructorDashboard() {
     flagged: 0,
     last_backup: null,
   });
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [selectedQuestionId, setSelectedQuestionId] = useState("");
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
+  const [assignmentStatus, setAssignmentStatus] = useState("");
+  const [assignmentError, setAssignmentError] = useState("");
+  const [savingAssignment, setSavingAssignment] = useState(false);
 
   useEffect(() => {
     Promise.all([
       api.get("/questions/count"),
       api.get("/submissions/"),
       api.get("/marking/flagged"),
-    ]).then(([qCount, subs, flagged]) => {
+      api.get("/questions/"),
+      api.get("/auth/students"),
+    ]).then(([qCount, subs, flagged, questionResponse, studentResponse]) => {
       const submissions = subs.data as any[];
+      const loadedQuestions = questionResponse.data as Question[];
       setStats({
         total_questions: qCount.data.total,
         pending_marking: submissions.filter((s: any) => !s.is_marked).length,
         flagged: flagged.data.length,
         last_backup: new Date().toLocaleDateString(),
       });
+      setQuestions(loadedQuestions);
+      setStudents(studentResponse.data);
+      if (loadedQuestions.length > 0) {
+        setSelectedQuestionId((current) => current || loadedQuestions[0].id);
+        setSelectedStudentIds(loadedQuestions[0].assigned_student_ids || []);
+      }
     }).catch(() => {});
   }, []);
+
+  const selectedQuestion = questions.find((question) => question.id === selectedQuestionId);
+
+  const changeQuestion = async (questionId: string) => {
+    setSelectedQuestionId(questionId);
+    setAssignmentStatus("");
+    setAssignmentError("");
+    const question = questions.find((item) => item.id === questionId);
+    setSelectedStudentIds(question?.assigned_student_ids || []);
+    if (!questionId) return;
+
+    try {
+      const { data } = await api.get(`/questions/${questionId}/assignees`);
+      setSelectedStudentIds(data.student_ids || []);
+    } catch (err: any) {
+      setAssignmentError(err.response?.data?.detail || "Could not load assignments.");
+    }
+  };
+
+  const toggleStudent = (studentId: string) => {
+    setSelectedStudentIds((current) =>
+      current.includes(studentId)
+        ? current.filter((id) => id !== studentId)
+        : [...current, studentId]
+    );
+  };
+
+  const saveAssignment = async () => {
+    if (!selectedQuestionId) return;
+    setSavingAssignment(true);
+    setAssignmentStatus("");
+    setAssignmentError("");
+    try {
+      const { data } = await api.put(`/questions/${selectedQuestionId}/assignees`, {
+        student_ids: selectedStudentIds,
+      });
+      setQuestions((current) =>
+        current.map((question) =>
+          question.id === selectedQuestionId
+            ? { ...question, assigned_student_ids: data.student_ids || [] }
+            : question
+        )
+      );
+      setAssignmentStatus("Assignments saved.");
+    } catch (err: any) {
+      setAssignmentError(err.response?.data?.detail || "Could not save assignments.");
+    } finally {
+      setSavingAssignment(false);
+    }
+  };
 
   const cards = [
     { label: "Q&A Bank",        value: stats.total_questions,       icon: Database,    href: "/questions",           color: "bg-indigo-50 text-indigo-700" },
@@ -86,6 +164,81 @@ export default function InstructorDashboard() {
               </Link>
             ))}
           </div>
+        </section>
+
+        <section className="bg-white rounded-xl border p-6 space-y-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-700">Assign Question To Students</h2>
+              <p className="text-xs text-gray-400 mt-0.5">{students.length} registered student{students.length !== 1 ? "s" : ""}</p>
+            </div>
+            <span className="bg-emerald-100 text-emerald-700 p-2 rounded-lg"><Users size={20} /></span>
+          </div>
+
+          {questions.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-200 px-4 py-5 text-sm text-gray-500">
+              No questions available.
+              <Link href="/questions" className="ml-2 font-semibold text-indigo-600 hover:text-indigo-800">Add a question</Link>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-medium text-gray-500 uppercase">Question</label>
+                <select
+                  value={selectedQuestionId}
+                  onChange={(event) => changeQuestion(event.target.value)}
+                  className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                >
+                  {questions.map((question) => (
+                    <option key={question.id} value={question.id}>
+                      {question.topic_tag ? `${question.topic_tag} - ` : ""}{question.question_text}
+                    </option>
+                  ))}
+                </select>
+                {selectedQuestion && (
+                  <p className="mt-2 text-xs text-gray-400">
+                    Assigned to {selectedQuestion.assigned_student_ids?.length || 0} student{(selectedQuestion.assigned_student_ids?.length || 0) !== 1 ? "s" : ""}
+                  </p>
+                )}
+              </div>
+
+              {students.length === 0 ? (
+                <div className="rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-500">No student accounts yet.</div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {students.map((student) => (
+                    <label
+                      key={student.id}
+                      className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-sm cursor-pointer transition-colors ${
+                        selectedStudentIds.includes(student.id)
+                          ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                          : "border-gray-200 hover:border-gray-300 text-gray-700"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedStudentIds.includes(student.id)}
+                        onChange={() => toggleStudent(student.id)}
+                        className="accent-indigo-600"
+                      />
+                      <span className="truncate">{student.username}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {assignmentError && <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{assignmentError}</p>}
+              {assignmentStatus && <p className="text-sm text-green-700 bg-green-50 rounded-lg px-3 py-2">{assignmentStatus}</p>}
+
+              <button
+                onClick={saveAssignment}
+                disabled={savingAssignment || !selectedQuestionId}
+                className="inline-flex items-center gap-2 bg-indigo-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-60"
+              >
+                <CheckSquare size={16} /> {savingAssignment ? "Saving..." : "Save Assignments"}
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="bg-white rounded-xl border p-6 space-y-3">

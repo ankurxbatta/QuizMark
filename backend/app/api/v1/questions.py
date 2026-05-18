@@ -1,10 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from app.core.database import get_db
 from app.core.security import require_instructor, get_current_user
-from app.models.models import Question, IngestJob, IngestJobStatus
-from app.schemas.schemas import QuestionCreate, QuestionUpdate, QuestionOut, QuestionGenerateResponse
+from app.models.models import Question, IngestJob, IngestJobStatus, QuestionAssignment, User, UserRole
+from app.schemas.schemas import (
+    AssessmentQuestionOut,
+    QuestionAssigneeOut,
+    QuestionAssigneeUpdate,
+    QuestionCreate,
+    QuestionGenerateResponse,
+    QuestionOut,
+    QuestionUpdate,
+)
 from app.services.question_generator import generate_questions, generate_questions_from_chunks
 from app.services.llm_service import llm_service
 from app.services.pdf_service import parse_pdf_into_chunks, extract_text_from_pdf, get_pdf_info, extract_chapters_from_pdf
@@ -16,6 +24,24 @@ import uuid
 from datetime import datetime, timezone
 
 router = APIRouter()
+
+
+async def attach_assigned_students(db: AsyncSession, questions: list[Question]) -> list[Question]:
+    if not questions:
+        return questions
+
+    question_ids = [q.id for q in questions]
+    result = await db.execute(
+        select(QuestionAssignment.question_id, QuestionAssignment.student_id)
+        .where(QuestionAssignment.question_id.in_(question_ids))
+    )
+    assignment_map: dict[uuid.UUID, list[uuid.UUID]] = {qid: [] for qid in question_ids}
+    for question_id, student_id in result.all():
+        assignment_map.setdefault(question_id, []).append(student_id)
+
+    for question in questions:
+        question.assigned_student_ids = assignment_map.get(question.id, [])
+    return questions
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # IMPORTANT: All named sub-routes (/generate, /generate/async, /chapters,
@@ -240,6 +266,25 @@ async def list_topics(db: AsyncSession = Depends(get_db), _: dict = Depends(requ
     return [{"topic": r.topic_tag, "count": r.count} for r in result.all()]
 
 
+@router.get("/assessment", response_model=List[AssessmentQuestionOut])
+async def list_assessment_questions(
+    db: AsyncSession = Depends(get_db),
+    claims: dict = Depends(get_current_user),
+):
+    if claims.get("role") == "instructor":
+        result = await db.execute(select(Question).order_by(Question.created_at.desc()))
+        return result.scalars().all()
+
+    student_id = uuid.UUID(claims["sub"])
+    result = await db.execute(
+        select(Question)
+        .join(QuestionAssignment, QuestionAssignment.question_id == Question.id)
+        .where(QuestionAssignment.student_id == student_id)
+        .order_by(Question.created_at.desc())
+    )
+    return result.scalars().all()
+
+
 @router.get("/", response_model=List[QuestionOut])
 async def list_questions(
     topic: Optional[str] = None,
@@ -247,7 +292,7 @@ async def list_questions(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    _: dict = Depends(get_current_user),  # both instructors and students can list
+    _: dict = Depends(require_instructor),
 ):
     q = select(Question)
     if topic:
@@ -255,16 +300,65 @@ async def list_questions(
     if difficulty:
         q = q.where(Question.difficulty == difficulty)
     result = await db.execute(q.order_by(Question.created_at.desc()).offset(skip).limit(limit))
-    return result.scalars().all()
+    return await attach_assigned_students(db, list(result.scalars().all()))
+
+
+@router.get("/{question_id}/assignees", response_model=QuestionAssigneeOut)
+async def get_question_assignees(
+    question_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
+):
+    question = await db.get(Question, question_id)
+    if not question:
+        raise HTTPException(404, "Question not found")
+
+    result = await db.execute(
+        select(QuestionAssignment.student_id)
+        .where(QuestionAssignment.question_id == question_id)
+        .order_by(QuestionAssignment.created_at.asc())
+    )
+    return {"question_id": question_id, "student_ids": list(result.scalars().all())}
+
+
+@router.put("/{question_id}/assignees", response_model=QuestionAssigneeOut)
+async def update_question_assignees(
+    question_id: uuid.UUID,
+    payload: QuestionAssigneeUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
+):
+    question = await db.get(Question, question_id)
+    if not question:
+        raise HTTPException(404, "Question not found")
+
+    student_ids = list(dict.fromkeys(payload.student_ids))
+    if student_ids:
+        result = await db.execute(
+            select(User.id)
+            .where(User.id.in_(student_ids), User.role == UserRole.student)
+        )
+        existing_student_ids = set(result.scalars().all())
+        missing = [str(student_id) for student_id in student_ids if student_id not in existing_student_ids]
+        if missing:
+            raise HTTPException(400, f"Invalid student id(s): {', '.join(missing)}")
+
+    await db.execute(delete(QuestionAssignment).where(QuestionAssignment.question_id == question_id))
+    for student_id in student_ids:
+        db.add(QuestionAssignment(question_id=question_id, student_id=student_id))
+    await db.commit()
+
+    return {"question_id": question_id, "student_ids": student_ids}
 
 
 # ── /{question_id} routes LAST — must not shadow the named routes above ────────
 
 @router.get("/{question_id}", response_model=QuestionOut)
-async def get_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: dict = Depends(get_current_user)):
+async def get_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     q = await db.get(Question, question_id)
     if not q:
         raise HTTPException(404, "Question not found")
+    await attach_assigned_students(db, [q])
     return q
 
 
@@ -277,6 +371,7 @@ async def create_question(payload: QuestionCreate, db: AsyncSession = Depends(ge
     db.add(question)
     await db.commit()
     await db.refresh(question)
+    question.assigned_student_ids = []
     return question
 
 
@@ -295,6 +390,7 @@ async def update_question(
     q.embedding = await llm_service.embed(f"{q.question_text} {q.model_answer}")
     await db.commit()
     await db.refresh(q)
+    await attach_assigned_students(db, [q])
     return q
 
 

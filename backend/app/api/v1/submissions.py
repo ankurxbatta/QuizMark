@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import get_current_user, require_instructor
-from app.models.models import Submission, User, Question
+from app.models.models import Submission, User, Question, QuestionAssignment, UserRole
 from app.schemas.schemas import SubmissionCreate, SubmissionOut
 from app.tasks.marking_tasks import mark_submission_task
 from typing import List
@@ -22,10 +22,22 @@ async def submit_answer(
     user = await db.get(User, uuid.UUID(user_id))
     if not user:
         raise HTTPException(401, "User not found")
+    if user.role != UserRole.student:
+        raise HTTPException(403, "Student account required to submit answers")
 
     question = await db.get(Question, payload.question_id)
     if not question:
         raise HTTPException(404, "Question not found")
+
+    assignment = await db.execute(
+        select(QuestionAssignment)
+        .where(
+            QuestionAssignment.question_id == payload.question_id,
+            QuestionAssignment.student_id == user.id,
+        )
+    )
+    if not assignment.scalar_one_or_none():
+        raise HTTPException(403, "This question is not assigned to you")
 
     submission = Submission(
         student_id=user.id,
