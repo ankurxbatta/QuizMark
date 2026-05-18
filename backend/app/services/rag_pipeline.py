@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -83,15 +83,35 @@ def _extract_mcq_options(text: str) -> dict[str, str]:
 
 
 def _extract_correct_mcq_answer(question_text: str, model_answer: str) -> str | None:
-    match = re.search(r"correct option:\s*([A-D])", model_answer, re.IGNORECASE)
-    if match:
-        letter = match.group(1).upper()
-        options = _extract_mcq_options(question_text)
-        return options.get(letter, letter)
+    """
+    Try to extract the correct MCQ answer letter from the model answer.
+    Handles a variety of freeform LLM answer formats:
+      - "A. some text"
+      - "The answer is A"
+      - "correct answer: B"
+      - "Option C is correct"
+      - "A) some text"
+    """
+    # Pattern 1: starts with a letter + punctuation (e.g. "A. ...", "A) ...")
+    m = re.match(r"^\s*([A-D])[.):\-]\s", model_answer.strip(), re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
 
-    match = re.search(r"correct option:\s*(.+)$", model_answer, re.IGNORECASE | re.MULTILINE)
-    if match:
-        return match.group(1).strip().strip(".")
+    # Pattern 2: "the answer is X" / "correct answer: X" / "answer: X"
+    m = re.search(r"(?:the\s+)?(?:correct\s+)?answer(?:\s+is)?[:\s]+([A-D])\b", model_answer, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+
+    # Pattern 3: "option X is correct" / "option X."
+    m = re.search(r"(?:option\s+|choice\s+)([A-D])\b", model_answer, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+
+    # Pattern 4: standalone letter on its own line
+    m = re.search(r"^\s*([A-D])\s*$", model_answer, re.IGNORECASE | re.MULTILINE)
+    if m:
+        return m.group(1).upper()
+
     return None
 
 
@@ -226,7 +246,7 @@ def _persist(sub: Submission, mark: float, feedback: str, flagged: bool, slm: SL
     sub.slm_raw_score = slm.slm_raw_score
     sub.is_flagged = flagged
     sub.is_marked = True
-    sub.marked_at = datetime.utcnow()
+    sub.marked_at = datetime.now(timezone.utc)
 
 
 def _result(mark: float, feedback: str, flagged: bool, slm: SLMResult) -> dict:

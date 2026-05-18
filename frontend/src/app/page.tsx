@@ -4,11 +4,20 @@ import { useRouter } from "next/navigation";
 import api from "@/lib/api";
 import Cookies from "js-cookie";
 
+// Minimal JWT decoder — reads the payload without verifying signature
+function decodeJwtRole(token: string): string | null {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return payload.role ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"instructor" | "student">("instructor");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -18,9 +27,13 @@ export default function LoginPage() {
     setError("");
     try {
       const { data } = await api.post("/auth/login", { username, password });
-      Cookies.set("token", data.access_token, { expires: 1 / 48 }); // 30 min
+      const token: string = data.access_token;
+
+      // Read role from the JWT itself — never trust a UI click for this
+      const role = decodeJwtRole(token) ?? "student";
+
+      Cookies.set("token", token, { expires: 1 / 48 }); // 30 min
       Cookies.set("role", role);
-      // Route groups are not part of the URL path in the App Router.
       router.push(role === "instructor" ? "/dashboard" : "/assessment");
     } catch (err: any) {
       setError(err.response?.data?.detail || "Login failed. Please try again.");
@@ -33,29 +46,9 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
       <div className="bg-white rounded-2xl shadow-xl p-10 w-full max-w-md">
         <h1 className="text-3xl font-bold text-indigo-700 mb-1">QuizMark</h1>
-        <p className="text-gray-500 mb-8 text-sm">AI-Powered Quiz & Marking Platform</p>
+        <p className="text-gray-500 mb-8 text-sm">AI-Powered Quiz &amp; Marking Platform</p>
 
         <form onSubmit={handleLogin} className="space-y-5">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Login as</label>
-            <div className="flex gap-3">
-              {(["instructor", "student"] as const).map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => setRole(r)}
-                  className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors ${
-                    role === r
-                      ? "bg-indigo-600 text-white border-indigo-600"
-                      : "bg-white text-gray-600 border-gray-300 hover:border-indigo-400"
-                  }`}
-                >
-                  {r.charAt(0).toUpperCase() + r.slice(1)}
-                </button>
-              ))}
-            </div>
-          </div>
-
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
             <input

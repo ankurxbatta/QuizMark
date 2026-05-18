@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.core.database import get_db
+from app.core.security import require_instructor, get_current_user
 from app.models.models import Question, IngestJob, IngestJobStatus
 from app.schemas.schemas import QuestionCreate, QuestionUpdate, QuestionOut, QuestionGenerateResponse
 from app.services.question_generator import generate_questions, generate_questions_from_chunks
@@ -29,6 +30,7 @@ router = APIRouter()
 @router.post("/chapters")
 async def extract_chapters(
     file: UploadFile = File(...),
+    _: dict = Depends(require_instructor),
 ):
     """
     Scan a PDF and return the chapters found in it.
@@ -54,6 +56,7 @@ async def generate_async(
     question_type: str = Query("short_answer", enum=["mcq", "true_false", "short_answer"]),
     count_per_chapter: int = Query(10, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
 ):
     """
     Async full-textbook ingestion. Returns a job_id immediately.
@@ -116,6 +119,7 @@ async def generate_from_upload(
     count: int = Query(20, ge=1, le=50),
     topic_filter: Optional[str] = Query(None, description="Filter to a specific chapter topic"),
     db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
 ):
     """
     Synchronous generation from a .pdf or .txt file.
@@ -193,7 +197,7 @@ async def generate_from_upload(
 # ── Job status polling ────────────────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_job_status(job_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     """Poll the status of a background ingestion job."""
     job: IngestJob | None = await db.get(IngestJob, job_id)
     if not job:
@@ -220,13 +224,13 @@ async def get_job_status(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 # ── Standard read/list/count/topics (before /{question_id}) ──────────────────
 
 @router.get("/count")
-async def count_questions(db: AsyncSession = Depends(get_db)):
+async def count_questions(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     result = await db.execute(select(func.count(Question.id)))
     return {"total": result.scalar()}
 
 
 @router.get("/topics")
-async def list_topics(db: AsyncSession = Depends(get_db)):
+async def list_topics(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     """Return all distinct topic tags in the Q&A bank."""
     result = await db.execute(
         select(Question.topic_tag, func.count(Question.id).label("count"))
@@ -240,21 +244,24 @@ async def list_topics(db: AsyncSession = Depends(get_db)):
 async def list_questions(
     topic: Optional[str] = None,
     difficulty: Optional[str] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    _: dict = Depends(get_current_user),  # both instructors and students can list
 ):
     q = select(Question)
     if topic:
         q = q.where(Question.topic_tag == topic)
     if difficulty:
         q = q.where(Question.difficulty == difficulty)
-    result = await db.execute(q.order_by(Question.created_at.desc()))
+    result = await db.execute(q.order_by(Question.created_at.desc()).offset(skip).limit(limit))
     return result.scalars().all()
 
 
 # ── /{question_id} routes LAST — must not shadow the named routes above ────────
 
 @router.get("/{question_id}", response_model=QuestionOut)
-async def get_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: dict = Depends(get_current_user)):
     q = await db.get(Question, question_id)
     if not q:
         raise HTTPException(404, "Question not found")
@@ -262,7 +269,7 @@ async def get_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db
 
 
 @router.post("/", response_model=QuestionOut, status_code=201)
-async def create_question(payload: QuestionCreate, db: AsyncSession = Depends(get_db)):
+async def create_question(payload: QuestionCreate, db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     question = Question(**payload.model_dump())
     question.embedding = await llm_service.embed(
         f"{payload.question_text} {payload.model_answer}"
@@ -278,6 +285,7 @@ async def update_question(
     question_id: uuid.UUID,
     payload: QuestionUpdate,
     db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
 ):
     q = await db.get(Question, question_id)
     if not q:
@@ -291,7 +299,7 @@ async def update_question(
 
 
 @router.delete("/{question_id}", status_code=204)
-async def delete_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_question(question_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     q = await db.get(Question, question_id)
     if not q:
         raise HTTPException(404, "Question not found")

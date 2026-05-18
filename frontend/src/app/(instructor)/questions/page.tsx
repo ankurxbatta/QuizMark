@@ -55,16 +55,16 @@ export default function QuestionsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700">Q&amp;A Bank Management</h1>
+        <h1 className="text-xl font-bold text-indigo-700">Q&amp;A Bank</h1>
         <button onClick={() => { setForm(EMPTY); setEditId(null); setShowForm(true); }}
           className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700">
           <Plus size={16} /> Add Question
         </button>
       </header>
 
-      <main className="max-w-6xl mx-auto px-8 py-8">
+      <div className="max-w-6xl mx-auto px-8 py-8">
         {showForm && (
           <div className="bg-white rounded-xl border border-indigo-200 shadow-sm p-6 mb-8 space-y-4">
             <h2 className="font-semibold text-gray-700">{editId ? "Edit Question" : "New Question"}</h2>
@@ -150,7 +150,7 @@ export default function QuestionsPage() {
             </tbody>
           </table>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.core.database import get_db
 from app.core.security import verify_password, hash_password, create_access_token
 from app.models.models import User, UserRole
@@ -51,16 +51,22 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # Check lockout
-    if user.locked_until and user.locked_until > datetime.utcnow():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Account locked. Try again after {user.locked_until.isoformat()}",
-        )
+    now = datetime.now(timezone.utc)
+    locked_until = user.locked_until
+    if locked_until is not None:
+        # Handle both naive and timezone-aware datetimes in DB
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if locked_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account locked. Try again after {locked_until.isoformat()}",
+            )
 
     if not verify_password(payload.password, user.hashed_password):
         user.failed_attempts += 1
         if user.failed_attempts >= settings.MAX_FAILED_LOGIN_ATTEMPTS:
-            user.locked_until = datetime.utcnow() + timedelta(minutes=settings.LOCKOUT_DURATION_MINUTES)
+            user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=settings.LOCKOUT_DURATION_MINUTES)
             user.failed_attempts = 0
         await db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")

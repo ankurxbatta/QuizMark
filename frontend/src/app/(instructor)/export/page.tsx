@@ -20,11 +20,12 @@ export default function ExportPage() {
   ];
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 shadow-sm">
         <h1 className="text-xl font-bold text-indigo-700">Export Data</h1>
+        <p className="text-xs text-gray-400 mt-0.5">Download results and audit logs as CSV</p>
       </header>
-      <main className="max-w-3xl mx-auto px-8 py-10 space-y-5">
+      <div className="max-w-3xl mx-auto px-8 py-10 space-y-5">
         {exports.map(({ title, description, url, filename }) => (
           <div key={title} className="bg-white rounded-xl border shadow-sm p-6 flex items-center justify-between gap-6">
             <div>
@@ -37,7 +38,7 @@ export default function ExportPage() {
             </a>
           </div>
         ))}
-      </main>
+      </div>
     </div>
   );
 }

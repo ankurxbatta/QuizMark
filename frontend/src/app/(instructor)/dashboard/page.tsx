@@ -35,35 +35,32 @@ export default function InstructorDashboard() {
         flagged: flagged.data.length,
         last_backup: new Date().toLocaleDateString(),
       });
-    });
+    }).catch(() => {});
   }, []);
 
   const cards = [
-    { label: "Q&A Bank", value: stats.total_questions, icon: Database, href: "/questions", color: "bg-indigo-50 text-indigo-700" },
-    { label: "Pending Marking", value: stats.pending_marking, icon: Clock, href: "/marking", color: "bg-yellow-50 text-yellow-700" },
-    { label: "Flagged Reviews", value: stats.flagged, icon: Flag, href: "/marking?tab=flagged", color: "bg-red-50 text-red-700" },
-    { label: "Last Backup", value: stats.last_backup || "Never", icon: CheckSquare, href: "#", color: "bg-green-50 text-green-700" },
+    { label: "Q&A Bank",        value: stats.total_questions,       icon: Database,    href: "/questions",           color: "bg-indigo-50 text-indigo-700" },
+    { label: "Pending Marking", value: stats.pending_marking,       icon: Clock,       href: "/marking",             color: "bg-yellow-50 text-yellow-700" },
+    { label: "Flagged Reviews", value: stats.flagged,               icon: Flag,        href: "/marking?tab=flagged", color: "bg-red-50 text-red-700" },
+    { label: "Last Backup",     value: stats.last_backup || "Never",icon: CheckSquare, href: "#",                   color: "bg-green-50 text-green-700" },
   ];
 
   const quickActions = [
-    { label: "Upload Content & Generate Questions", icon: Upload, href: "/generate" },
-    { label: "Manage Q&A Bank", icon: BookOpen, href: "/questions" },
-    { label: "Review & Mark Submissions", icon: CheckSquare, href: "/marking" },
-    { label: "Pipeline Analytics", icon: BarChart2, href: "/analytics" },
-    { label: "Export Results", icon: Download, href: "/export" },
+    { label: "Upload Content & Generate Questions", icon: Upload,      href: "/generate" },
+    { label: "Manage Q&A Bank",                    icon: BookOpen,     href: "/questions" },
+    { label: "Review & Mark Submissions",          icon: CheckSquare,  href: "/marking" },
+    { label: "Pipeline Analytics",                 icon: BarChart2,    href: "/analytics" },
+    { label: "Export Results",                     icon: Download,     href: "/export" },
   ];
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
-        <div>
-          <h1 className="text-xl font-bold text-indigo-700">QuizMark — Instructor Dashboard</h1>
-          <p className="text-xs text-gray-400 mt-0.5">Hybrid SLM + RAG + LLM auto-marking</p>
-        </div>
-        <Link href="/" className="text-sm text-gray-500 hover:text-red-600 transition-colors">Sign out</Link>
+    <div className="bg-gray-50">
+      <header className="bg-white border-b px-8 py-4 shadow-sm">
+        <h1 className="text-xl font-bold text-indigo-700">Dashboard</h1>
+        <p className="text-xs text-gray-400 mt-0.5">Hybrid SLM + RAG + LLM auto-marking</p>
       </header>
 
-      <main className="max-w-6xl mx-auto px-8 py-10 space-y-10">
+      <div className="max-w-6xl mx-auto px-8 py-10 space-y-10">
         <section>
           <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Overview</h2>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
@@ -91,34 +88,25 @@ export default function InstructorDashboard() {
           </div>
         </section>
 
-        {/* Hybrid pipeline explainer */}
         <section className="bg-white rounded-xl border p-6 space-y-3">
           <h2 className="text-sm font-semibold text-gray-700">How the hybrid pipeline works</h2>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-            <div className="flex gap-3 items-start">
-              <span className="mt-0.5 w-5 h-5 rounded-full bg-green-100 text-green-700 text-xs font-bold flex items-center justify-center flex-shrink-0">H</span>
-              <div>
-                <p className="font-medium text-gray-700">HIGH confidence ≥85%</p>
-                <p className="text-gray-500 text-xs mt-0.5">SLM mark accepted directly. No LLM call. ~2s per answer.</p>
+            {[
+              { tier: "H", color: "bg-green-100 text-green-700", title: "HIGH confidence ≥85%", desc: "SLM mark accepted directly. No LLM call. ~2s per answer." },
+              { tier: "M", color: "bg-blue-100 text-blue-700",  title: "MID confidence 55–85%", desc: "RAG retrieves similar answers. Offline LLM (llama3) marks with context." },
+              { tier: "L", color: "bg-amber-100 text-amber-700",title: "LOW confidence <55%",   desc: "Wide RAG retrieval. Online LLM if enabled. Always flagged for review." },
+            ].map(({ tier, color, title, desc }) => (
+              <div key={tier} className="flex gap-3 items-start">
+                <span className={`mt-0.5 w-5 h-5 rounded-full text-xs font-bold flex items-center justify-center flex-shrink-0 ${color}`}>{tier}</span>
+                <div>
+                  <p className="font-medium text-gray-700">{title}</p>
+                  <p className="text-gray-500 text-xs mt-0.5">{desc}</p>
+                </div>
               </div>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="mt-0.5 w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center flex-shrink-0">M</span>
-              <div>
-                <p className="font-medium text-gray-700">MID confidence 55–85%</p>
-                <p className="text-gray-500 text-xs mt-0.5">RAG retrieves similar answers. Offline LLM (llama3) marks with context.</p>
-              </div>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="mt-0.5 w-5 h-5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold flex items-center justify-center flex-shrink-0">L</span>
-              <div>
-                <p className="font-medium text-gray-700">LOW confidence &lt;55%</p>
-                <p className="text-gray-500 text-xs mt-0.5">Wide RAG retrieval. Online LLM if enabled. Always flagged for review.</p>
-              </div>
-            </div>
+            ))}
           </div>
         </section>
-      </main>
+      </div>
     </div>
   );
 }

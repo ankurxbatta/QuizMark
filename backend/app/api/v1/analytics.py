@@ -13,13 +13,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case
 from app.core.database import get_db
+from app.core.security import require_instructor
 from app.models.models import Submission, Question
 
 router = APIRouter()
 
 
 @router.get("/pipeline")
-async def pipeline_stats(db: AsyncSession = Depends(get_db)):
+async def pipeline_stats(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     """
     Summary statistics for the hybrid marking pipeline.
     Shows how answers are distributed across the three routing tiers
@@ -82,7 +83,7 @@ async def pipeline_stats(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/questions")
-async def question_accuracy(db: AsyncSession = Depends(get_db)):
+async def question_accuracy(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     """
     Per-question analytics: how many submissions, avg auto-mark,
     avg override delta (where instructor changed the mark),
@@ -137,7 +138,7 @@ async def question_accuracy(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/confidence-distribution")
-async def confidence_distribution(db: AsyncSession = Depends(get_db)):
+async def confidence_distribution(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     """
     Histogram of auto_confidence values across all marked submissions.
     Returns 20 bins (0.0–0.05, 0.05–0.10, …, 0.95–1.0).

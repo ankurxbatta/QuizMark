@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { CheckCircle, Clock } from "lucide-react";
+import { CheckCircle, Clock, LogOut } from "lucide-react";
+import { useRouter } from "next/navigation";
+import Cookies from "js-cookie";
 
 interface Question {
   id: string;
@@ -14,20 +16,18 @@ function extractMcqParts(text: string) {
   const pattern = /([A-D])[).:\-]\s*/g;
   const matches = Array.from(text.matchAll(pattern));
   if (matches.length === 0) {
-    return { stem: text.trim(), options: [] as string[] };
+    return { stem: text.trim(), options: [] as { letter: string; text: string }[] };
   }
-
   const firstIndex = matches[0].index ?? 0;
   const stem = text.slice(0, firstIndex).trim();
-  const options: string[] = [];
-
+  const options: { letter: string; text: string }[] = [];
   for (let i = 0; i < matches.length; i += 1) {
+    const letter = matches[i][1].toUpperCase();
     const start = (matches[i].index ?? 0) + matches[i][0].length;
     const end = i + 1 < matches.length ? (matches[i + 1].index ?? text.length) : text.length;
     const optionText = text.slice(start, end).trim();
-    if (optionText) options.push(optionText);
+    if (optionText) options.push({ letter, text: optionText });
   }
-
   return { stem, options };
 }
 
@@ -37,9 +37,16 @@ export default function AssessmentPage() {
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const router = useRouter();
+
+  const signOut = () => {
+    Cookies.remove("token");
+    Cookies.remove("role");
+    router.push("/");
+  };
 
   useEffect(() => {
-    api.get("/questions/").then((r) => setQuestions(r.data.slice(0, 10)));
+    api.get("/questions/").then((r) => setQuestions(r.data.slice(0, 10))).catch(() => {});
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -47,12 +54,8 @@ export default function AssessmentPage() {
     setSubmitting(true);
     setError("");
     const payloads = Object.entries(answers)
-      .map(([question_id, answer_text]) => ({
-        question_id,
-        answer_text: answer_text.trim(),
-      }))
+      .map(([question_id, answer_text]) => ({ question_id, answer_text: answer_text.trim() }))
       .filter((item) => item.answer_text.length > 0);
-
     try {
       for (const item of payloads) {
         await api.post("/submissions/", item, { timeout: 20000 });
@@ -71,7 +74,11 @@ export default function AssessmentPage() {
         <div className="bg-white rounded-2xl shadow-xl p-12 text-center max-w-md">
           <CheckCircle size={48} className="mx-auto text-green-500 mb-4" />
           <h2 className="text-2xl font-bold text-gray-800 mb-2">Submitted!</h2>
-          <p className="text-gray-500">Your answers have been submitted for marking. You will be notified when results are available.</p>
+          <p className="text-gray-500 mb-6">Your answers have been submitted for marking. Results will be available shortly.</p>
+          <button onClick={signOut}
+            className="text-sm text-indigo-600 hover:text-indigo-800 underline underline-offset-2">
+            Sign out
+          </button>
         </div>
       </div>
     );
@@ -80,20 +87,33 @@ export default function AssessmentPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700">Statistics Assessment</h1>
-        <div className="flex items-center gap-2 text-sm text-gray-500">
-          <Clock size={16} /> <span>{questions.length} questions</span>
+        <div>
+          <h1 className="text-xl font-bold text-indigo-700">Assessment</h1>
+          <p className="text-xs text-gray-400 mt-0.5">{questions.length} question{questions.length !== 1 ? "s" : ""}</p>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="flex items-center gap-1.5 text-sm text-gray-500">
+            <Clock size={15} /> {questions.length} questions
+          </span>
+          <button onClick={signOut}
+            className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-red-500 transition-colors">
+            <LogOut size={15} /> Sign out
+          </button>
         </div>
       </header>
 
       <main className="max-w-3xl mx-auto px-8 py-10">
+        {questions.length === 0 && (
+          <div className="text-center text-gray-400 py-20">No questions available yet. Please check back later.</div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-6">
           {questions.map((q, i) => (
             <div key={q.id} className="bg-white rounded-xl border shadow-sm p-6 space-y-3">
               <div className="flex items-start justify-between">
                 <span className="text-xs font-bold text-indigo-500 uppercase">Q{i + 1}</span>
-                <span className="text-xs text-gray-400">{q.max_marks} marks</span>
+                <span className="text-xs text-gray-400">{q.max_marks} mark{q.max_marks !== 1 ? "s" : ""}</span>
               </div>
+
               {q.question_type === "mcq" ? (() => {
                 const { stem, options } = extractMcqParts(q.question_text);
                 return (
@@ -101,52 +121,55 @@ export default function AssessmentPage() {
                     <p className="text-gray-800 font-medium">{stem || q.question_text}</p>
                     {options.length > 0 ? (
                       <div className="space-y-2">
-                        {options.map((opt, idx) => (
-                          <label key={idx} className="flex items-start gap-2 text-sm text-gray-700">
+                        {options.map(({ letter, text: optText }) => (
+                          <label key={letter}
+                            className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                              answers[q.id] === letter
+                                ? "border-indigo-400 bg-indigo-50"
+                                : "border-gray-200 hover:border-gray-300"
+                            }`}>
                             <input
                               type="radio"
                               name={`q-${q.id}`}
-                              value={opt}
-                              checked={answers[q.id] === opt}
+                              // Submit the letter (A/B/C/D) so the backend MCQ parser can read it
+                              value={letter}
+                              checked={answers[q.id] === letter}
                               onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
                               required
-                              className="mt-1"
+                              className="mt-0.5 accent-indigo-600"
                             />
-                            <span>{String.fromCharCode(65 + idx)}. {opt}</span>
+                            <span className="text-sm text-gray-700"><span className="font-semibold">{letter}.</span> {optText}</span>
                           </label>
                         ))}
                       </div>
                     ) : (
-                      <div className="space-y-2">
-                        <p className="text-xs text-amber-600">Options not detected; please answer in text.</p>
-                        <textarea
-                          rows={4}
-                          placeholder="Write your answer here…"
+                      <>
+                        <p className="text-xs text-amber-600">Options could not be parsed — please write your answer below.</p>
+                        <textarea rows={3} placeholder="Your answer…"
                           value={answers[q.id] || ""}
                           onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
                           required
-                          className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        />
-                      </div>
+                          className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                      </>
                     )}
                   </div>
                 );
               })() : q.question_type === "true_false" ? (
                 <div className="space-y-3">
                   <p className="text-gray-800 font-medium">{q.question_text}</p>
-                  <div className="space-y-2">
+                  <div className="flex gap-3">
                     {(["True", "False"] as const).map((opt) => (
-                      <label key={opt} className="flex items-start gap-2 text-sm text-gray-700">
-                        <input
-                          type="radio"
-                          name={`q-${q.id}`}
-                          value={opt}
+                      <label key={opt}
+                        className={`flex items-center gap-2 flex-1 justify-center py-3 rounded-lg border cursor-pointer transition-colors ${
+                          answers[q.id] === opt
+                            ? "border-indigo-400 bg-indigo-50 text-indigo-700 font-semibold"
+                            : "border-gray-200 hover:border-gray-300 text-gray-700"
+                        }`}>
+                        <input type="radio" name={`q-${q.id}`} value={opt}
                           checked={answers[q.id] === opt}
                           onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                          required
-                          className="mt-1"
-                        />
-                        <span>{opt}</span>
+                          required className="sr-only" />
+                        {opt}
                       </label>
                     ))}
                   </div>
@@ -154,33 +177,23 @@ export default function AssessmentPage() {
               ) : (
                 <div className="space-y-3">
                   <p className="text-gray-800 font-medium">{q.question_text}</p>
-                  <textarea
-                    rows={4}
-                    placeholder="Write your answer here…"
+                  <textarea rows={4} placeholder="Write your answer here…"
                     value={answers[q.id] || ""}
                     onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
                     required
-                    className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  />
+                    className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
                 </div>
               )}
             </div>
           ))}
 
           {questions.length > 0 && (
-            <div className="space-y-3">
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors"
-              >
+            <div className="space-y-3 pb-10">
+              {error && <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
+              <button type="submit" disabled={submitting}
+                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors">
                 {submitting ? "Submitting…" : "Submit Assessment"}
               </button>
-              {error && (
-                <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                  {error}
-                </p>
-              )}
             </div>
           )}
         </form>

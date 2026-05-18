@@ -65,7 +65,7 @@ export default function MarkingPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center gap-6 shadow-sm">
         <h1 className="text-xl font-bold text-indigo-700">Marking Review</h1>
         <div className="flex gap-2">
@@ -80,7 +80,7 @@ export default function MarkingPage() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-8 py-8 space-y-5">
+      <div className="max-w-5xl mx-auto px-8 py-8 space-y-5">
         {submissions.length === 0 && (
           <div className="text-center text-gray-400 py-16">No submissions found.</div>
         )}
@@ -168,7 +168,7 @@ export default function MarkingPage() {
             </div>
           );
         })}
-      </main>
+      </div>
     </div>
   );
 }

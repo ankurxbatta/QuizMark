@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
+from app.core.security import require_instructor
 from app.models.models import Submission, AuditLog
 from app.tasks.marking_tasks import mark_submission_task
 from app.schemas.schemas import OverrideRequest, SubmissionOut
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter()
 
@@ -16,6 +17,7 @@ async def override_mark(
     submission_id: uuid.UUID,
     payload: OverrideRequest,
     db: AsyncSession = Depends(get_db),
+    claims: dict = Depends(require_instructor),
 ):
     submission = await db.get(Submission, submission_id)
     if not submission:
@@ -26,12 +28,18 @@ async def override_mark(
     submission.override_reason = payload.override_reason
     submission.is_flagged = False
 
-    # Write audit log
+    # Write audit log — record who did the override
+    actor_id = None
+    try:
+        actor_id = uuid.UUID(claims.get("sub", ""))
+    except (ValueError, AttributeError):
+        pass
     log = AuditLog(
         event_type="override",
+        actor_id=actor_id,
         submission_id=submission_id,
         detail=f"Mark changed to {payload.override_mark}. Reason: {payload.override_reason or 'N/A'}",
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
     )
     db.add(log)
     await db.commit()
@@ -40,7 +48,7 @@ async def override_mark(
 
 
 @router.get("/flagged")
-async def list_flagged(db: AsyncSession = Depends(get_db)):
+async def list_flagged(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     result = await db.execute(
         select(Submission).where(Submission.is_flagged == True)
     )
@@ -48,7 +56,7 @@ async def list_flagged(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/audit-log")
-async def get_audit_log(db: AsyncSession = Depends(get_db)):
+async def get_audit_log(db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
     result = await db.execute(select(AuditLog).order_by(AuditLog.timestamp.desc()))
     logs = result.scalars().all()
     return [
@@ -68,6 +76,7 @@ async def get_audit_log(db: AsyncSession = Depends(get_db)):
 async def retry_marking(
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
 ):
     submission = await db.get(Submission, submission_id)
     if not submission:

@@ -29,7 +29,7 @@ services:
       broker:
         condition: service_started
       llm:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./data/uploads:/app/uploads
     networks:
@@ -59,6 +59,19 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+      - ./scripts/pull_models.sh:/pull_models.sh:ro
+    environment:
+      - SLM_MODEL_NAME=${SLM_MODEL_NAME:-phi3:mini}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME:-llama3}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+    # Pull required models on first start
+    entrypoint: ["/bin/bash", "-c", "ollama serve & sleep 5 && bash /pull_models.sh && wait"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
     # GPU support — uncomment if you have NVIDIA hardware:
     # deploy:
     #   resources:

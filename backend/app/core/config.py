@@ -1,9 +1,14 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
+from pydantic import field_validator
+from typing import Optional, List
+import os
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(
+        env_file=[".env", "../../.env"],  # works both in Docker (/app) and local dev
+        env_file_encoding="utf-8",
+    )
 
     # ── Database ─────────────────────────────────────────────────────────────
     DATABASE_URL: str
@@ -16,8 +21,15 @@ class Settings(BaseSettings):
     LOCKOUT_DURATION_MINUTES: int = 5
     ADMIN_ENABLED: bool = True
     ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str = "admin"
+    ADMIN_PASSWORD: Optional[str] = None  # Must be set in .env — no insecure default
     ADMIN_ROLE: str = "instructor"
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    CORS_ORIGINS: str = "http://localhost:3000"  # Comma-separated list
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
     # ── Celery ───────────────────────────────────────────────────────────────
     CELERY_BROKER_URL: str
@@ -61,12 +73,26 @@ class Settings(BaseSettings):
 
     # ── PDF ingestion ─────────────────────────────────────────────────────────
     UPLOAD_MAX_SIZE_MB: int = 25
-    PDF_MAX_PAGES: int = 620          # Full textbook — up from old limit of 100
-    PDF_MIN_CHUNK_CHARS: int = 300    # Discard chunks smaller than this
-    PDF_MAX_CHUNK_CHARS: int = 3000   # Split chunks larger than this
+    PDF_MAX_PAGES: int = 620
+    PDF_MIN_CHUNK_CHARS: int = 300
+    PDF_MAX_CHUNK_CHARS: int = 3000
 
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50
     BACKUP_RETENTION_DAYS: int = 30
+
+    @field_validator("ADMIN_PASSWORD", mode="after")
+    @classmethod
+    def _require_admin_password(cls, v, info):
+        """Refuse to start with ADMIN_ENABLED=True and no password set."""
+        # info.data may not have ADMIN_ENABLED if it wasn't parsed yet
+        admin_enabled = info.data.get("ADMIN_ENABLED", True)
+        if admin_enabled and not v:
+            raise ValueError(
+                "ADMIN_PASSWORD must be set in .env when ADMIN_ENABLED=true. "
+                "Add ADMIN_PASSWORD=<strong-password> to your .env file."
+            )
+        return v
+
 
 settings = Settings()

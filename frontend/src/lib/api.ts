@@ -13,4 +13,21 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Redirect to login on 401 (expired / invalid token)
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      Cookies.remove("token");
+      Cookies.remove("role");
+      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/") ) {
+        window.location.href = "/";
+      } else if (typeof window !== "undefined" && window.location.pathname !== "/") {
+        window.location.href = "/";
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default api;

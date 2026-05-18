@@ -126,10 +126,10 @@ export default function AnalyticsPage() {
   useEffect(() => { load(); }, []);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
         <div>
-          <h1 className="text-xl font-bold text-indigo-700">Pipeline Analytics</h1>
+          <h1 className="text-xl font-bold text-indigo-700">Analytics</h1>
           <p className="text-xs text-gray-400 mt-0.5">Hybrid SLM + RAG + LLM marking performance</p>
         </div>
         <button
@@ -143,7 +143,7 @@ export default function AnalyticsPage() {
       {loading ? (
         <div className="flex items-center justify-center h-64 text-gray-400">Loading analytics…</div>
       ) : (
-        <main className="max-w-6xl mx-auto px-8 py-8 space-y-8">
+        <div className="max-w-6xl mx-auto px-8 py-8 space-y-8">
 
           {/* ── Top-line KPIs ── */}
           {pipeline && (
@@ -278,7 +278,7 @@ export default function AnalyticsPage() {
             </section>
           )}
 
-        </main>
+        </div>
       )}
     </div>
   );
