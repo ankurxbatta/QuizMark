@@ -7,7 +7,7 @@ if [ ! -f .env ]; then
   cp .env.example .env
   echo ""
   echo "  ✅  .env created from .env.example"
-  echo "  ⚠️   Edit .env and set SECRET_KEY and POSTGRES_PASSWORD before continuing."
+  echo "  ⚠️   Edit .env and set SECRET_KEY, POSTGRES_PASSWORD, and ADMIN_PASSWORD before continuing."
   echo "  Then run ./setup.sh again."
   echo ""
   exit 1
@@ -32,7 +32,7 @@ done
 echo " ready."
 
 echo "==> Running Alembic migrations..."
-docker compose run --rm backend alembic upgrade head
+docker compose run --rm --no-deps backend alembic upgrade head
 
 echo "==> Starting Ollama service..."
 docker compose up -d llm

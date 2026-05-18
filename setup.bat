@@ -6,7 +6,7 @@ echo =^> Checking for .env...
 if not exist .env (
     copy .env.example .env
     echo.
-    echo   .env created – edit SECRET_KEY and POSTGRES_PASSWORD then run setup.bat again.
+    echo   .env created – edit SECRET_KEY, POSTGRES_PASSWORD, and ADMIN_PASSWORD then run setup.bat again.
     echo.
     exit /b 1
 )
@@ -24,7 +24,7 @@ echo =^> Waiting 15 seconds for Postgres...
 timeout /t 15 /nobreak >nul
 
 echo =^> Running Alembic migrations...
-docker compose run --rm backend alembic upgrade head
+docker compose run --rm --no-deps backend alembic upgrade head
 
 echo =^> Starting Ollama...
 docker compose up -d llm

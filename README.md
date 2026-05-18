@@ -21,7 +21,7 @@ I built this because our department wastes a lot of time writing questions by ha
 
 I used:
 
-- **Next.js 14** with TypeScript and Tailwind for the frontend
+- **Next.js 15** with TypeScript and Tailwind for the frontend
 - **FastAPI** (Python 3.11) for the backend API
 - **PostgreSQL** with the pgvector extension to store questions and their embeddings
 - **Ollama** running locally for embeddings (nomic-embed-text) and as a fallback LLM
@@ -47,6 +47,7 @@ Open `.env` and fill in at minimum:
 ```env
 SECRET_KEY=somethinglong
 POSTGRES_PASSWORD=yourpassword
+ADMIN_PASSWORD=your-admin-password
 GENERATION_LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
@@ -61,7 +62,7 @@ chmod +x setup.sh && ./setup.sh
 setup.bat
 ```
 
-Once everything is up, go to http://localhost:3000 and log in with the default admin credentials (set in `.env`).
+Once everything is up, go to http://localhost:3000 and log in with the admin credentials you set in `.env`.
 
 ---
 

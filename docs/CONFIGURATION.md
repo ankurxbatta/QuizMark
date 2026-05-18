@@ -10,6 +10,7 @@ All config is in `.env` — copy `.env.example` to get started. Here's what ever
 |---|---|
 | `SECRET_KEY` | Used to sign JWT tokens. Set this to something long and random. |
 | `POSTGRES_PASSWORD` | Password for the database. Change this from the default. |
+| `ADMIN_PASSWORD` | Password for the auto-created admin account. Required when `ADMIN_ENABLED=true`. |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | Whichever API key matches your chosen LLM provider. |
 
 ---
@@ -36,7 +37,7 @@ All config is in `.env` — copy `.env.example` to get started. Here's what ever
 | `LOCKOUT_DURATION_MINUTES` | `5` | How long the lockout lasts |
 | `ADMIN_ENABLED` | `true` | Creates a default admin account on first startup |
 | `ADMIN_USERNAME` | `admin` | Default login username |
-| `ADMIN_PASSWORD` | `admin` | Change this before deploying anywhere |
+| `ADMIN_PASSWORD` | — | Required when `ADMIN_ENABLED=true`; set a strong password |
 | `ADMIN_ROLE` | `instructor` | Role assigned to the auto-created admin |
 
 ---
