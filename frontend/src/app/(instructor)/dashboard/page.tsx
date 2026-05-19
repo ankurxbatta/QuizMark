@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import Link from "next/link";
+import Select from "@/components/Select";
 import {
   BookOpen, Upload, CheckSquare, Flag,
   Download, Clock, Database, BarChart2, Users
@@ -184,17 +185,14 @@ export default function InstructorDashboard() {
             <div className="space-y-4">
               <div>
                 <label className="text-xs font-medium text-gray-500 uppercase">Question</label>
-                <select
+                <Select
                   value={selectedQuestionId}
-                  onChange={(event) => changeQuestion(event.target.value)}
-                  className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                >
-                  {questions.map((question) => (
-                    <option key={question.id} value={question.id}>
-                      {question.topic_tag ? `${question.topic_tag} - ` : ""}{question.question_text}
-                    </option>
-                  ))}
-                </select>
+                  onChange={changeQuestion}
+                  options={questions.map((question) => ({
+                    value: question.id,
+                    label: `${ question.topic_tag ? question.topic_tag + " - " : ""}${question.question_text}`,
+                  }))}
+                />
                 {selectedQuestion && (
                   <p className="mt-2 text-xs text-gray-400">
                     Assigned to {selectedQuestion.assigned_student_ids?.length || 0} student{(selectedQuestion.assigned_student_ids?.length || 0) !== 1 ? "s" : ""}

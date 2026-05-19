@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
+import Select from "@/components/Select";
 import { Check, Pencil, Plus, Trash2, Users, X } from "lucide-react";
 
 interface Question {
@@ -145,13 +146,15 @@ export default function QuestionsPage() {
               ))}
               <div>
                 <label className="text-xs font-medium text-gray-500 uppercase">Type</label>
-                <select value={form.question_type}
-                  onChange={(e) => setForm({ ...form, question_type: e.target.value })}
-                  className="w-full mt-1 border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="short_answer">Short Answer</option>
-                  <option value="mcq">MCQ</option>
-                  <option value="true_false">True / False</option>
-                </select>
+                <Select
+                  value={form.question_type}
+                  onChange={(v) => setForm({ ...form, question_type: v })}
+                  options={[
+                    { value: "short_answer", label: "Short Answer" },
+                    { value: "mcq",          label: "MCQ" },
+                    { value: "true_false",   label: "True / False" },
+                  ]}
+                />
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-500 uppercase">Max Marks</label>
@@ -167,13 +170,15 @@ export default function QuestionsPage() {
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-500 uppercase">Difficulty</label>
-                <select value={form.difficulty}
-                  onChange={(e) => setForm({ ...form, difficulty: e.target.value })}
-                  className="w-full mt-1 border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
-                </select>
+                <Select
+                  value={form.difficulty}
+                  onChange={(v) => setForm({ ...form, difficulty: v })}
+                  options={[
+                    { value: "easy",   label: "Easy" },
+                    { value: "medium", label: "Medium" },
+                    { value: "hard",   label: "Hard" },
+                  ]}
+                />
               </div>
             </div>
             <div className="flex gap-3">

@@ -49,7 +49,8 @@ For each concept output EXACTLY ONE line in this format:
 <concept name> | <one-sentence factual answer>
 
 Rules:
-- Focus on definitions, formulas, conditions, and interpretations.
+- Focus on definitions, formulas, conditions, interpretations, and applied scenarios.
+- Prefer concepts that can be turned into calculation or application questions.
 - Do NOT copy exercise questions from the text.
 - Do NOT output anything except the pipe-separated lines.
 """
@@ -66,36 +67,61 @@ CONCEPT SKELETONS TO EXPAND:
 
 QUESTION TYPE REQUIRED: {qtype}
 
-Write each skeleton into a complete, high-quality exam question following these rules:
+Write each skeleton into a complete, high-quality exam question. Study the style rules and examples below carefully.
 
-For short_answer:
-- Write a clear, specific question (not "explain" or "describe" vaguely).
-- Model answer: 2-5 precise sentences that a student could realistically write.
-- Include specific numerical values or formulas where the source text shows them.
+━━━ SHORT ANSWER ━━━
+Style rules:
+- Ask about a SPECIFIC concept, formula, condition, or calculation — never vague "explain" or "describe" prompts.
+- Where the source contains numbers, formulas, or scenarios, build the question around them.
+- Questions may present a scenario or data and ask the student to calculate, identify, or interpret.
+- Model answer: 2–5 precise sentences a student could realistically write. Include formulas or numeric results where relevant.
+- Rubric: one criterion per mark. Format: "1 mark: <what student must state>. 1 mark: ..."
 
-For mcq:
-- Write an unambiguous question stem.
-- Provide exactly 4 options labelled A, B, C, D.
-- Only one option is correct; distractors must be plausible but clearly wrong.
-- Model answer: state the correct letter and explain why it is correct.
-- Rubric: single criterion - full marks if the correct option is selected.
+Good short-answer examples (style to emulate):
+  • "Svetlana charges a one-time fee of $25 plus $15 per hour for tutoring. Write the linear equation for her total earnings per session, and identify the independent and dependent variables."
+  • "The ages of smartphone users (13–55+) follow a normal distribution with mean 36.9 years and standard deviation 13.9 years. What is the probability that a randomly selected user is at most 50.8 years old?"
+  • "Explain the expected value of the F-ratio when the null hypothesis is true, and what causes deviations from this value."
+  • "Under what conditions is the Finite Population Correction Factor applied, and what is its purpose?"
 
-For true_false:
-- Write a precise statement that is clearly true OR clearly false.
-- Model answer: state "True" or "False" and give a 1-2 sentence justification.
-- Rubric: single criterion - full marks if the correct truth value is selected.
+BAD short-answer example (do NOT write this style):
+  • "Based on the text, explain in your own words what conditional probability means." ← too vague, not grounded in source data
 
-For ALL question types also provide:
-- rubric:
-    - short_answer: one criterion per mark, stated as what the student must include.
-        Format: "1 mark: <criterion>. 1 mark: <criterion>. ..."
-    - mcq/true_false: single criterion that awards full marks for the correct choice.
-- max_marks: integer (2 for trivial recall, 4 for standard, 6 for analysis, 8 for multi-step)
-- topic_tag: the chapter/topic this question comes from (e.g. "Normal Distribution")
+━━━ MCQ ━━━
+Style rules:
+- The stem must pose a clear, meaningful question about a statistical concept, condition, formula, or scenario.
+- NEVER generate fill-in-the-blank sentences that just blank out a word from the text.
+- NEVER use the source text wording directly as an answer option.
+- All four options (A–D) must be substantive and plausible; distractors should reflect common misconceptions.
+- Only one option is unambiguously correct.
+- Model answer: state the correct letter followed by a concise explanation.
+
+Good MCQ examples (style to emulate):
+  • Stem: "A researcher increases the sample size of a study from 36 to 100 while keeping all other factors constant. What happens to the confidence interval?" Options: A. It becomes wider. B. It becomes narrower. C. It remains the same. D. It becomes less accurate.
+  • Stem: "Which of the following is NOT a characteristic of a binomial experiment?" Options: A. There are only two possible outcomes per trial. B. The probability of success changes with each trial. C. The number of trials is fixed. D. Each trial is independent.
+  • Stem: "In a one-way ANOVA, what does the null hypothesis state?" Options test understanding of ANOVA assumptions.
+
+BAD MCQ example (do NOT write this style):
+  • "Which term best completes the statement? '____ is called the chi-square distribution.'" ← this is a trivial cloze, not a real question.
+
+━━━ TRUE/FALSE ━━━
+Style rules:
+- The statement must test application or interpretation, NOT just a definition from the text.
+- Prefer statements that involve a specific numerical claim, a consequence of a formula, or a practical condition.
+- Avoid pure theory statements that any student could guess without understanding.
+- Model answer: state "True" or "False" then give a 1–2 sentence justification citing the source concept.
+
+Good T/F examples (style to emulate):
+  • "True or False: When constructing a confidence interval for a population mean, if the sample size is 80, it is acceptable to substitute the sample standard deviation (s) for σ without significant bias."
+  • "True or False: Increasing the sample size when constructing a confidence interval, while keeping all other factors constant, will result in a wider confidence interval."
+
+━━━ ALL QUESTION TYPES ━━━
+Also provide:
+- max_marks: integer (2 for simple recall, 4 for standard application, 6 for analysis, 8 for multi-step)
+- topic_tag: chapter/topic (e.g. "Normal Distribution", "Confidence Intervals")
 - difficulty: easy | medium | hard
-  easy   = recall a definition or read a formula
-  medium = apply a formula or interpret a result
-  hard   = multi-step calculation or critical comparison
+  easy   = recall a definition or read a formula directly
+  medium = apply a formula, interpret a result, or reason through a scenario
+  hard   = multi-step calculation or critical comparison of concepts
 
 Respond ONLY as a valid JSON array. Each element must have these exact keys:
 question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty
@@ -105,23 +131,55 @@ No preamble. No trailing text. Just the JSON array.
 
 # Fallback for plain-text (no chunks)
 _PLAIN_TEXT_PROMPT = """\
-You are a statistics assessment author.
+You are a statistics assessment author writing exam questions for a business statistics course.
 
 SOURCE TEXT:
 {content}
 
 Generate {count} high-quality exam questions of type "{qtype}".
 
-Rules:
-- Questions must be answerable from the source text only.
-- For short_answer: 2-5 sentence model answers.
-- For mcq: 4 options, one correct, explain why in model_answer.
-- For true_false: clear statement + True/False justification.
-- For short_answer: rubric is one criterion per mark.
-- For mcq/true_false: rubric is a single criterion that awards full marks for the correct choice.
+Follow the style rules and examples below carefully.
+
+━━━ SHORT ANSWER ━━━
+- Ask about a SPECIFIC concept, formula, condition, or calculation — not vague "explain" or "describe" prompts.
+- Where the source contains numbers, formulas, or scenarios, build the question around them.
+- Model answer: 2–5 precise sentences. Include formulas or numeric results where relevant.
+- Rubric: one criterion per mark. Format: "1 mark: <what student must state>. 1 mark: ..."
+
+Good examples:
+  • "Svetlana charges a one-time fee of $25 plus $15 per hour. Write the linear equation for her total earnings and identify the independent and dependent variables."
+  • "The ages of smartphone users follow a normal distribution with mean 36.9 and SD 13.9. What is P(X ≤ 50.8)?"
+  • "Under what conditions is the Finite Population Correction Factor applied, and what is its purpose?"
+
+BAD example (avoid): "Based on the text, explain in your own words what conditional probability means."
+
+━━━ MCQ ━━━
+- Stem must pose a clear, meaningful question about a concept, condition, formula, or scenario.
+- NEVER generate fill-in-the-blank sentences that just blank out a word from the text.
+- Four substantive options (A–D); distractors should reflect common misconceptions.
+- Only one option is unambiguously correct.
+- Model answer: correct letter + brief explanation.
+
+Good examples:
+  • "A researcher increases sample size from 36 to 100, all else equal. What happens to the confidence interval?" A. Wider. B. Narrower. C. Same. D. Less accurate.
+  • "Which is NOT a characteristic of a binomial experiment?" — options test real understanding.
+
+BAD example (avoid): "Which term best completes: '____ is the chi-square distribution'?" ← trivial cloze.
+
+━━━ TRUE/FALSE ━━━
+- Test application or interpretation, NOT just a copied definition.
+- Prefer statements involving a specific numerical consequence, formula condition, or practical rule.
+- Model answer: "True" or "False" + 1–2 sentence justification referencing the source concept.
+
+Good examples:
+  • "True or False: When n = 80, substituting the sample SD for σ in a confidence interval formula introduces significant bias."
+  • "True or False: Increasing sample size while holding all else constant produces a wider confidence interval."
+
+━━━ ALL TYPES ━━━
 - Spread questions across different concepts in the source.
-- max_marks: 2-8 depending on complexity.
-- difficulty: easy | medium | hard.
+- max_marks: 2–8 depending on complexity.
+- difficulty: easy (recall) | medium (apply/interpret) | hard (multi-step/compare).
+- topic_tag: the chapter or concept area (e.g. "Confidence Intervals", "Normal Distribution").
 
 Respond ONLY as a valid JSON array with keys:
 question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty
@@ -561,25 +619,18 @@ def _fallback_questions_from_text(
             )
 
         if question_type == "mcq":
-            if term != "the concept" and re.search(rf"\b{re.escape(term)}\b", sentence, re.IGNORECASE):
-                stem = _cloze_sentence(sentence, term)
-                wrong = _distractors(term, terms)
-                options = [term] + wrong
-                question_text = (
-                    "Which term best completes the statement?\n"
-                    f"\"{stem}\"\n"
-                    f"A. {options[0]}\nB. {options[1]}\nC. {options[2]}\nD. {options[3]}"
-                )
-                model_answer = f"A. {term}. The source states: {sentence}"
-            else:
-                question_text = (
-                    f"Which statement is supported by the source section on {topic_tag}?\n"
-                    f"A. {sentence}\n"
-                    "B. The concept applies only when every data value is identical.\n"
-                    "C. The concept removes the need to interpret data in context.\n"
-                    "D. The concept is unrelated to probability, sampling, or variation."
-                )
-                model_answer = f"A. The source supports this statement: {sentence}"
+            # Build a genuine comprehension MCQ — never a trivial cloze
+            wrong = _distractors(term, terms)
+            while len(wrong) < 3:
+                wrong.append("none of the above")
+            question_text = (
+                f"Which of the following best describes {term} in the context of {topic_tag}?\n"
+                f"A. {sentence}\n"
+                f"B. {term.capitalize()} only applies when every data value is identical.\n"
+                f"C. {term.capitalize()} is unrelated to probability or sampling.\n"
+                f"D. {term.capitalize()} eliminates the need to interpret data in context."
+            )
+            model_answer = f"A. The source directly states: {sentence}"
         elif question_type == "true_false":
             statement = sentence if sentence.endswith(".") else f"{sentence}."
             question_text = statement

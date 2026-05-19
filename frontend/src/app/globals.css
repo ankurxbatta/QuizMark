@@ -1,3 +1,20 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ── Kill macOS/browser native form chrome ── */
+@layer base {
+  button {
+    -webkit-appearance: none;
+    appearance: none;
+    font-family: inherit;
+  }
+  select {
+    -webkit-appearance: none;
+    appearance: none;
+    font-family: inherit;
+  }
+  input, textarea {
+    font-family: inherit;
+  }
+}

@@ -1,9 +1,10 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import api from "@/lib/api";
+import Select from "@/components/Select";
 import {
   Upload, CheckCircle, FileText, File, Zap,
-  BookOpen, ChevronDown, RotateCcw, Loader2
+  BookOpen, RotateCcw, Loader2
 } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -336,15 +337,15 @@ export default function GeneratePage() {
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
                   Question Type
                 </label>
-                <select
+                <Select
                   value={qtype}
-                  onChange={(e) => setQtype(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                >
-                  <option value="short_answer">Short Answer</option>
-                  <option value="mcq">Multiple Choice (MCQ)</option>
-                  <option value="true_false">True / False</option>
-                </select>
+                  onChange={setQtype}
+                  options={[
+                    { value: "short_answer", label: "Short Answer" },
+                    { value: "mcq",          label: "Multiple Choice (MCQ)" },
+                    { value: "true_false",   label: "True / False" },
+                  ]}
+                />
               </div>
 
               {mode === "quick" ? (
@@ -390,22 +391,18 @@ export default function GeneratePage() {
                     </span>
                   )}
                 </label>
-                <div className="relative">
-                  <select
-                    value={topicFilter}
-                    onChange={(e) => setTopicFilter(e.target.value)}
-                    disabled={chaptersLoading}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm appearance-none focus:ring-2 focus:ring-indigo-500 focus:outline-none pr-8 disabled:opacity-60"
-                  >
-                    <option value="All chapters">All chapters</option>
-                    {chapters.map((ch) => (
-                      <option key={ch.num} value={ch.title}>
-                        Ch {ch.num}: {ch.title}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                </div>
+                <Select
+                  value={topicFilter}
+                  onChange={setTopicFilter}
+                  disabled={chaptersLoading}
+                  options={[
+                    { value: "All chapters", label: "All chapters" },
+                    ...chapters.map((ch) => ({
+                      value: ch.title,
+                      label: `Ch ${ch.num}: ${ch.title}`,
+                    })),
+                  ]}
+                />
                 {chapters.length === 0 && !chaptersLoading && (
                   <p className="text-xs text-amber-600 mt-1">
                     No chapters auto-detected — questions will sample the whole document.
