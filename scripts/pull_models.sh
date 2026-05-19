@@ -8,14 +8,14 @@ OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 
 # Models required by the application
 MODELS=(
-  "${SLM_MODEL_NAME:-phi3:mini}"
-  "${LLM_MODEL_NAME:-llama3}"
+  "${SLM_MODEL_NAME:-qwen2:0.5b}"
+  "${LLM_MODEL_NAME:-qwen2:1.5b}"
   "${EMBEDDING_MODEL:-nomic-embed-text}"
 )
 
-echo "==> Waiting for Ollama to be ready at $OLLAMA_HOST …"
+echo "==> Waiting for Ollama to be ready…"
 for i in $(seq 1 30); do
-  if curl -sf "$OLLAMA_HOST/api/tags" > /dev/null 2>&1; then
+  if ollama list > /dev/null 2>&1; then
     echo "==> Ollama is up."
     break
   fi
@@ -25,14 +25,7 @@ done
 
 for model in "${MODELS[@]}"; do
   echo "==> Pulling model: $model"
-  if curl -sf "$OLLAMA_HOST/api/tags" | grep -q "\"$model\""; then
-    echo "    Already present, skipping."
-  else
-    curl -sf -X POST "$OLLAMA_HOST/api/pull" \
-      -H "Content-Type: application/json" \
-      -d "{\"name\": \"$model\"}" | grep -v '^$' || true
-    echo "    Done."
-  fi
+  ollama pull "$model" || true
 done
 
 echo "==> All models ready."

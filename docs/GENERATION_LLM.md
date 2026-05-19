@@ -1,6 +1,6 @@
 # Choosing and setting up an LLM for generation
 
-The system needs an LLM to actually generate the questions. By default it's set up to use an online provider — I've tested it with Claude, GPT-4o, and Gemini. There's also a local fallback using phi3:mini through Ollama if you don't want to use an external API.
+The system needs an LLM to actually generate the questions. By default it's set up to use an online provider — I've tested it with Claude, GPT-4o, and Gemini. There's also a local fallback using qwen2:0.5b through Ollama if you don't want to use an external API.
 
 ---
 
@@ -77,7 +77,7 @@ Honestly if you're just testing or don't have a budget constraint, start with Cl
 
 ## Local fallback (no internet required)
 
-Set `GENERATION_LLM_ENABLED=false` and the system falls back to running phi3:mini locally through Ollama.
+Set `GENERATION_LLM_ENABLED=false` and the system falls back to running qwen2:0.5b locally through Ollama.
 
 ```env
 GENERATION_LLM_ENABLED=false
@@ -85,7 +85,7 @@ GENERATION_LLM_ENABLED=false
 
 You'll need to pull the model first:
 ```bash
-docker compose exec llm ollama pull phi3:mini
+docker compose exec llm ollama pull qwen2:0.5b
 ```
 
 The quality is noticeably worse — local generation tends to produce shorter model answers, looser rubrics, and sometimes returns malformed JSON that the fallback parser has to rescue. It's also slower on CPU (10–30s per chunk). But it works without any API key and keeps everything local.
@@ -111,4 +111,4 @@ In `llm_service.py`, a `generation_service` object is created at startup based o
 
 **Generation comes back empty** — usually means the LLM returned something that couldn't be parsed as JSON. Check `docker compose logs backend` to see the raw response.
 
-**Too slow with local phi3:mini** — this is a CPU bottleneck. Either switch to an online provider or uncomment the GPU block in `docker-compose.yml` if you have an Nvidia GPU available.
+**Too slow with local qwen2:0.5b** — this is a CPU bottleneck. Either switch to an online provider or uncomment the GPU block in `docker-compose.yml` if you have an Nvidia GPU available.

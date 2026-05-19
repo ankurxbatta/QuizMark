@@ -16,13 +16,13 @@ For this project I defaulted to online because the whole point is generating goo
 
 ## What I tested
 
-I compared output from three providers against local phi3:mini on the same set of chapters.
+I compared output from three providers against local qwen2:0.5b on the same set of chapters.
 
 **Short answer questions:**
-Online models gave cleaner, more precise answers. phi3:mini tended to be either too brief or started rambling. The rubrics from online models were better structured — proper one-criterion-per-mark format rather than vague descriptions.
+Online models gave cleaner, more precise answers. qwen2:0.5b tended to be either too brief or started rambling. The rubrics from online models were better structured — proper one-criterion-per-mark format rather than vague descriptions.
 
 **MCQ:**
-Online models were much better at writing plausible distractors. phi3:mini often produced obviously wrong options that any student could eliminate immediately.
+Online models were much better at writing plausible distractors. qwen2:0.5b often produced obviously wrong options that any student could eliminate immediately.
 
 **True/false:**
 Similar quality actually — this is a simpler task and phi3:mini handled it reasonably well.

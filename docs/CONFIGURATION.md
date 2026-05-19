@@ -46,7 +46,7 @@ All config is in `.env` — copy `.env.example` to get started. Here's what ever
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GENERATION_LLM_ENABLED` | `true` | Set to `false` to use local phi3:mini instead of an online provider |
+| `GENERATION_LLM_ENABLED` | `true` | Set to `false` to use local qwen2:0.5b instead of an online provider |
 | `GENERATION_LLM_PROVIDER` | `anthropic` | Options: `anthropic`, `openai`, `gemini` |
 | `GENERATION_LLM_MODEL` | `claude-sonnet-4-20250514` | Model name for the chosen provider |
 | `GENERATION_MAX_TOKENS` | `4096` | Max tokens in the LLM response — needs to be high enough for a full JSON array |

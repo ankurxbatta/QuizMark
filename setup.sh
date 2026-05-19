@@ -39,8 +39,8 @@ docker compose up -d llm
 sleep 5
 
 echo "==> Pulling LLM models (this may take several minutes)..."
-LLM_MODEL=$(grep ^LLM_MODEL_NAME  .env | cut -d= -f2 || echo "llama3")
-SLM_MODEL=$(grep ^SLM_MODEL_NAME  .env | cut -d= -f2 || echo "phi3:mini")
+LLM_MODEL=$(grep ^LLM_MODEL_NAME  .env | cut -d= -f2 || echo "qwen2:1.5b")
+SLM_MODEL=$(grep ^SLM_MODEL_NAME  .env | cut -d= -f2 || echo "qwen2:0.5b")
 EMBED_MODEL=$(grep ^EMBEDDING_MODEL .env | cut -d= -f2 || echo "nomic-embed-text")
 
 docker compose exec llm ollama pull "${LLM_MODEL}"

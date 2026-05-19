@@ -24,7 +24,7 @@ I used:
 - **Next.js 15** with TypeScript and Tailwind for the frontend
 - **FastAPI** (Python 3.11) for the backend API
 - **PostgreSQL** with the pgvector extension to store questions and their embeddings
-- **Ollama** running locally for embeddings (nomic-embed-text) and as a fallback LLM
+- **Ollama** running locally for embeddings (nomic-embed-text) and as a fallback LLM (qwen2 models)
 - **Claude / GPT-4o / Gemini** for the actual question generation (configurable)
 - **Celery + Redis** for the async background jobs when processing large textbooks
 - **Docker Compose** to run everything together
