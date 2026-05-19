@@ -12,6 +12,37 @@ import uuid
 router = APIRouter()
 
 
+# ── Student: fetch own submissions ────────────────────────────────────────────
+# IMPORTANT: this named route must be defined before /{submission_id} so
+# FastAPI does not try to parse "my" as a UUID.
+
+@router.get("/my", response_model=List[SubmissionOut])
+async def list_my_submissions(
+    db: AsyncSession = Depends(get_db),
+    claims: dict = Depends(get_current_user),
+):
+    """Return all submissions made by the currently logged-in student."""
+    student_id = uuid.UUID(claims["sub"])
+    result = await db.execute(
+        select(Submission, Question)
+        .join(Question, Submission.question_id == Question.id)
+        .where(Submission.student_id == student_id)
+        .order_by(Submission.submitted_at.asc())
+    )
+    rows = result.all()
+    return [
+        {
+            **s.__dict__,
+            "question_text": q.question_text,
+            "question_type": q.question_type,
+            "max_marks": q.max_marks,
+        }
+        for s, q in rows
+    ]
+
+
+# ── Student: submit an answer ─────────────────────────────────────────────────
+
 @router.post("/", response_model=SubmissionOut, status_code=201)
 async def submit_answer(
     payload: SubmissionCreate,
@@ -59,6 +90,8 @@ async def submit_answer(
     }
 
 
+# ── Instructor: list all submissions ─────────────────────────────────────────
+
 @router.get("/", response_model=List[SubmissionOut])
 async def list_submissions(
     flagged_only: bool = False,
@@ -81,8 +114,14 @@ async def list_submissions(
     ]
 
 
+# ── Instructor: get single submission ─────────────────────────────────────────
+
 @router.get("/{submission_id}", response_model=SubmissionOut)
-async def get_submission(submission_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: dict = Depends(require_instructor)):
+async def get_submission(
+    submission_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_instructor),
+):
     result = await db.execute(
         select(Submission, Question)
         .join(Question, Submission.question_id == Question.id)
