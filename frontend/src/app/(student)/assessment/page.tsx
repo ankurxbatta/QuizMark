@@ -42,18 +42,42 @@ interface SubmissionResult {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function extractMcqParts(text: string) {
-  const pattern = /([A-D])[).:\-]\s*/g;
-  const matches = Array.from(text.matchAll(pattern));
+  const toOptionMatches = (source: string, pattern: RegExp, offset = 0) =>
+    Array.from(source.matchAll(pattern)).map((match) => {
+      const markerOffset = match[0].search(/(?:Option\s*)?[A-D]/i);
+      const index = offset + (match.index ?? 0) + Math.max(markerOffset, 0);
+      return {
+        letter: match[1].toUpperCase(),
+        index,
+        end: offset + (match.index ?? 0) + match[0].length,
+      };
+    });
+
+  let matches = toOptionMatches(text, /^\s*(?:Option\s*)?([A-D])[).:\-]\s*/gim);
+  let stemEnd = matches[0]?.index ?? 0;
+
+  if (matches.length === 0) {
+    const label = /\b(?:Options|Choices|Answers)\s*[:\-]\s*/i.exec(text);
+    if (label) {
+      const offset = (label.index ?? 0) + label[0].length;
+      matches = toOptionMatches(
+        text.slice(offset),
+        /(?:^|[^A-Za-z0-9])(?:Option\s*)?([A-D])[).:\-]\s*/gi,
+        offset
+      );
+      stemEnd = label.index ?? 0;
+    }
+  }
+
   if (matches.length === 0) {
     return { stem: text.trim(), options: [] as { letter: string; text: string }[] };
   }
-  const firstIndex = matches[0].index ?? 0;
-  const stem = text.slice(0, firstIndex).trim();
+  const stem = text.slice(0, stemEnd).trim();
   const options: { letter: string; text: string }[] = [];
   for (let i = 0; i < matches.length; i++) {
-    const letter = matches[i][1].toUpperCase();
-    const start = (matches[i].index ?? 0) + matches[i][0].length;
-    const end = i + 1 < matches.length ? (matches[i + 1].index ?? text.length) : text.length;
+    const letter = matches[i].letter;
+    const start = matches[i].end;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
     const optionText = text.slice(start, end).trim();
     if (optionText) options.push({ letter, text: optionText });
   }

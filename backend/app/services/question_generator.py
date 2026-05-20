@@ -89,16 +89,35 @@ BAD short-answer example (do NOT write this style):
 ━━━ MCQ ━━━
 Style rules:
 - The stem must pose a clear, meaningful question about a statistical concept, condition, formula, or scenario.
+- Put the stem and options together in question_text using EXACTLY this line format:
+  Stem text?
+  A. First option
+  B. Second option
+  C. Third option
+  D. Fourth option
 - NEVER generate fill-in-the-blank sentences that just blank out a word from the text.
 - NEVER use the source text wording directly as an answer option.
 - All four options (A–D) must be substantive and plausible; distractors should reflect common misconceptions.
 - Only one option is unambiguously correct.
-- Model answer: state the correct letter followed by a concise explanation.
+- Model answer: start with the correct letter, then a concise explanation, e.g. "B. Increasing n lowers the standard error, so the interval becomes narrower."
+- Never omit the options. Preferred format: put the A-D options inside question_text. If you use a separate options/choices field, it must be an object with keys A, B, C, D.
 
 Good MCQ examples (style to emulate):
-  • Stem: "A researcher increases the sample size of a study from 36 to 100 while keeping all other factors constant. What happens to the confidence interval?" Options: A. It becomes wider. B. It becomes narrower. C. It remains the same. D. It becomes less accurate.
-  • Stem: "Which of the following is NOT a characteristic of a binomial experiment?" Options: A. There are only two possible outcomes per trial. B. The probability of success changes with each trial. C. The number of trials is fixed. D. Each trial is independent.
-  • Stem: "In a one-way ANOVA, what does the null hypothesis state?" Options test understanding of ANOVA assumptions.
+  • question_text: "A researcher increases the sample size of a study from 36 to 100 while keeping all other factors constant. What happens to the confidence interval?
+A. It becomes wider.
+B. It becomes narrower.
+C. It remains the same.
+D. It becomes less accurate."
+  • question_text: "Which of the following is NOT a characteristic of a binomial experiment?
+A. There are only two possible outcomes per trial.
+B. The probability of success changes with each trial.
+C. The number of trials is fixed.
+D. Each trial is independent."
+  • question_text: "In a one-way ANOVA, what does the null hypothesis state?
+A. All group means are equal.
+B. All individual observations are identical.
+C. The sample variances must all be zero.
+D. The data must contain exactly two groups."
 
 BAD MCQ example (do NOT write this style):
   • "Which term best completes the statement? '____ is called the chi-square distribution.'" ← this is a trivial cloze, not a real question.
@@ -123,8 +142,9 @@ Also provide:
   medium = apply a formula, interpret a result, or reason through a scenario
   hard   = multi-step calculation or critical comparison of concepts
 
-Respond ONLY as a valid JSON array. Each element must have these exact keys:
+Respond ONLY as a valid JSON array. Each element must have these required keys:
 question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty
+MCQ elements may also include an optional options or choices object with keys A, B, C, D.
 
 No preamble. No trailing text. Just the JSON array.
 """
@@ -155,14 +175,29 @@ BAD example (avoid): "Based on the text, explain in your own words what conditio
 
 ━━━ MCQ ━━━
 - Stem must pose a clear, meaningful question about a concept, condition, formula, or scenario.
+- Put the stem and options together in question_text using EXACTLY this line format:
+  Stem text?
+  A. First option
+  B. Second option
+  C. Third option
+  D. Fourth option
 - NEVER generate fill-in-the-blank sentences that just blank out a word from the text.
 - Four substantive options (A–D); distractors should reflect common misconceptions.
 - Only one option is unambiguously correct.
-- Model answer: correct letter + brief explanation.
+- Model answer: start with the correct letter + brief explanation, e.g. "B. Increasing n lowers the standard error."
+- Never omit the options. Preferred format: put the A-D options inside question_text. If you use a separate options/choices field, it must be an object with keys A, B, C, D.
 
 Good examples:
-  • "A researcher increases sample size from 36 to 100, all else equal. What happens to the confidence interval?" A. Wider. B. Narrower. C. Same. D. Less accurate.
-  • "Which is NOT a characteristic of a binomial experiment?" — options test real understanding.
+  • question_text: "A researcher increases sample size from 36 to 100, all else equal. What happens to the confidence interval?
+A. It becomes wider.
+B. It becomes narrower.
+C. It stays exactly the same.
+D. It becomes less connected to the sample."
+  • question_text: "Which is NOT a characteristic of a binomial experiment?
+A. There are only two possible outcomes per trial.
+B. The probability of success changes from trial to trial.
+C. The number of trials is fixed.
+D. Trials are independent."
 
 BAD example (avoid): "Which term best completes: '____ is the chi-square distribution'?" ← trivial cloze.
 
@@ -181,8 +216,9 @@ Good examples:
 - difficulty: easy (recall) | medium (apply/interpret) | hard (multi-step/compare).
 - topic_tag: the chapter or concept area (e.g. "Confidence Intervals", "Normal Distribution").
 
-Respond ONLY as a valid JSON array with keys:
+Respond ONLY as a valid JSON array with required keys:
 question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty
+MCQ elements may also include an optional options or choices object with keys A, B, C, D.
 """
 
 
@@ -677,6 +713,219 @@ def _stringify_llm_value(value) -> str:
     return str(value).strip()
 
 
+_MCQ_LETTERS = ("A", "B", "C", "D")
+_MCQ_OPTION_MARKER = re.compile(r"^\s*(?:option\s*)?([A-D])[\).:\-]\s+", re.IGNORECASE | re.MULTILINE)
+
+
+def _clean_option_text(value) -> str:
+    text = _normalise_text(_stringify_llm_value(value))
+    text = text.strip(" \t\r\n-:;")
+    return text
+
+
+def _split_mcq_text(value) -> tuple[str, dict[str, str]]:
+    """
+    Split an MCQ string into stem and A-D options.
+    Handles options on separate lines, with a fallback for "Options: A..." text.
+    """
+    text = _stringify_llm_value(value)
+    if not text:
+        return "", {}
+
+    scan_offset = 0
+    scan_text = text
+    matches = list(_MCQ_OPTION_MARKER.finditer(scan_text))
+    option_label = None
+    if not matches:
+        option_label = re.search(r"\b(?:options|choices|answers)\s*[:\-]\s*", text, re.IGNORECASE)
+        if option_label:
+            scan_offset = option_label.end()
+            scan_text = text[scan_offset:]
+            inline_pattern = re.compile(r"(?<![A-Za-z0-9])(?:option\s*)?([A-D])[\).:\-]\s+", re.IGNORECASE)
+            matches = list(inline_pattern.finditer(scan_text))
+    if not matches:
+        return _normalise_text(text), {}
+
+    stem_end = option_label.start() if option_label else scan_offset + matches[0].start()
+    stem = text[:stem_end]
+    stem = re.sub(r"(?:options|choices|answers)\s*[:\-]?\s*$", "", stem, flags=re.IGNORECASE)
+    stem = _normalise_text(stem)
+
+    options: dict[str, str] = {}
+    for i, match in enumerate(matches):
+        letter = match.group(1).upper()
+        start = scan_offset + match.end()
+        end = scan_offset + matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        option_text = _clean_option_text(text[start:end])
+        if option_text and letter in _MCQ_LETTERS:
+            options[letter] = option_text
+    return stem, options
+
+
+def _options_from_raw(value) -> dict[str, str]:
+    """Accept common LLM shapes such as options dicts/lists/strings."""
+    if value is None:
+        return {}
+
+    if isinstance(value, dict):
+        options: dict[str, str] = {}
+        for key, item in value.items():
+            key_text = str(key).strip().upper()
+            match = re.search(r"\b([A-D])\b", key_text)
+            if key_text in _MCQ_LETTERS:
+                letter = key_text
+            elif match:
+                letter = match.group(1)
+            elif key_text[-1:] in _MCQ_LETTERS:
+                letter = key_text[-1]
+            else:
+                continue
+            text = _clean_option_text(item)
+            if text:
+                options[letter] = text
+        return options
+
+    if isinstance(value, list):
+        options: dict[str, str] = {}
+        for index, item in enumerate(value[:4]):
+            fallback_letter = _MCQ_LETTERS[index]
+            if isinstance(item, dict):
+                raw_letter = item.get("letter") or item.get("label") or fallback_letter
+                letter_match = re.search(r"[A-D]", str(raw_letter).upper())
+                letter = letter_match.group(0) if letter_match else fallback_letter
+                text = (
+                    item.get("text")
+                    or item.get("option")
+                    or item.get("answer")
+                    or item.get("value")
+                    or item.get("content")
+                )
+                if text is None:
+                    text = {
+                        k: v
+                        for k, v in item.items()
+                        if k not in {"letter", "label", "is_correct", "correct"}
+                    }
+            else:
+                letter = fallback_letter
+                text = item
+            option_text = _clean_option_text(text)
+            if option_text:
+                options[letter] = option_text
+        return options
+
+    _, options = _split_mcq_text(value)
+    return options
+
+
+def _correct_letter_from_answer(model_answer: str, options: dict[str, str]) -> str | None:
+    patterns = (
+        r"^\s*([A-D])[\).:\-]?\b",
+        r"(?:the\s+)?(?:correct\s+)?(?:answer|option|choice)(?:\s+is)?\s*[:\-]?\s*([A-D])\b",
+        r"\boption\s+([A-D])\b",
+        r"\bchoice\s+([A-D])\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, model_answer, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+    answer_lower = model_answer.lower()
+    for letter, text in options.items():
+        if text and text.lower() in answer_lower:
+            return letter
+    return None
+
+
+def _clean_correct_option_from_answer(model_answer: str) -> str:
+    text = _normalise_text(model_answer)
+    text = re.sub(
+        r"^\s*(?:the\s+)?(?:correct\s+)?(?:answer|option|choice)(?:\s+is)?\s*[:\-]?\s*[A-D][\).:\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"^\s*[A-D][\).:\-]\s*", "", text, flags=re.IGNORECASE)
+    text = text.strip()
+    if len(text) > 180:
+        sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0].strip()
+        text = sentence if 20 <= len(sentence) <= 180 else text[:180].rstrip(" ,;:") + "."
+    return text or "The best answer correctly applies the concept in the question."
+
+
+def _generic_mcq_distractors(topic_tag: str, correct_text: str) -> list[str]:
+    topic = topic_tag or "this topic"
+    candidates = [
+        f"It applies only when every observed value in {topic} is identical.",
+        "It removes the need to check the conditions or assumptions of the method.",
+        "It reverses the interpretation of the relationship described in the question.",
+        "It treats a sample result as if it were always the exact population value.",
+        "It is unrelated to probability, sampling, or statistical inference.",
+    ]
+    correct_key = correct_text.lower()
+    return [c for c in candidates if c.lower() != correct_key][:3]
+
+
+def _normalise_mcq(q: dict, raw_question_text) -> None:
+    """Ensure MCQs are stored as stem + A-D options inside question_text."""
+    stem, embedded_options = _split_mcq_text(raw_question_text)
+
+    structured_options: dict[str, str] = {}
+    if isinstance(raw_question_text, dict):
+        stem = (
+            _stringify_llm_value(raw_question_text.get("stem"))
+            or _stringify_llm_value(raw_question_text.get("question"))
+            or stem
+        )
+        for field in ("options", "choices", "answer_options", "answers"):
+            structured_options.update(_options_from_raw(raw_question_text.get(field)))
+
+    for field in ("options", "choices", "answer_options", "answers"):
+        structured_options.update(_options_from_raw(q.get(field)))
+
+    options = embedded_options.copy()
+    if len(structured_options) >= len(options):
+        options.update(structured_options)
+    else:
+        structured_options.update(options)
+        options = structured_options
+
+    stem = stem or _normalise_text(_stringify_llm_value(raw_question_text))
+    stem = re.sub(r"\s*(?:options|choices|answers)\s*[:\-]?\s*$", "", stem, flags=re.IGNORECASE).strip()
+    if not stem:
+        stem = "Which option best answers the question?"
+
+    model_answer = _stringify_llm_value(q.get("model_answer"))
+    correct_letter = _correct_letter_from_answer(model_answer, options) or "A"
+    if correct_letter not in _MCQ_LETTERS:
+        correct_letter = "A"
+
+    correct_text = options.get(correct_letter) or _clean_correct_option_from_answer(model_answer)
+    if not options:
+        options[correct_letter] = correct_text
+    elif correct_letter not in options:
+        options[correct_letter] = correct_text
+
+    distractors = iter(_generic_mcq_distractors(q.get("topic_tag", "Statistics"), correct_text))
+    for letter in _MCQ_LETTERS:
+        if not options.get(letter):
+            options[letter] = next(distractors, f"An incorrect interpretation of {q.get('topic_tag', 'the concept')}.")
+
+    options = {letter: _clean_option_text(options[letter]) for letter in _MCQ_LETTERS}
+    q["question_text"] = "\n".join(
+        [stem, *(f"{letter}. {options[letter]}" for letter in _MCQ_LETTERS)]
+    )
+
+    if not _correct_letter_from_answer(model_answer, options):
+        q["model_answer"] = f"{correct_letter}. {correct_text}"
+    elif not re.match(r"^\s*[A-D][\).:\-]?", model_answer, re.IGNORECASE):
+        q["model_answer"] = f"{correct_letter}. {model_answer}"
+    else:
+        q["model_answer"] = model_answer
+
+    q["rubric"] = q.get("rubric") or "Full marks: selects the correct option."
+
+
 def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]:
     """Filter out incomplete or malformed question dicts."""
     valid = []
@@ -686,7 +935,8 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
         if not _REQUIRED_KEYS.issubset(q.keys()):
             continue
 
-        q["question_text"] = _stringify_llm_value(q.get("question_text"))
+        raw_question_text = q.get("question_text")
+        q["question_text"] = _stringify_llm_value(raw_question_text)
         q["model_answer"] = _stringify_llm_value(q.get("model_answer"))
         q["rubric"] = _stringify_llm_value(q.get("rubric"))
         q["topic_tag"] = _stringify_llm_value(q.get("topic_tag")) or "Statistics"
@@ -700,7 +950,11 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
         qt = _stringify_llm_value(q.get("question_type", expected_type)).lower().replace(" ", "_")
         if qt not in {"short_answer", "mcq", "true_false"}:
             qt = expected_type
+        if expected_type in {"short_answer", "mcq", "true_false"}:
+            qt = expected_type
         q["question_type"] = qt
+        if q["question_type"] == "mcq":
+            _normalise_mcq(q, raw_question_text)
         # Normalise max_marks
         try:
             q["max_marks"] = float(q["max_marks"])

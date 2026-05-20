@@ -70,12 +70,21 @@ def _parse_llm_json(raw: str, max_marks: float) -> dict:
 
 
 def _extract_mcq_options(text: str) -> dict[str, str]:
-    pattern = re.compile(r"([A-D])[).:\-]\s*")
-    matches = list(pattern.finditer(text))
+    pattern = re.compile(r"^\s*([A-D])[).:\-]\s*", re.MULTILINE)
+    scan_offset = 0
+    scan_text = text
+    matches = list(pattern.finditer(scan_text))
+    if not matches:
+        label = re.search(r"\b(?:options|choices|answers)\s*[:\-]\s*", text, re.IGNORECASE)
+        if label:
+            scan_offset = label.end()
+            scan_text = text[scan_offset:]
+            inline_pattern = re.compile(r"(?<![A-Za-z0-9])([A-D])[).:\-]\s*", re.IGNORECASE)
+            matches = list(inline_pattern.finditer(scan_text))
     options: dict[str, str] = {}
     for i, match in enumerate(matches):
-        start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        start = scan_offset + match.end()
+        end = scan_offset + matches[i + 1].start() if i + 1 < len(matches) else len(text)
         option_text = text[start:end].strip()
         if option_text:
             options[match.group(1).upper()] = option_text
