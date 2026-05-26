@@ -154,21 +154,58 @@ def _extract_page_text(page) -> str:
 _CHAPTER_PATTERNS = [
     # With "Chapter" keyword — colon, pipe, or just whitespace separator
     re.compile(
-        r"^[ \t]*[Cc]hapter\s+(\d{1,3})\s*[:|]?\s+([A-Z][^\n]{3,80})",
+        r"^[ \t]*[Cc]hapter[ \t]+(\d{1,3})[ \t]*[:|]?[ \t]+([A-Z][^\n]{3,80})",
         re.MULTILINE,
     ),
     # CHAPTER (all-caps) keyword
     re.compile(
-        r"^[ \t]*CHAPTER\s+(\d{1,3})\s*[:|]?\s+([A-Z][^\n]{3,80})",
+        r"^[ \t]*CHAPTER[ \t]+(\d{1,3})[ \t]*[:|]?[ \t]+([A-Z][^\n]{3,80})",
         re.MULTILINE,
     ),
     # Standalone "1 Title" or "1. Title" on its own line (title must start with capital)
     # Requires at least one word after the number to avoid matching page numbers.
     re.compile(
-        r"^[ \t]*(\d{1,2})\.?\s{1,4}([A-Z][a-zA-Z ]{5,70})\s*$",
+        r"^[ \t]*(\d{1,2})\.?[ \t]{1,4}([A-Z][a-zA-Z ]{5,70})[ \t]*$",
         re.MULTILINE,
     ),
 ]
+
+_FRONT_MATTER_TITLES_RE = re.compile(
+    r"""
+    ^(?:
+        preface                         |
+        foreword                        |
+        acknowledg(?:e)?ments?          |
+        table\s+of\s+contents           |
+        contents                        |
+        copyright                       |
+        dedication                      |
+        about\s+the\s+authors?          |
+        answer\s+key                    |
+        answers?                        |
+        solutions?                      |
+        glossary                        |
+        references                      |
+        bibliography                    |
+        index
+    )$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_TOC_ENTRY_RE = re.compile(
+    r"""
+    ^\s*
+    (?:
+        (?:chapter\s+)?\d{1,2}\.?\s+[A-Z][^\n]{3,90}
+        |
+        [A-Z][A-Za-z ]{3,90}
+    )
+    \s*(?:\.{2,}|\s{3,})\s*
+    \d{1,4}\s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 _SECTION_RE = re.compile(
     r"^(\d{1,2}\.\d{1,2})\s+([A-Z][^\n]{5,80})$",
@@ -191,8 +228,7 @@ def _find_chapter_match(text: str):
     Returns (chapter_number: int, chapter_title: str) or None.
     """
     for pattern in _CHAPTER_PATTERNS:
-        m = pattern.search(text)
-        if m:
+        for m in pattern.finditer(text):
             try:
                 num = int(m.group(1))
             except (IndexError, ValueError):
@@ -202,7 +238,7 @@ def _find_chapter_match(text: str):
                 continue
             title = _clean_heading_title(m.group(2))
             # Reject very short or obviously wrong titles
-            if len(title) < 4:
+            if len(title) < 4 or _is_front_matter_title(title):
                 continue
             return num, title
     return None
@@ -213,6 +249,26 @@ def _clean_heading_title(title: str) -> str:
     title = re.sub(r"\s*\.{2,}\s*\d+\s*$", "", title.strip())
     title = re.sub(r"\s+\d{1,4}\s*$", "", title)
     return title.strip()
+
+
+def _is_front_matter_title(title: str) -> bool:
+    """True for non-chapter book matter that is often numbered like pages."""
+    normalized = re.sub(r"\s+", " ", title.strip())
+    return bool(_FRONT_MATTER_TITLES_RE.match(normalized))
+
+
+def _is_toc_like_page(text: str) -> bool:
+    """Return true when extracted text looks like a table of contents page."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    first_lines = " ".join(lines[:12]).lower()
+    if "table of contents" in first_lines:
+        return True
+
+    toc_entries = sum(1 for line in lines[:80] if _TOC_ENTRY_RE.match(line))
+    return toc_entries >= 4
 
 
 def _resolve_topic(chapter_title: str) -> str:
@@ -337,8 +393,10 @@ def parse_pdf_into_chunks(
                 page.flush_cache()
             continue
 
-        # Check for chapter heading on this page using flexible patterns
-        ch_match = _find_chapter_match(raw_text)
+        # Check for chapter heading on this page using flexible patterns.
+        # TOC/front-matter pages often contain lines like "2 Preface", which
+        # are page references rather than real chapter starts.
+        ch_match = None if _is_toc_like_page(raw_text) else _find_chapter_match(raw_text)
         if ch_match:
             _flush_buffer(page_num - 1)
             buffer_page_start = page_num
@@ -412,6 +470,10 @@ def extract_chapters_from_pdf(file_bytes: bytes, max_pages: int = 600) -> list[d
                     text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
                 except Exception:
                     text = ""
+                if _is_toc_like_page(text):
+                    if hasattr(page, "flush_cache"):
+                        page.flush_cache()
+                    continue
                 result = _find_chapter_match(text)
                 if result:
                     num, title = result
@@ -425,6 +487,8 @@ def extract_chapters_from_pdf(file_bytes: bytes, max_pages: int = 600) -> list[d
             reader = PdfReader(io.BytesIO(file_bytes))
             for page in reader.pages[:max_pages]:
                 text = page.extract_text() or ""
+                if _is_toc_like_page(text):
+                    continue
                 result = _find_chapter_match(text)
                 if result:
                     num, title = result
