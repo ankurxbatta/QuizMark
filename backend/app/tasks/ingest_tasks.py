@@ -3,8 +3,8 @@ ingest_tasks.py  —  Celery background task for full-textbook PDF ingestion.
 
 Processes a PDF chapter-by-chapter:
   1. parse_pdf_into_chunks() — deep structural parsing
-  2. Store chunks in MongoDB with embeddings (RAG source)
-  3. Run describe_graph_chunks() via GPT-4o Vision
+  2. Run describe_graph_chunks() via Gemini Vision
+  3. Store chunks in MongoDB with embeddings (RAG source)
   4. Group chunks by chapter, generate questions per chapter
   5. Persist each question to MongoDB questions collection
   6. Update IngestJob progress in real time
@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 
 from app.tasks.celery_app import celery_app
+from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.models.models import IngestJobStatus
 from app.services.pdf_service import parse_pdf_into_chunks
@@ -24,6 +25,23 @@ from app.services.llm_service import llm_service
 
 _ALLOWED_QTYPES = {"mcq", "true_false", "short_answer"}
 _ALLOWED_DIFFICULTIES = {"easy", "medium", "hard"}
+
+
+def _chunk_embedding_text(chunk) -> str:
+    parts = [
+        f"{chunk.chapter_title} {chunk.section_title}",
+        chunk.text[:1500],
+    ]
+    for label, values in (
+        ("Tables", getattr(chunk, "table_texts", [])),
+        ("Images and charts", getattr(chunk, "image_texts", [])),
+    ):
+        if values:
+            parts.append(f"{label}:\n" + "\n".join(values)[:1200])
+    math_text = getattr(chunk, "math_text", "")
+    if math_text:
+        parts.append(f"Formula snippets:\n{math_text[:800]}")
+    return "\n\n".join(part for part in parts if part)
 
 
 @celery_app.task(bind=True, max_retries=0, time_limit=3600)
@@ -56,7 +74,7 @@ async def _run_ingest_only(job_id: str, pdf_bytes: bytes, book_id: str):
         }},
     )
 
-    chunks = parse_pdf_into_chunks(pdf_bytes, max_pages=620)
+    chunks = parse_pdf_into_chunks(pdf_bytes, max_pages=settings.PDF_MAX_PAGES)
     if not chunks:
         await _update_job(db, job_id,
             status=IngestJobStatus.failed.value,
@@ -77,21 +95,7 @@ async def _run_ingest_only(job_id: str, pdf_bytes: bytes, book_id: str):
         progress_message=f"Parsed {len(chunks)} chunks across {total_chapters} chapters. Storing…",
     )
 
-    # Embed + store chunks
-    from app.services.mongo_vector_store import store_chunk as _mongo_store
-    errors = 0
-    for i, chunk in enumerate(chunks):
-        try:
-            emb = await llm_service.embed(chunk.text[:1500])
-            await _mongo_store(chunk, emb, book_id)
-        except Exception:
-            errors += 1
-        if i % 50 == 0:
-            await _update_job(db, job_id,
-                progress_message=f"Stored {i+1}/{len(chunks)} chunks…",
-            )
-
-    # Gemini Vision for chart pages
+    # Describe charts before storing, so extracted descriptions are persisted.
     try:
         from app.services.pdf_extractor import describe_graph_chunks
         if any(getattr(c, "graph_page_nums", None) for c in chunks):
@@ -99,6 +103,20 @@ async def _run_ingest_only(job_id: str, pdf_bytes: bytes, book_id: str):
             await describe_graph_chunks(chunks, pdf_bytes)
     except Exception:
         pass
+
+    # Embed + store chunks
+    from app.services.mongo_vector_store import store_chunk as _mongo_store
+    errors = 0
+    for i, chunk in enumerate(chunks):
+        try:
+            emb = await llm_service.embed(_chunk_embedding_text(chunk))
+            await _mongo_store(chunk, emb, book_id)
+        except Exception:
+            errors += 1
+        if i % 50 == 0:
+            await _update_job(db, job_id,
+                progress_message=f"Stored {i+1}/{len(chunks)} chunks…",
+            )
 
     await _update_job(db, job_id,
         status=IngestJobStatus.done.value,
@@ -150,7 +168,7 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     )
 
     # ── Step 1: Parse PDF ─────────────────────────────────────────────────────
-    chunks = parse_pdf_into_chunks(pdf_bytes, max_pages=620)
+    chunks = parse_pdf_into_chunks(pdf_bytes, max_pages=settings.PDF_MAX_PAGES)
     if not chunks:
         await _update_job(db, job_id,
             status=IngestJobStatus.failed.value,
@@ -160,13 +178,25 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         )
         return
 
-    # ── Step 2: Embed chunks → MongoDB vector store ───────────────────────────
+    # ── Step 2: Gemini Vision descriptions for chart pages ───────────────────
+    try:
+        from app.services.pdf_extractor import describe_graph_chunks
+        has_graph_chunks = any(getattr(c, "graph_page_nums", None) for c in chunks)
+        if has_graph_chunks:
+            await _update_job(db, job_id, progress_message="Describing charts with Gemini Vision…")
+            await describe_graph_chunks(chunks, pdf_bytes)
+    except Exception as _exc:
+        await _update_job(db, job_id,
+            progress_message=f"Graph vision skipped: {str(_exc)[:120]}"
+        )
+
+    # ── Step 3: Embed chunks → MongoDB vector store ───────────────────────────
     mongo_errors = 0
     try:
         from app.services.mongo_vector_store import store_chunk as _mongo_store
         for _chunk in chunks:
             try:
-                _emb = await llm_service.embed(_chunk.text[:1500])
+                _emb = await llm_service.embed(_chunk_embedding_text(_chunk))
                 await _mongo_store(_chunk, _emb, job_id)
             except Exception:
                 mongo_errors += 1
@@ -177,18 +207,6 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     except Exception as _exc:
         await _update_job(db, job_id,
             progress_message=f"MongoDB chunk storage skipped: {str(_exc)[:120]}"
-        )
-
-    # ── Step 3: GPT-4o Vision descriptions for chart pages ───────────────────
-    try:
-        from app.services.pdf_extractor import describe_graph_chunks
-        has_graph_chunks = any(getattr(c, "graph_page_nums", None) for c in chunks)
-        if has_graph_chunks:
-            await _update_job(db, job_id, progress_message="Describing charts with GPT-4o Vision…")
-            await describe_graph_chunks(chunks, pdf_bytes)
-    except Exception as _exc:
-        await _update_job(db, job_id,
-            progress_message=f"Graph vision skipped: {str(_exc)[:120]}"
         )
 
     # ── Step 4: Group by chapter ──────────────────────────────────────────────
@@ -389,8 +407,21 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
                 parts.append("[Contains: mathematical formulas]")
             if self.has_example:
                 parts.append("[Contains: worked examples]")
+            if self.table_texts:
+                parts.append("[Contains: extracted tables]")
+            if self.image_texts:
+                parts.append("[Contains: extracted image/chart text]")
             parts.append("")
             parts.append(self.text)
+            if self.table_texts:
+                parts.append("\n[EXTRACTED TABLES]")
+                parts.extend(self.table_texts)
+            if self.math_text:
+                parts.append("\n[FORMULA SNIPPETS]")
+                parts.append(self.math_text)
+            if self.image_texts:
+                parts.append("\n[IMAGE/CHART TEXT]")
+                parts.extend(self.image_texts)
             return "\n".join(parts)
 
     chunks = [_DbChunk(doc) for doc in raw_docs]

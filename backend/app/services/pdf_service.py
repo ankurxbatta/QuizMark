@@ -99,6 +99,9 @@ class TextChunk:
 
     def to_prompt_block(self) -> str:
         """Format for injection into an LLM prompt."""
+        table_texts = getattr(self, "table_texts", [])
+        image_texts = getattr(self, "image_texts", [])
+        math_text = getattr(self, "math_text", "")
         parts = [
             f"[SOURCE: {self.label} | Topic: {self.topic_tag} | "
             f"Pages {self.page_start}–{self.page_end}]",
@@ -107,8 +110,21 @@ class TextChunk:
             parts.append("[Contains: mathematical formulas]")
         if self.has_example:
             parts.append("[Contains: worked examples]")
+        if table_texts:
+            parts.append("[Contains: extracted tables]")
+        if image_texts:
+            parts.append("[Contains: extracted image/chart text]")
         parts.append("")
         parts.append(self.text)
+        if table_texts:
+            parts.append("\n[EXTRACTED TABLES]")
+            parts.extend(table_texts)
+        if math_text:
+            parts.append("\n[FORMULA SNIPPETS]")
+            parts.append(math_text)
+        if image_texts:
+            parts.append("\n[IMAGE/CHART TEXT]")
+            parts.extend(image_texts)
         return "\n".join(parts)
 
 
@@ -328,7 +344,7 @@ def _is_skip_block(text: str) -> bool:
 
 def parse_pdf_into_chunks(
     file_bytes: bytes,
-    max_pages: int = 600,
+    max_pages: int = 700,
     min_chunk_chars: int = 300,
     max_chunk_chars: int = 3000,
 ) -> list[TextChunk]:
@@ -471,7 +487,7 @@ def _split_into_sub_chunks(text: str, max_chars: int) -> list[str]:
     return sub_chunks if sub_chunks else [text[:max_chars]]
 
 
-def extract_chapters_from_pdf(file_bytes: bytes, max_pages: int = 600) -> list[dict]:
+def extract_chapters_from_pdf(file_bytes: bytes, max_pages: int = 700) -> list[dict]:
     """
     Quickly scan a PDF and return the list of chapters found in it.
     Returns list of {"num": int, "title": str} dicts, ordered by chapter number.

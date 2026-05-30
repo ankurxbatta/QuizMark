@@ -49,7 +49,7 @@ async def extract_chapters(
         raise HTTPException(415, "Only PDF files are supported.")
     if len(raw_bytes) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
         raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
-    return {"chapters": extract_chapters_from_pdf(raw_bytes)}
+    return {"chapters": extract_chapters_from_pdf(raw_bytes, max_pages=settings.PDF_MAX_PAGES)}
 
 
 # ── Async full-book ingest ─────────────────────────────────────────────────────

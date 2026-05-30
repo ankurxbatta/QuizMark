@@ -88,7 +88,7 @@ docker compose run --rm --no-deps backend python -m app.seed_demo_data
 ## How to generate questions
 
 1. Log in as instructor at http://localhost:3000
-2. Go to **Library** → upload a PDF textbook (up to 25 MB, up to 620 pages)
+2. Go to **Library** → upload a PDF textbook (up to 25 MB, up to 700 pages)
 3. Wait for ingestion to complete (progress shown in real time)
 4. Click the book → **Generate Questions**
 5. Choose type (MCQ / short answer / true-false), difficulty, and count

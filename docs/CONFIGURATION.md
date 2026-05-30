@@ -64,7 +64,7 @@ See [GENERATION_LLM.md](GENERATION_LLM.md) for more detail on picking a provider
 | Variable | Default | Notes |
 |---|---|---|
 | `UPLOAD_MAX_SIZE_MB` | `25` | Max file size for uploads |
-| `PDF_MAX_PAGES` | `620` | How many pages to read from a PDF — increase if your textbook is longer |
+| `PDF_MAX_PAGES` | `700` | How many pages to read from a PDF — increase if your textbook is longer |
 | `PDF_MIN_CHUNK_CHARS` | `300` | Chunks smaller than this get discarded (usually headers or short paragraphs) |
 | `PDF_MAX_CHUNK_CHARS` | `3000` | Chunks larger than this get split at paragraph boundaries |
 

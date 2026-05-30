@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     # ── PDF ingestion ─────────────────────────────────────────────────────────
     UPLOAD_MAX_SIZE_MB: int = 25
-    PDF_MAX_PAGES: int = 620
+    PDF_MAX_PAGES: int = 700
     PDF_MIN_CHUNK_CHARS: int = 300
     PDF_MAX_CHUNK_CHARS: int = 3000
 

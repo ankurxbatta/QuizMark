@@ -59,7 +59,7 @@ GEMINI_MODEL   = os.environ.get("GENERATION_LLM_MODEL", _ENV.get("GENERATION_LLM
 GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_EMBED_MODEL = "gemini-embedding-001"  # truncated to 768-dim via outputDimensionality
 
-MAX_PAGES      = 620
+MAX_PAGES      = 700
 MIN_CHUNK_CHARS = 300
 MAX_CHUNK_CHARS = 3000
 BOOK_ID        = "IntroductoryBusinessStatistics-OP"
@@ -679,7 +679,14 @@ async def main():
         if i % 50 == 0:
             log.info(f"  Embedding chunk {i + 1}/{len(chunks)}…")
         try:
-            emb = await _embed(f"{chunk.chapter_title} {chunk.section_title}\n{chunk.text[:1500]}")
+            embed_text = "\n\n".join(part for part in [
+                f"{chunk.chapter_title} {chunk.section_title}",
+                chunk.text[:1500],
+                ("Tables:\n" + "\n".join(chunk.table_texts)[:1200]) if chunk.table_texts else "",
+                ("Images and charts:\n" + "\n".join(chunk.image_texts)[:1200]) if chunk.image_texts else "",
+                (f"Formula snippets:\n{chunk.math_text[:800]}") if chunk.math_text else "",
+            ] if part)
+            emb = await _embed(embed_text)
             embeddings.append(emb)
         except Exception as exc:
             log.warning(f"Chunk {i} embed failed: {exc}")

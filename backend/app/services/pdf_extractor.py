@@ -308,7 +308,7 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
 
 def extract_enhanced_chunks(
     file_bytes: bytes,
-    max_pages: int = 620,
+    max_pages: int = 700,
     min_chunk_chars: int = 300,
     max_chunk_chars: int = 3000,
 ) -> list[EnhancedChunk]:
@@ -558,7 +558,7 @@ async def describe_graph_chunks(
         doc.close()
         return
 
-    logger.info(f"describe_graph_chunks: sending {len(chunk_page_map)} pages to GPT-4o Vision")
+    logger.info(f"describe_graph_chunks: sending {len(chunk_page_map)} pages to Gemini Vision")
 
     descriptions = await _asyncio.gather(
         *[_describe_page(pn, ctx) for (_, pn, ctx) in chunk_page_map],
