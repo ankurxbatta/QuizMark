@@ -1,10 +1,16 @@
 """
-rag_pipeline.py  —  Hybrid SLM + RAG + LLM marking pipeline.
+rag_pipeline.py  —  Hybrid SLM + RAG + LLM marking pipeline (MongoDB backend).
+
+RAG context for marking now pulls from two sources:
+  1. pdf_chunks   — actual textbook sections (text, tables, formulas, image
+                    descriptions) retrieved by semantic similarity to the
+                    student's answer. Gives the LLM the source material.
+  2. questions    — similar stored Q&A pairs for comparison calibration.
 
 Tier routing:
   HIGH  (confidence >= CONFIDENCE_HIGH)  → SLM mark accepted, no LLM call
-  MID   (CONFIDENCE_MID <= conf < HIGH)  → RAG top-K + offline LLM
-  LOW   (confidence < CONFIDENCE_MID)    → RAG wide top-K + online LLM (or offline) + flag
+  MID   (CONFIDENCE_MID <= conf < HIGH)  → RAG top-K  + offline LLM
+  LOW   (confidence < CONFIDENCE_MID)    → RAG wide top-K + online LLM + flag
 """
 from __future__ import annotations
 
@@ -12,13 +18,12 @@ import json
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
-from app.models.models import Question, Submission
-from app.services.llm_service import llm_service, online_service, slm_service, OpenAIClient
+from app.services.llm_service import llm_service, online_service, slm_service
 from app.services.slm_scorer import slm_pre_score, SLMResult
+from app.services.mongo_vector_store import vector_search, search_similar_questions
 
 
 _MARKING_PROMPT = """You are an expert statistics tutor marking a student answer.
@@ -33,7 +38,7 @@ Marking Rubric:
 
 Maximum Marks: {max_marks}
 
-Retrieved similar answers for context:
+Retrieved Source Context:
 {context}
 
 Student's Answer:
@@ -56,7 +61,6 @@ def _parse_llm_json(raw: str, max_marks: float) -> dict:
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
-        # Strip control characters that break JSON parsing.
         cleaned = "".join(
             ch for ch in payload if ch == "\n" or ch == "\r" or ch == "\t" or ord(ch) >= 32
         )
@@ -69,108 +73,87 @@ def _parse_llm_json(raw: str, max_marks: float) -> dict:
     }
 
 
-def _extract_mcq_options(text: str) -> dict[str, str]:
-    pattern = re.compile(r"^\s*([A-D])[).:\-]\s*", re.MULTILINE)
-    scan_offset = 0
-    scan_text = text
-    matches = list(pattern.finditer(scan_text))
-    if not matches:
-        label = re.search(r"\b(?:options|choices|answers)\s*[:\-]\s*", text, re.IGNORECASE)
-        if label:
-            scan_offset = label.end()
-            scan_text = text[scan_offset:]
-            inline_pattern = re.compile(r"(?<![A-Za-z0-9])([A-D])[).:\-]\s*", re.IGNORECASE)
-            matches = list(inline_pattern.finditer(scan_text))
-    options: dict[str, str] = {}
-    for i, match in enumerate(matches):
-        start = scan_offset + match.end()
-        end = scan_offset + matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        option_text = text[start:end].strip()
-        if option_text:
-            options[match.group(1).upper()] = option_text
-    return options
-
-
-def _extract_correct_mcq_answer(question_text: str, model_answer: str) -> str | None:
-    """
-    Try to extract the correct MCQ answer letter from the model answer.
-    Handles a variety of freeform LLM answer formats:
-      - "A. some text"
-      - "The answer is A"
-      - "correct answer: B"
-      - "Option C is correct"
-      - "A) some text"
-    """
-    # Pattern 1: starts with a letter + punctuation (e.g. "A. ...", "A) ...")
+def _extract_mcq_correct(question_text: str, model_answer: str) -> str | None:
     m = re.match(r"^\s*([A-D])[.):\-]\s", model_answer.strip(), re.IGNORECASE)
     if m:
         return m.group(1).upper()
-
-    # Pattern 2: "the answer is X" / "correct answer: X" / "answer: X"
     m = re.search(r"(?:the\s+)?(?:correct\s+)?answer(?:\s+is)?[:\s]+([A-D])\b", model_answer, re.IGNORECASE)
     if m:
         return m.group(1).upper()
-
-    # Pattern 3: "option X is correct" / "option X."
     m = re.search(r"(?:option\s+|choice\s+)([A-D])\b", model_answer, re.IGNORECASE)
     if m:
         return m.group(1).upper()
-
-    # Pattern 4: standalone letter on its own line
     m = re.search(r"^\s*([A-D])\s*$", model_answer, re.IGNORECASE | re.MULTILINE)
     if m:
         return m.group(1).upper()
-
     return None
 
 
-def _extract_true_false_answer(model_answer: str) -> str | None:
+def _extract_true_false(model_answer: str) -> str | None:
     match = re.search(r"\b(true|false)\b", model_answer, re.IGNORECASE)
     return match.group(1).capitalize() if match else None
 
 
-async def _retrieve_context(db: AsyncSession, emb: list[float], k: int) -> str:
-    result = await db.execute(
-        text(
-            """
-            SELECT q.question_text, q.model_answer, q.rubric,
-                   1 - (q.embedding <=> CAST(:emb AS vector)) AS similarity
-            FROM questions q
-            ORDER BY q.embedding <=> CAST(:emb AS vector)
-            LIMIT :k
-            """
-        ),
-        {"emb": str(emb), "k": k},
-    )
-    rows = result.fetchall()
-    if not rows:
-        return "No similar answers available."
-    return "\n\n".join(
-        f"[{i}] sim={(r.similarity or 0.0):.2f}\nQ: {r.question_text}\n"
-        f"Model: {r.model_answer}\nRubric: {r.rubric}"
-        for i, r in enumerate(rows, 1)
-    )
+async def _retrieve_context(emb: list[float], k: int) -> str:
+    """
+    Build marking context from two MongoDB sources:
+      1. Textbook chunks (primary) — rich content: text, tables, formulas, images
+      2. Similar stored Q&A pairs (secondary) — calibration reference
+    """
+    parts: list[str] = []
+
+    # ── Source 1: textbook chunks (the key RAG improvement) ───────────────────
+    chunks = await vector_search(emb, k=k)
+    for i, chunk in enumerate(chunks, 1):
+        section = f"{chunk.get('chapter_title', '')} — {chunk.get('section_title', '')}"
+        block = [f"[TEXTBOOK {i}: {section} | pp.{chunk.get('page_start','')}–{chunk.get('page_end','')}]"]
+        block.append(chunk.get("text", ""))
+
+        if chunk.get("table_texts"):
+            for t in chunk["table_texts"]:
+                block.append(f"[TABLE]\n{t}")
+
+        if chunk.get("math_text"):
+            block.append(f"[FORMULAS] {chunk['math_text']}")
+
+        if chunk.get("image_texts"):
+            block.append("[VISUAL CONTENT]\n" + "\n".join(chunk["image_texts"]))
+
+        parts.append("\n".join(block))
+
+    # ── Source 2: similar stored Q&A pairs ────────────────────────────────────
+    similar_qs = await search_similar_questions(emb, k=min(3, k))
+    for i, q in enumerate(similar_qs, 1):
+        parts.append(
+            f"[SIMILAR Q{i}]\n"
+            f"Q: {q.get('question_text', '')}\n"
+            f"Model: {q.get('model_answer', '')}\n"
+            f"Rubric: {q.get('rubric', '')}"
+        )
+
+    return "\n\n".join(parts) if parts else "No relevant context available."
 
 
-async def mark_submission(submission_id: str, db: AsyncSession) -> dict:
-    submission = await db.get(Submission, submission_id)
+async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
+    submission = await db["submissions"].find_one({"_id": submission_id})
     if not submission:
         raise ValueError(f"Submission {submission_id} not found")
-    question: Question = await db.get(Question, submission.question_id)
+
+    question = await db["questions"].find_one({"_id": submission["question_id"]})
     if not question:
-        raise ValueError(f"Question {submission.question_id} not found")
+        raise ValueError(f"Question {submission['question_id']} not found")
 
-    # ── Fast path for objective questions ───────────────────────────────────
-    if question.question_type in {"mcq", "true_false"}:
-        student_answer = submission.answer_text.strip()
-        if question.question_type == "mcq":
-            correct = _extract_correct_mcq_answer(question.question_text, question.model_answer)
-            is_correct = correct and student_answer.lower() == correct.lower()
+    # ── Fast path for objective questions ─────────────────────────────────────
+    if question["question_type"] in {"mcq", "true_false"}:
+        student_answer = submission["answer_text"].strip()
+        if question["question_type"] == "mcq":
+            correct = _extract_mcq_correct(question["question_text"], question["model_answer"])
+            is_correct = bool(correct and student_answer.lower() == correct.lower())
         else:
-            correct = _extract_true_false_answer(question.model_answer)
-            is_correct = correct and student_answer.lower() == correct.lower()
+            correct = _extract_true_false(question["model_answer"])
+            is_correct = bool(correct and student_answer.lower() == correct.lower())
 
-        mark = float(question.max_marks if is_correct else 0.0)
+        mark = float(question["max_marks"] if is_correct else 0.0)
         feedback = "Correct." if is_correct else "Incorrect."
         slm = SLMResult(
             keyword_coverage=1.0 if is_correct else 0.0,
@@ -180,20 +163,18 @@ async def mark_submission(submission_id: str, db: AsyncSession) -> dict:
             provisional_mark=mark,
             route="HIGH",
         )
-        _persist(submission, mark, feedback, False, slm)
-        await db.commit()
+        await _persist(db, submission_id, mark, feedback, False, slm)
         return _result(mark, feedback, False, slm)
 
     # ── Tier 1: SLM pre-scorer ────────────────────────────────────────────────
+    embedding = question.get("embedding")
     slm: SLMResult = await slm_pre_score(
-        question_text=question.question_text,
-        model_answer=question.model_answer,
-        rubric=question.rubric,
-        max_marks=question.max_marks,
-        student_answer=submission.answer_text,
-        model_answer_embedding=(
-            list(question.embedding) if question.embedding is not None else None
-        ),
+        question_text=question["question_text"],
+        model_answer=question["model_answer"],
+        rubric=question["rubric"],
+        max_marks=question["max_marks"],
+        student_answer=submission["answer_text"],
+        model_answer_embedding=embedding,
     )
 
     # ── HIGH: accept SLM result ───────────────────────────────────────────────
@@ -202,60 +183,65 @@ async def mark_submission(submission_id: str, db: AsyncSession) -> dict:
             f"Answer covers {slm.keyword_coverage:.0%} of key rubric terms "
             f"with strong semantic alignment to the model answer."
         )
-        _persist(submission, slm.provisional_mark, feedback, False, slm)
-        await db.commit()
+        await _persist(db, submission_id, slm.provisional_mark, feedback, False, slm)
         return _result(slm.provisional_mark, feedback, False, slm)
 
-    # ── MID / LOW: RAG retrieval ──────────────────────────────────────────────
-    answer_emb = await slm_service.embed(submission.answer_text)
+    # ── MID / LOW: RAG retrieval from MongoDB (chunks + questions) ────────────
+    answer_emb = await slm_service.embed(submission["answer_text"])
     k = settings.TOP_K_RETRIEVAL if slm.route == "MID" else settings.TOP_K_WIDE_RETRIEVAL
-    context = await _retrieve_context(db, answer_emb, k)
+    context = await _retrieve_context(answer_emb, k)
 
     prompt = _MARKING_PROMPT.format(
-        question_text=question.question_text,
-        model_answer=question.model_answer,
-        rubric=question.rubric,
-        max_marks=question.max_marks,
+        question_text=question["question_text"],
+        model_answer=question["model_answer"],
+        rubric=question["rubric"],
+        max_marks=question["max_marks"],
         context=context,
-        student_answer=submission.answer_text,
+        student_answer=submission["answer_text"],
     )
 
-    # ── Tier 3: LLM selection ─────────────────────────────────────────────────
-    use_online = slm.route == "LOW" and online_service is not None
-    if use_online:
+    # ── Tier 3: Gemini generation (all routes) ────────────────────────────────
+    # llm_service and online_service both point to Gemini; use online for LOW
+    # (flagged) answers, llm_service for MID/HIGH fallthrough.
+    if slm.route == "LOW" and online_service is not None:
         try:
             raw = await online_service.generate(prompt)
         except Exception:
-            if settings.OPENAI_API_KEY:
-                try:
-                    raw = await OpenAIClient(model=settings.ONLINE_LLM_MODEL).generate(prompt)
-                except Exception:
-                    raw = await llm_service.generate(prompt)
-            else:
-                raw = await llm_service.generate(prompt)
+            raw = await llm_service.generate(prompt)
     else:
         raw = await llm_service.generate(prompt)
 
-    res = _parse_llm_json(raw, question.max_marks)
+    res = _parse_llm_json(raw, question["max_marks"])
     if slm.route == "LOW":
-        res["flagged"] = True  # LOW always flagged
+        res["flagged"] = True
 
-    _persist(submission, res["mark"], res["feedback"], res["flagged"], slm)
-    await db.commit()
+    await _persist(db, submission_id, res["mark"], res["feedback"], res["flagged"], slm)
     return _result(res["mark"], res["feedback"], res["flagged"], slm)
 
 
-def _persist(sub: Submission, mark: float, feedback: str, flagged: bool, slm: SLMResult):
-    sub.auto_mark = mark
-    sub.auto_feedback = f"[Route:{slm.route}|Conf:{slm.confidence:.2f}] {feedback}"
-    sub.auto_confidence = slm.confidence
-    sub.marking_route = slm.route
-    sub.slm_keyword_coverage = slm.keyword_coverage
-    sub.slm_semantic_sim = slm.semantic_similarity
-    sub.slm_raw_score = slm.slm_raw_score
-    sub.is_flagged = flagged
-    sub.is_marked = True
-    sub.marked_at = datetime.now(timezone.utc)
+async def _persist(
+    db: AsyncIOMotorDatabase,
+    submission_id: str,
+    mark: float,
+    feedback: str,
+    flagged: bool,
+    slm: SLMResult,
+) -> None:
+    await db["submissions"].update_one(
+        {"_id": submission_id},
+        {"$set": {
+            "auto_mark": mark,
+            "auto_feedback": f"[Route:{slm.route}|Conf:{slm.confidence:.2f}] {feedback}",
+            "auto_confidence": slm.confidence,
+            "marking_route": slm.route,
+            "slm_keyword_coverage": slm.keyword_coverage,
+            "slm_semantic_sim": slm.semantic_similarity,
+            "slm_raw_score": slm.slm_raw_score,
+            "is_flagged": flagged,
+            "is_marked": True,
+            "marked_at": datetime.now(timezone.utc),
+        }},
+    )
 
 
 def _result(mark: float, feedback: str, flagged: bool, slm: SLMResult) -> dict:

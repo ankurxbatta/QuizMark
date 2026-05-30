@@ -1,8 +1,35 @@
+# Git
+.git
+.gitignore
+
+# Secrets / env
+.env
+.env.*
+*.env
+
+# Python cache
 __pycache__
-*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+*.egg-info
 .pytest_cache
 .mypy_cache
 .ruff_cache
-.venv
-uploads
-.DS_Store
+
+# Test / docs
+tests/
+*.md
+*.txt
+!requirements.txt
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Large data files (not needed in image)
+data/
+Book/

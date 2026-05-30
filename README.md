@@ -1,72 +1,85 @@
-# PDF Quiz Question Generator
+# QuizMark — AI-Powered Question Generator & Marker
 
-This is my final year project — a web app that lets instructors upload a PDF textbook and automatically generate exam questions from it using AI. It parses the PDF into sections, figures out which parts are actually teaching content, and uses an LLM (I'm using Claude but it works with GPT or Gemini too) to write proper questions with model answers and marking rubrics.
+A web app for instructors to upload a PDF textbook and automatically generate exam questions and mark student submissions using AI.
 
-I built this because our department wastes a lot of time writing questions by hand from the same textbooks every year. The idea is that an instructor uploads a chapter, picks how many questions they want and what type (short answer, MCQ, or true/false), and gets back a question bank they can review and edit before using.
-
----
-
-## What it does
-
-- Upload a `.pdf` or `.txt` file
-- Detects chapters and sections automatically from the PDF structure
-- Filters out exercises, glossaries, and boilerplate — only keeps actual teaching content
-- Sends content chunks to an LLM which returns questions in structured JSON
-- Each question comes with a model answer, a rubric (one criterion per mark), difficulty level, and a reference back to which pages it came from
-- Questions are saved to a database so you can browse, edit, and manage them
+Upload a chapter → get a question bank with model answers and rubrics → use the marking tool to auto-grade student responses.
 
 ---
 
-## Tech stack
+## Quick start (single command)
 
-I used:
-
-- **Next.js 15** with TypeScript and Tailwind for the frontend
-- **FastAPI** (Python 3.11) for the backend API
-- **PostgreSQL** with the pgvector extension to store questions and their embeddings
-- **Ollama** running locally for embeddings (nomic-embed-text) and as a fallback LLM (qwen2 models)
-- **Claude / GPT-4o / Gemini** for the actual question generation (configurable)
-- **Celery + Redis** for the async background jobs when processing large textbooks
-- **Docker Compose** to run everything together
-- **Alembic** for database migrations
-
----
-
-## Running it locally
-
-You need Docker Desktop (allocate at least 6 GB RAM) and an API key from one of the LLM providers.
+You need **Docker Desktop** and a **free Gemini API key** (get one at [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)).
 
 ```bash
-git clone <repo-url>
-cd marking-tools
-cp .env.example .env
-```
-
-Open `.env` and fill in at minimum:
-
-```env
-SECRET_KEY=somethinglong
-POSTGRES_PASSWORD=yourpassword
-ADMIN_PASSWORD=your-admin-password
-GENERATION_LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-Then:
-
-```bash
-# Mac/Linux
-chmod +x setup.sh && ./setup.sh
+# Mac / Linux
+bash setup.sh
 
 # Windows
 setup.bat
 ```
 
-Once everything is up, go to http://localhost:3000 and log in with the admin credentials you set in `.env`.
+The script will:
+1. Create a `.env` file with sensible defaults
+2. Auto-generate a secure `SECRET_KEY`
+3. Ask for your Gemini API key (required)
+4. Ask you to choose an admin password
+5. Build and start all services
 
-To load demo student accounts:
+Then open **http://localhost:3000** and log in with `admin` + the password you chose.
+
+---
+
+## What it does
+
+- Upload a `.pdf` textbook — the app parses it into teaching chunks and embeds them in a vector store
+- Generate questions (MCQ, short answer, true/false) from any book or chapter
+- Each question comes with a model answer, a per-mark rubric, difficulty rating, and page references
+- Submit student answers and get AI-powered marks with feedback
+- RAG-backed marking — student responses are checked against the source textbook, not just the model answer
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 15, TypeScript, Tailwind CSS |
+| Backend API | FastAPI (Python 3.11) |
+| Database & vector store | MongoDB Atlas Local |
+| AI (generation + marking + embeddings) | Google Gemini (gemini-2.5-flash, gemini-embedding-001) |
+| Background jobs | Celery + Redis |
+| Infrastructure | Docker Compose |
+
+---
+
+## Services after startup
+
+| Service | URL |
+|---|---|
+| App | http://localhost:3000 |
+| API docs | http://localhost:8000/docs |
+
+---
+
+## Useful commands
 
 ```bash
+# Stop everything
+docker compose down
+
+# Restart without rebuilding
+docker compose up -d
+
+# Live logs
+docker compose logs -f
+
+# Rebuild after code changes
+docker compose up -d --build
+
+# Full reset — DELETES ALL DATA (books, questions, everything)
+docker compose down -v
+
+# Load demo student accounts
 docker compose run --rm --no-deps backend python -m app.seed_demo_data
 ```
 
@@ -74,55 +87,52 @@ docker compose run --rm --no-deps backend python -m app.seed_demo_data
 
 ## How to generate questions
 
-1. Log in as instructor
-2. Go to **Generate Questions**
-3. Upload a PDF or text file
-4. Optionally scan for chapters first so you can filter to one topic
-5. Choose question type and how many you want (up to 50 at a time)
-6. Hit Generate — takes around 15–30 seconds for a chapter
-7. Review the results in the Questions bank and edit anything that needs fixing
+1. Log in as instructor at http://localhost:3000
+2. Go to **Library** → upload a PDF textbook (up to 25 MB, up to 620 pages)
+3. Wait for ingestion to complete (progress shown in real time)
+4. Click the book → **Generate Questions**
+5. Choose type (MCQ / short answer / true-false), difficulty, and count
+6. Review and edit the generated questions in the Questions bank
 
-For a full textbook I added an async mode that runs as a background job — you submit it and come back later to check progress.
+---
+
+## Configuration
+
+All settings live in `.env` (created by `setup.sh` from `.env.example`). The only required value you need to supply is:
+
+```env
+GEMINI_API_KEY=your-key-here
+```
+
+Everything else has sensible defaults. See `.env.example` for the full list with explanations.
 
 ---
 
 ## Project structure
 
-The important bits:
-
 ```
-backend/app/services/
-    pdf_service.py          — PDF parsing and chunking
-    question_generator.py   — chunk ranking, LLM prompting, validation
-    llm_service.py          — provider clients (Anthropic, OpenAI, Gemini, Ollama)
-
-backend/app/api/v1/
-    questions.py            — all the API endpoints
-
-backend/app/tasks/
-    ingest_tasks.py         — background Celery job for large PDFs
+backend/app/
+    api/v1/          — FastAPI route handlers
+    services/
+        pdf_service.py         — PDF parsing and chunking
+        pdf_extractor.py       — vision-based chart/figure extraction
+        question_generator.py  — LLM prompting and validation
+        llm_service.py         — Gemini client
+        rag_pipeline.py        — retrieval-augmented marking
+        mongo_vector_store.py  — MongoDB vector search
+    tasks/
+        ingest_tasks.py        — background Celery job for large PDFs
+        marking_tasks.py       — async marking pipeline
 
 frontend/src/app/(instructor)/
-    generate/               — upload and generate UI
-    questions/              — question bank browser
+    dashboard/       — overview and stats
+    library/         — book management
+    generate/        — question generation UI
 ```
 
 ---
 
-## Known issues / things I'd improve
+## Known limitations
 
-- Scanned PDFs (image-based) don't work — you need a text-based PDF
-- The chapter detection regex works on most textbooks I've tested but will probably miss some edge cases
-- The fallback questions (when the LLM fails) are pretty basic — just recall-level
-- No export to CSV or Word yet, that's on the to-do list
-
----
-
-## Docs
-
-More detail on how things work internally:
-
-- [docs/GENERATION_PIPELINE.md](docs/GENERATION_PIPELINE.md) — how the PDF parsing and generation pipeline works
-- [docs/API.md](docs/API.md) — API endpoints reference
-- [docs/GENERATION_LLM.md](docs/GENERATION_LLM.md) — setting up and switching LLM providers
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — all the environment variables
+- Scanned / image-only PDFs won't work — needs a text-based PDF
+- Gemini API key is required; no offline/local-only mode

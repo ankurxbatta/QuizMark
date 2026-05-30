@@ -1,6 +1,24 @@
-node_modules
+# Git
+.git
+.gitignore
+
+# Secrets
+.env
+.env.*
+*.env
+
+# Build output (gets rebuilt inside container)
 .next
 out
-coverage
-npm-debug.log*
+
+# Dependencies (reinstalled inside container)
+node_modules
+
+# IDE / OS
+.vscode
+.idea
 .DS_Store
+*.swp
+
+# Docs
+*.md

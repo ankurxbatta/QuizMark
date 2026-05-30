@@ -1,17 +1,13 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 from typing import Optional, List
-import os
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=[".env", "../../.env"],  # works both in Docker (/app) and local dev
+        env_file=[".env", "../../.env"],
         env_file_encoding="utf-8",
     )
-
-    # ── Database ─────────────────────────────────────────────────────────────
-    DATABASE_URL: str
 
     # ── Auth ─────────────────────────────────────────────────────────────────
     SECRET_KEY: str
@@ -21,11 +17,11 @@ class Settings(BaseSettings):
     LOCKOUT_DURATION_MINUTES: int = 5
     ADMIN_ENABLED: bool = True
     ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: Optional[str] = None  # Must be set in .env — no insecure default
+    ADMIN_PASSWORD: Optional[str] = None
     ADMIN_ROLE: str = "instructor"
 
     # ── CORS ─────────────────────────────────────────────────────────────────
-    CORS_ORIGINS: str = "http://localhost:3000"  # Comma-separated list
+    CORS_ORIGINS: str = "http://localhost:3000"
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -35,35 +31,34 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str
     CELERY_RESULT_BACKEND: str
 
-    # ── Offline LLM (Ollama) ─────────────────────────────────────────────────
-    OLLAMA_BASE_URL: str = "http://llm:11434"
-    LLM_MODEL_NAME: str = "llama3"
+    # ── Gemini (primary AI backend) ──────────────────────────────────────────
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"  # 768-dim (via outputDimensionality)
+
+    # ── LLM settings (used by GeminiClient) ─────────────────────────────────
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 1024
 
-    # ── SLM ──────────────────────────────────────────────────────────────────
-    SLM_MODEL_NAME: str = "phi3:mini"
-    SLM_TEMPERATURE: float = 0.0
-    SLM_MAX_TOKENS: int = 256
-
-    # ── Online LLM (optional, for marking fallback) ──────────────────────────
-    ONLINE_LLM_ENABLED: bool = False
-    ONLINE_LLM_PROVIDER: str = "anthropic"
-    ONLINE_LLM_MODEL: str = "claude-sonnet-4-20250514"
+    # ── Online LLM (marking fallback) ────────────────────────────────────────
+    ONLINE_LLM_ENABLED: bool = True
+    ONLINE_LLM_PROVIDER: str = "gemini"
+    ONLINE_LLM_MODEL: str = "gemini-2.5-flash"
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
-    OPENAI_VISION_MODEL: str = "gpt-4o-mini"  # used for chart/graph descriptions
-    GEMINI_API_KEY: Optional[str] = None
-    GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
 
     # ── Generation LLM (for question generation) ─────────────────────────────
     GENERATION_LLM_ENABLED: bool = True
-    GENERATION_LLM_PROVIDER: str = "anthropic"
-    GENERATION_LLM_MODEL: str = "claude-sonnet-4-20250514"
+    GENERATION_LLM_PROVIDER: str = "gemini"
+    GENERATION_LLM_MODEL: str = "gemini-2.5-flash"
     GENERATION_MAX_TOKENS: int = 4096
 
+    # ── Ollama (optional, kept for local/offline fallback) ───────────────────
+    OLLAMA_BASE_URL: str = "http://llm:11434"
+    EMBEDDING_MODEL: str = "nomic-embed-text"  # kept for reference / legacy
+    VISION_MODEL: str = "llava:7b"             # used if OllamaVisionClient is called
+
     # ── RAG ──────────────────────────────────────────────────────────────────
-    EMBEDDING_MODEL: str = "nomic-embed-text"
     SIMILARITY_THRESHOLD: float = 0.75
     TOP_K_RETRIEVAL: int = 5
     TOP_K_WIDE_RETRIEVAL: int = 10
@@ -72,8 +67,8 @@ class Settings(BaseSettings):
     CONFIDENCE_HIGH: float = 0.85
     CONFIDENCE_MID: float = 0.55
 
-    # ── MongoDB Atlas Local (vector store for PDF source chunks) ─────────────
-    MONGODB_ENABLED: bool = False
+    # ── MongoDB (primary data store + vector store) ───────────────────────────
+    MONGODB_ENABLED: bool = True
     MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB_NAME: str = "marking_tools"
 
@@ -90,13 +85,10 @@ class Settings(BaseSettings):
     @field_validator("ADMIN_PASSWORD", mode="after")
     @classmethod
     def _require_admin_password(cls, v, info):
-        """Refuse to start with ADMIN_ENABLED=True and no password set."""
-        # info.data may not have ADMIN_ENABLED if it wasn't parsed yet
         admin_enabled = info.data.get("ADMIN_ENABLED", True)
         if admin_enabled and not v:
             raise ValueError(
-                "ADMIN_PASSWORD must be set in .env when ADMIN_ENABLED=true. "
-                "Add ADMIN_PASSWORD=<strong-password> to your .env file."
+                "ADMIN_PASSWORD must be set in .env when ADMIN_ENABLED=true."
             )
         return v
 

@@ -1,11 +1,17 @@
 """
-mongo_vector_store.py  —  MongoDB Atlas Local vector store for PDF source chunks.
+mongo_vector_store.py  —  MongoDB data layer (primary store + vector search).
 
-Stores EnhancedChunk documents with 768-dim nomic-embed-text embeddings.
-Uses Atlas Vector Search ($vectorSearch aggregation) for semantic retrieval.
+Collections:
+  pdf_chunks            — textbook chunks with 768-dim embeddings (RAG source)
+  questions             — generated questions with 768-dim embeddings
+  page_description_cache — GPT-4o Vision chart description cache
 
-All public functions are non-fatal: errors are logged and return empty/zero
-results so MongoDB failures never interrupt question generation.
+Vector search indexes (Atlas Vector Search):
+  pdf_chunks_vector_index  — cosine similarity on pdf_chunks.embedding
+  questions_vector_index   — cosine similarity on questions.embedding
+
+All public functions are non-fatal for vector operations: errors are logged
+and return empty/zero results so failures never interrupt the main pipeline.
 """
 from __future__ import annotations
 
@@ -15,89 +21,79 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Lazy globals — initialised on first call to get_mongo_db()
 _mongo_client: Any = None
 _mongo_db: Any = None
 
-COLLECTION_NAME = "pdf_chunks"
-INDEX_NAME = "pdf_chunks_vector_index"
-EMBEDDING_DIMENSIONS = 768
+CHUNKS_COLLECTION     = "pdf_chunks"
+QUESTIONS_COLLECTION  = "questions"
+CHUNKS_INDEX_NAME     = "pdf_chunks_vector_index"
+QUESTIONS_INDEX_NAME  = "questions_vector_index"
+EMBEDDING_DIMENSIONS  = 768
 
 
-async def _get_collection():
-    """Return the pdf_chunks collection, initialising the client if needed."""
+# ── Connection ─────────────────────────────────────────────────────────────────
+
+async def _get_db():
     global _mongo_client, _mongo_db
-
     if _mongo_db is None:
+        import motor.motor_asyncio
+        from app.core.config import settings
+        _mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+            settings.MONGODB_URL,
+            serverSelectionTimeoutMS=5000,
+        )
+        _mongo_db = _mongo_client[settings.MONGODB_DB_NAME]
+        logger.info(f"MongoDB connected: {settings.MONGODB_URL}/{settings.MONGODB_DB_NAME}")
+    return _mongo_db
+
+
+async def _get_collection(name: str):
+    db = await _get_db()
+    return db[name]
+
+
+# ── Index setup ────────────────────────────────────────────────────────────────
+
+async def _ensure_index(collection_name: str, index_name: str) -> None:
+    try:
+        col = await _get_collection(collection_name)
+        existing: set[str] = set()
         try:
-            import motor.motor_asyncio
-            from app.core.config import settings
-
-            if not getattr(settings, "MONGODB_ENABLED", False):
-                raise RuntimeError("MONGODB_ENABLED is false")
-
-            _mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
-                settings.MONGODB_URL,
-                serverSelectionTimeoutMS=5000,
-            )
-            _mongo_db = _mongo_client[settings.MONGODB_DB_NAME]
-            logger.info(f"MongoDB connected: {settings.MONGODB_URL}/{settings.MONGODB_DB_NAME}")
-        except Exception as exc:
-            logger.error(f"MongoDB connection failed: {exc}")
-            raise
-
-    return _mongo_db[COLLECTION_NAME]
+            async for idx in await col.list_search_indexes():
+                existing.add(idx.get("name", ""))
+        except Exception:
+            pass
+        if index_name in existing:
+            return
+        index_model = {
+            "name": index_name,
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [{
+                    "type": "vector",
+                    "path": "embedding",
+                    "numDimensions": EMBEDDING_DIMENSIONS,
+                    "similarity": "cosine",
+                }]
+            },
+        }
+        await col.create_search_index(index_model)
+        logger.info(f"MongoDB vector index '{index_name}' created on '{collection_name}'")
+    except Exception as exc:
+        logger.warning(f"ensure_index({collection_name}) failed (non-fatal): {exc}")
 
 
 async def ensure_vector_index() -> None:
-    """
-    Create the Atlas Vector Search index on pdf_chunks if it doesn't exist.
-    Called once at API startup. Non-fatal if index already exists.
-    """
-    try:
-        collection = await _get_collection()
+    """Create vector search indexes for both pdf_chunks and questions."""
+    await _ensure_index(CHUNKS_COLLECTION, CHUNKS_INDEX_NAME)
+    await _ensure_index(QUESTIONS_COLLECTION, QUESTIONS_INDEX_NAME)
 
-        # List existing search indexes
-        existing_names: set[str] = set()
-        try:
-            async for idx in await collection.list_search_indexes():
-                existing_names.add(idx.get("name", ""))
-        except Exception:
-            pass  # Atlas Local may not support list_search_indexes in older builds
 
-        if INDEX_NAME in existing_names:
-            logger.info(f"MongoDB vector index '{INDEX_NAME}' already exists")
-            return
-
-        index_model = {
-            "name": INDEX_NAME,
-            "type": "vectorSearch",
-            "definition": {
-                "fields": [
-                    {
-                        "type": "vector",
-                        "path": "embedding",
-                        "numDimensions": EMBEDDING_DIMENSIONS,
-                        "similarity": "cosine",
-                    }
-                ]
-            },
-        }
-        await collection.create_search_index(index_model)
-        logger.info(f"MongoDB vector index '{INDEX_NAME}' created")
-
-    except Exception as exc:
-        logger.warning(f"ensure_vector_index failed (non-fatal): {exc}")
-
+# ── PDF chunk store ────────────────────────────────────────────────────────────
 
 async def store_chunk(chunk: Any, embedding: list[float], book_id: str) -> str:
-    """
-    Insert one chunk document with its embedding into MongoDB.
-    Returns the inserted _id as a string, or "" on failure.
-    """
     try:
-        collection = await _get_collection()
-
+        col = await _get_collection(CHUNKS_COLLECTION)
         doc = {
             "book_id": book_id,
             "chapter_num": chunk.chapter_num,
@@ -120,10 +116,8 @@ async def store_chunk(chunk: Any, embedding: list[float], book_id: str) -> str:
             "embedding": embedding,
             "created_at": datetime.now(timezone.utc),
         }
-
-        result = await collection.insert_one(doc)
+        result = await col.insert_one(doc)
         return str(result.inserted_id)
-
     except Exception as exc:
         logger.warning(f"store_chunk failed (non-fatal): {exc}")
         return ""
@@ -134,77 +128,56 @@ async def vector_search(
     k: int = 5,
     book_id: str | None = None,
 ) -> list[dict]:
-    """
-    Run Atlas Vector Search ($vectorSearch) on the pdf_chunks collection.
-    Returns up to k documents (embedding field excluded).
-    Returns [] on failure.
-    """
+    """Semantic search over pdf_chunks. Returns up to k docs (no embedding field)."""
     try:
-        collection = await _get_collection()
-
-        pipeline: list[dict] = [
-            {
-                "$vectorSearch": {
-                    "index": INDEX_NAME,
-                    "path": "embedding",
-                    "queryVector": query_embedding,
-                    "numCandidates": k * 10,
-                    "limit": k,
-                }
-            },
-        ]
-
+        col = await _get_collection(CHUNKS_COLLECTION)
+        pipeline: list[dict] = [{
+            "$vectorSearch": {
+                "index": CHUNKS_INDEX_NAME,
+                "path": "embedding",
+                "queryVector": query_embedding,
+                "numCandidates": k * 10,
+                "limit": k,
+            }
+        }]
         if book_id:
             pipeline.append({"$match": {"book_id": book_id}})
-
-        # Exclude the large embedding array from results
         pipeline.append({"$project": {"embedding": 0}})
-
-        cursor = collection.aggregate(pipeline)
-        results = await cursor.to_list(length=k)
-        # Convert ObjectId to string for JSON serialisation
+        results = await col.aggregate(pipeline).to_list(length=k)
         for doc in results:
             if "_id" in doc:
                 doc["_id"] = str(doc["_id"])
         return results
-
     except Exception as exc:
-        logger.warning(f"vector_search failed (non-fatal): {exc}")
+        logger.warning(f"vector_search (chunks) failed (non-fatal): {exc}")
         return []
 
 
 async def delete_book_chunks(book_id: str) -> int:
-    """Delete all chunks for a given book_id. Returns count deleted, or 0 on failure."""
     try:
-        collection = await _get_collection()
-        result = await collection.delete_many({"book_id": book_id})
-        count = result.deleted_count
-        logger.info(f"Deleted {count} chunks for book_id={book_id}")
-        return count
+        col = await _get_collection(CHUNKS_COLLECTION)
+        result = await col.delete_many({"book_id": book_id})
+        return result.deleted_count
     except Exception as exc:
         logger.warning(f"delete_book_chunks failed (non-fatal): {exc}")
         return 0
 
 
 async def get_chunk_stats(book_id: str | None = None) -> dict:
-    """Return aggregate stats for stored chunks (for debugging/verification)."""
     try:
-        collection = await _get_collection()
+        col = await _get_collection(CHUNKS_COLLECTION)
         match = {"$match": {"book_id": book_id}} if book_id else {"$match": {}}
         pipeline = [
             match,
-            {
-                "$group": {
-                    "_id": None,
-                    "total": {"$sum": 1},
-                    "with_images": {"$sum": {"$cond": ["$has_images", 1, 0]}},
-                    "with_tables": {"$sum": {"$cond": ["$has_tables", 1, 0]}},
-                    "with_math": {"$sum": {"$cond": ["$has_math", 1, 0]}},
-                }
-            },
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "with_images": {"$sum": {"$cond": ["$has_images", 1, 0]}},
+                "with_tables": {"$sum": {"$cond": ["$has_tables", 1, 0]}},
+                "with_math": {"$sum": {"$cond": ["$has_math", 1, 0]}},
+            }},
         ]
-        cursor = collection.aggregate(pipeline)
-        docs = await cursor.to_list(length=1)
+        docs = await col.aggregate(pipeline).to_list(length=1)
         if docs:
             d = docs[0]
             return {
@@ -217,3 +190,33 @@ async def get_chunk_stats(book_id: str | None = None) -> dict:
     except Exception as exc:
         logger.warning(f"get_chunk_stats failed: {exc}")
         return {}
+
+
+# ── Question vector search ─────────────────────────────────────────────────────
+
+async def search_similar_questions(
+    query_embedding: list[float],
+    k: int = 3,
+) -> list[dict]:
+    """Semantic search over stored questions. Returns up to k docs."""
+    try:
+        col = await _get_collection(QUESTIONS_COLLECTION)
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": QUESTIONS_INDEX_NAME,
+                    "path": "embedding",
+                    "queryVector": query_embedding,
+                    "numCandidates": k * 10,
+                    "limit": k,
+                }
+            },
+            {"$project": {"embedding": 0}},
+        ]
+        results = await col.aggregate(pipeline).to_list(length=k)
+        for doc in results:
+            doc["id"] = str(doc.pop("_id", ""))
+        return results
+    except Exception as exc:
+        logger.warning(f"search_similar_questions failed (non-fatal): {exc}")
+        return []

@@ -1,6 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
-from uuid import UUID
 from datetime import datetime
 from app.models.models import QuestionType, Difficulty
 
@@ -21,20 +20,25 @@ class QuestionUpdate(QuestionCreate):
     pass
 
 
-class QuestionOut(QuestionCreate):
-    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+class QuestionOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
 
-    id: UUID
+    id: str
+    question_text: str
+    question_type: QuestionType
+    model_answer: str
+    rubric: str
+    max_marks: float
+    topic_tag: Optional[str] = None
+    difficulty: Optional[Difficulty] = None
     source_page_range: Optional[str] = None
     source_chunk: Optional[str] = None
-    assigned_student_ids: list[UUID] = Field(default_factory=list)
+    assigned_student_ids: list[str] = Field(default_factory=list)
     created_at: datetime
 
 
 class AssessmentQuestionOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
+    id: str
     question_text: str
     question_type: QuestionType
     max_marks: float
@@ -46,12 +50,12 @@ class AssessmentQuestionOut(BaseModel):
 
 
 class QuestionAssigneeUpdate(BaseModel):
-    student_ids: list[UUID] = Field(default_factory=list)
+    student_ids: list[str] = Field(default_factory=list)
 
 
 class QuestionAssigneeOut(BaseModel):
-    question_id: UUID
-    student_ids: list[UUID] = Field(default_factory=list)
+    question_id: str
+    student_ids: list[str] = Field(default_factory=list)
 
 
 class QuestionGenerateResponse(BaseModel):
@@ -64,16 +68,14 @@ class QuestionGenerateResponse(BaseModel):
 
 
 class SubmissionCreate(BaseModel):
-    question_id: UUID
+    question_id: str
     answer_text: str
 
 
 class SubmissionOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    student_id: UUID
-    question_id: UUID
+    id: str
+    student_id: str
+    question_id: str
     question_text: Optional[str] = None
     question_type: Optional[QuestionType] = None
     max_marks: Optional[float] = None
@@ -106,9 +108,7 @@ class LoginRequest(BaseModel):
 
 
 class UserOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
+    id: str
     username: str
     role: str
     created_at: datetime

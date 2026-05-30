@@ -4,12 +4,13 @@ import { usePathname, useRouter } from "next/navigation";
 import Cookies from "js-cookie";
 import {
   LayoutDashboard, Upload, BookOpen,
-  CheckSquare, BarChart2, Download, LogOut,
+  CheckSquare, BarChart2, Download, LogOut, Database,
 } from "lucide-react";
 
 const NAV = [
   { label: "Dashboard",  href: "/dashboard",  icon: LayoutDashboard },
-  { label: "Generate",   href: "/generate",   icon: Upload },
+  { label: "Add Book",    href: "/generate",   icon: Upload },
+  { label: "Library",    href: "/library",    icon: Database },
   { label: "Questions",  href: "/questions",  icon: BookOpen },
   { label: "Marking",    href: "/marking",    icon: CheckSquare },
   { label: "Analytics",  href: "/analytics",  icon: BarChart2 },

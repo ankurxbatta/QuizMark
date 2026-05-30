@@ -27,18 +27,6 @@ from app.services.llm_service import slm_service
 from app.core.config import settings
 
 
-# ── Prompt for fast SLM integer scoring ────────────────────────────────────
-SLM_SCORE_PROMPT = """You are marking a student answer. Reply with a SINGLE integer 0-10 only.
-
-Question: {question_text}
-Model answer: {model_answer}
-Rubric: {rubric}
-Max marks: {max_marks}
-Student answer: {student_answer}
-
-Score 0-10 (proportional to marks earned). Reply with the integer ONLY."""
-
-
 @dataclass
 class SLMResult:
     """All signals produced by the Tier-1 SLM pre-scorer."""
@@ -90,37 +78,6 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-async def _slm_quick_score(
-    question_text: str,
-    model_answer: str,
-    rubric: str,
-    max_marks: float,
-    student_answer: str,
-) -> float:
-    """
-    Ask the SLM for a 0-10 integer score.
-    Returns a normalised float 0.0-1.0.
-    Falls back to 0.5 on any parse error.
-    """
-    prompt = SLM_SCORE_PROMPT.format(
-        question_text=question_text,
-        model_answer=model_answer[:400],
-        rubric=rubric[:300],
-        max_marks=max_marks,
-        student_answer=student_answer[:600],
-    )
-    try:
-        raw = await slm_service.generate(prompt)
-        # Extract first integer in response
-        match = re.search(r"\b([0-9]|10)\b", raw.strip())
-        if match:
-            score_int = int(match.group(1))
-            return min(score_int / 10.0, 1.0)
-    except Exception:
-        pass
-    return 0.5
-
-
 async def slm_pre_score(
     question_text: str,
     model_answer: str,
@@ -130,38 +87,32 @@ async def slm_pre_score(
     model_answer_embedding: Optional[list[float]] = None,
 ) -> SLMResult:
     """
-    Run all three Tier-1 scoring signals and return an SLMResult.
+    Tier-1 pre-scorer using keyword coverage + semantic similarity.
 
-    Weights:
-      - keyword_coverage   30%
-      - semantic_similarity 40%   (uses stored embedding if available)
-      - slm_raw_score      30%
+    The local SLM model call has been removed — all generation now goes
+    through Gemini (more accurate, no local compute required).
+
+    Weights: keyword_coverage 40%, semantic_similarity 60%.
+    A HIGH confidence skips the LLM call entirely; MID/LOW route to Gemini.
     """
     # 1. Keyword coverage (fast, no model call)
     keywords = _extract_keywords(rubric)
     kw_score = _keyword_coverage(student_answer, keywords)
 
-    # 2. Semantic similarity (embed student answer, compare to stored model embedding)
+    # 2. Semantic similarity via Gemini embeddings
     if model_answer_embedding:
         answer_emb = await slm_service.embed(student_answer)
         sem_score = max(0.0, _cosine_similarity(answer_emb, model_answer_embedding))
     else:
-        # Embed both on the fly if stored embedding is missing
         answer_emb, model_emb = await _embed_both(student_answer, model_answer)
         sem_score = max(0.0, _cosine_similarity(answer_emb, model_emb))
 
-    # 3. SLM quick integer score
-    slm_score = await _slm_quick_score(
-        question_text, model_answer, rubric, max_marks, student_answer
-    )
+    # Blend: keyword 40%, semantic 60%
+    confidence = round(0.40 * kw_score + 0.60 * sem_score, 4)
 
-    # Blend
-    confidence = round(0.30 * kw_score + 0.40 * sem_score + 0.30 * slm_score, 4)
+    # Provisional mark from semantic similarity
+    provisional_mark = round(sem_score * max_marks, 2)
 
-    # Provisional mark from SLM score
-    provisional_mark = round(slm_score * max_marks, 2)
-
-    # Route decision
     if confidence >= settings.CONFIDENCE_HIGH:
         route = "HIGH"
     elif confidence >= settings.CONFIDENCE_MID:
@@ -172,7 +123,7 @@ async def slm_pre_score(
     return SLMResult(
         keyword_coverage=round(kw_score, 4),
         semantic_similarity=round(sem_score, 4),
-        slm_raw_score=round(slm_score, 4),
+        slm_raw_score=round(sem_score, 4),  # reuse sem_score for compatibility
         confidence=confidence,
         provisional_mark=provisional_mark,
         route=route,

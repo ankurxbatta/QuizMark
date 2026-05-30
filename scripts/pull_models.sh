@@ -11,6 +11,7 @@ MODELS=(
   "${SLM_MODEL_NAME:-qwen2:0.5b}"
   "${LLM_MODEL_NAME:-qwen2:1.5b}"
   "${EMBEDDING_MODEL:-nomic-embed-text}"
+  "${VISION_MODEL:-llava:7b}"
 )
 
 echo "==> Waiting for Ollama to be ready…"

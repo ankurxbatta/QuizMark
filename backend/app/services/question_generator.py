@@ -336,15 +336,24 @@ async def _llm_enrich_chunk(
         return []
 
 
+_DIFFICULTY_INSTRUCTION = {
+    "easy":   "DIFFICULTY REQUIREMENT: ALL questions must be EASY — recall of a single definition, term, or fact directly stated in the source. No calculation or multi-step reasoning.",
+    "medium": "DIFFICULTY REQUIREMENT: ALL questions must be MEDIUM — apply a formula, interpret a statistical result, or reason through a scenario. Not pure recall.",
+    "hard":   "DIFFICULTY REQUIREMENT: ALL questions must be HARD — require multi-step calculation, comparison of two+ concepts, or critical evaluation of a method or result.",
+}
+
+
 async def _generate_from_chunk(
     chunk: TextChunk,
     question_type: str,
     questions_per_chunk: int,
+    difficulty: str = "all",
 ) -> list[dict]:
     """Robust single-stage generation. Direct prompt per chunk, no fragile Stage A dependency."""
-    # Single stage: generate directly from chunk content.
+    diff_note = _DIFFICULTY_INSTRUCTION.get(difficulty, "")
+    extra = f"\n\n{diff_note}" if diff_note else ""
     prompt = _PLAIN_TEXT_PROMPT.format(
-        content=chunk.to_prompt_block(),
+        content=chunk.to_prompt_block() + extra,
         count=questions_per_chunk,
         qtype=question_type,
     )
@@ -365,6 +374,11 @@ async def _generate_from_chunk(
             key_terms=chunk.key_terms,
         )
 
+    # Enforce requested difficulty on all generated questions
+    if difficulty in ("easy", "medium", "hard"):
+        for q in questions:
+            q["difficulty"] = difficulty
+
     # Stamp correct metadata from the chunk
     for q in questions:
         if not q.get("topic_tag") or q["topic_tag"] in ("Unknown", "Statistics", ""):
@@ -384,13 +398,15 @@ async def generate_questions_from_chunks(
     question_type: str,
     count: int = 20,
     topic_filter: Optional[str] = None,
+    difficulty: str = "all",
 ) -> list[dict]:
     """
     Generate `count` questions from a list of TextChunk objects.
     Uses two-stage SLM+LLM pipeline per chunk.
     Spreads questions across topics unless topic_filter is set.
+    difficulty: "easy" | "medium" | "hard" | "all" (LLM decides)
     """
-    print(f"[GEN] generate_questions_from_chunks: {len(chunks)} chunks, qtype={question_type}, count={count}")
+    print(f"[GEN] generate_questions_from_chunks: {len(chunks)} chunks, qtype={question_type}, count={count}, difficulty={difficulty}")
     
     if not chunks:
         print("[GEN] No chunks provided!")
@@ -412,7 +428,7 @@ async def generate_questions_from_chunks(
 
     async def _bounded(chunk):
         async with semaphore:
-            return await _generate_from_chunk(chunk, question_type, questions_per_chunk)
+            return await _generate_from_chunk(chunk, question_type, questions_per_chunk, difficulty=difficulty)
 
     results = await asyncio.gather(*[_bounded(c) for c in selected])
     for r in results:

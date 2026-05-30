@@ -1,4 +1,5 @@
 services:
+
   frontend:
     build:
       context: ./frontend
@@ -15,10 +16,11 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000"]
-      interval: 10s
+      interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 60s
+    restart: unless-stopped
     networks:
       - app-network
 
@@ -26,76 +28,26 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     env_file:
       - .env
     depends_on:
-      db:
-        condition: service_healthy
       broker:
         condition: service_started
-      llm:
-        condition: service_healthy
       mongodb:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
-      interval: 10s
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 60s
     volumes:
       - ./data/uploads:/app/uploads
-    networks:
-      - app-network
-
-  db:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - app-network
-
-  llm:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-      - ./scripts/pull_models.sh:/pull_models.sh:ro
-    environment:
-      - SLM_MODEL_NAME=${SLM_MODEL_NAME:-qwen2:0.5b}
-      - LLM_MODEL_NAME=${LLM_MODEL_NAME:-qwen2:1.5b}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
-    # Pull required models on first start
-    entrypoint: ["/bin/bash", "-c", "ollama serve & sleep 5 && bash /pull_models.sh && wait"]
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q \"${EMBEDDING_MODEL:-nomic-embed-text}\" && ollama list | grep -q \"${SLM_MODEL_NAME:-qwen2:0.5b}\" && ollama list | grep -q \"${LLM_MODEL_NAME:-qwen2:1.5b}\""]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 300s
-    # GPU support — uncomment if you have NVIDIA hardware:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+      - ./Book:/app/Book:ro
+    restart: unless-stopped
     networks:
       - app-network
 
@@ -103,16 +55,15 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.tasks.celery_app worker --loglevel=info
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
     env_file:
       - .env
     depends_on:
       - broker
-      - db
-      - llm
       - mongodb
     volumes:
       - ./data/uploads:/app/uploads
+    restart: unless-stopped
     networks:
       - app-network
 
@@ -120,28 +71,31 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    restart: unless-stopped
     networks:
       - app-network
 
   mongodb:
     image: mongodb/mongodb-atlas-local:latest
+    hostname: mongodb
     ports:
       - "27017:27017"
     volumes:
       - mongodata:/data/db
+      - mongoconfigdata:/data/configdb
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --eval \"db.hello().isWritablePrimary || quit(1)\" --quiet"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
     networks:
       - app-network
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping').ok", "--quiet"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
 volumes:
-  pgdata:
-  ollama_data:
   mongodata:
+  mongoconfigdata:
 
 networks:
   app-network:

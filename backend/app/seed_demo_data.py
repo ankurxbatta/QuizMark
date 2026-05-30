@@ -1,46 +1,49 @@
 import asyncio
+import uuid
+from datetime import datetime, timezone
 
-from sqlalchemy import select
-
-from app.core.database import AsyncSessionLocal
+from app.core.database import get_mongo_db
 from app.core.security import hash_password
-from app.models.models import User, UserRole
 
 
-DEMO_PASSWORDS = {
-    "student1": "student123",
-    "student2": "student123",
-    "student3": "student123",
+DEMO_USERS = {
+    "student1": ("student123", "student"),
+    "student2": ("student123", "student"),
+    "student3": ("student123", "student"),
 }
 
 
-async def upsert_user(username: str, password: str, role: UserRole) -> User:
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.username == username))
-        user = result.scalar_one_or_none()
-        if user is None:
-            user = User(username=username, hashed_password=hash_password(password), role=role)
-            session.add(user)
-        else:
-            user.hashed_password = hash_password(password)
-            user.role = role
-            user.failed_attempts = 0
-            user.locked_until = None
-        await session.commit()
-        await session.refresh(user)
-        return user
+async def upsert_user(db, username: str, password: str, role: str) -> dict:
+    existing = await db["users"].find_one({"username": username})
+    if existing:
+        await db["users"].update_one(
+            {"_id": existing["_id"]},
+            {"$set": {
+                "hashed_password": hash_password(password),
+                "role": role,
+                "failed_attempts": 0,
+                "locked_until": None,
+            }},
+        )
+        return {**existing, "role": role}
+    doc = {
+        "_id": str(uuid.uuid4()),
+        "username": username,
+        "hashed_password": hash_password(password),
+        "role": role,
+        "failed_attempts": 0,
+        "locked_until": None,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db["users"].insert_one(doc)
+    return doc
 
 
 async def main():
-    students = [
-        await upsert_user("student1", DEMO_PASSWORDS["student1"], UserRole.student),
-        await upsert_user("student2", DEMO_PASSWORDS["student2"], UserRole.student),
-        await upsert_user("student3", DEMO_PASSWORDS["student3"], UserRole.student),
-    ]
-
-    print("Seeded demo student accounts.")
-    for student in students:
-        print(f"Student: {student.username} / {DEMO_PASSWORDS[student.username]}")
+    db = get_mongo_db()
+    for username, (password, role) in DEMO_USERS.items():
+        user = await upsert_user(db, username, password, role)
+        print(f"Seeded: {username} / {password} (role={user['role']})")
 
 
 if __name__ == "__main__":

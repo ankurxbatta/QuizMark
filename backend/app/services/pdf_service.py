@@ -121,13 +121,19 @@ def _extract_page_text(page) -> str:
     table_texts = []
     if tables:
         for table in tables:
+            if not table or len(table) < 2:
+                continue
+            total = sum(len(r) for r in table if r)
+            filled = sum(1 for r in table if r for c in r if (c or "").strip())
+            if total > 0 and filled / total < 0.3:
+                continue  # OpenStax formatting box, not a real table
             rows = []
             for row in table:
                 if row:
                     cleaned = " | ".join(cell.strip() if cell else "" for cell in row)
                     if cleaned.strip(" |"):
                         rows.append(cleaned)
-            if rows:
+            if len(rows) >= 2:
                 table_texts.append("\n".join(rows))
 
     # Main text
@@ -248,6 +254,8 @@ def _clean_heading_title(title: str) -> str:
     """Remove table-of-contents leaders and running-header page numbers."""
     title = re.sub(r"\s*\.{2,}\s*\d+\s*$", "", title.strip())
     title = re.sub(r"\s+\d{1,4}\s*$", "", title)
+    # Strip dot-leader padding (e.g. "Title .  .  .  .  .  .")
+    title = re.sub(r"(\s*\.\s*){2,}$", "", title)
     return title.strip()
 
 

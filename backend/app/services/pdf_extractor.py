@@ -138,13 +138,21 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
         finder = page.find_tables()
         for tbl in finder.tables:
             rows = tbl.extract()  # list[list[str|None]]
-            if not rows:
+            if not rows or len(rows) < 2:
+                continue
+            # Skip sparse tables — they're usually OpenStax coloured formatting boxes,
+            # not real data tables (real tables have ≥30% of cells filled).
+            total_cells = sum(len(r) for r in rows)
+            filled_cells = sum(1 for r in rows for c in r if (c or "").strip())
+            if total_cells > 0 and filled_cells / total_cells < 0.3:
                 continue
             md_rows = []
             for row in rows:
                 cells = [str(c).strip() if c else "" for c in row]
-                md_rows.append(" | ".join(cells))
-            if md_rows:
+                row_text = " | ".join(cells)
+                if row_text.strip(" |"):  # skip entirely empty rows
+                    md_rows.append(row_text)
+            if len(md_rows) >= 2:
                 table_texts.append("\n".join(md_rows))
     except Exception as exc:
         logger.debug(f"Table extraction failed on page {page.number}: {exc}")
@@ -462,20 +470,17 @@ async def describe_graph_chunks(
 ) -> None:
     """
     For each chunk that has vector-graphic pages, render those pages and call
-    GPT-4o Vision to describe the charts. Descriptions are appended to
+    a vision model to describe the charts. Descriptions are appended to
     chunk.image_texts in-place. Non-fatal — errors are logged and skipped.
 
-    Requires OPENAI_API_KEY to be set in settings.
+    Uses Ollama Vision (local, no API key required) by default.
+    Falls back to Gemini if GEMINI_API_KEY is set and Ollama vision is unavailable.
     """
     import asyncio as _asyncio
 
     try:
-        from app.services.llm_service import OpenAIClient
-        from app.core.config import settings
-        if not settings.OPENAI_API_KEY:
-            logger.info("OPENAI_API_KEY not set — skipping graph vision descriptions")
-            return
-        vision_client = OpenAIClient()
+        from app.services.llm_service import GeminiClient
+        vision_client = GeminiClient()
     except Exception as exc:
         logger.warning(f"describe_graph_chunks: could not initialise vision client: {exc}")
         return
