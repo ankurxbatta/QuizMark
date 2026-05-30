@@ -200,18 +200,18 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
                 logger.debug(f"Whole-page render OCR failed on page {page.number}: {exc}")
 
     # ── Math detection ────────────────────────────────────────────────────────
-    # Strategy:
-    #   1. Scan rawdict for math font spans (STIX/CM/Symbol).
-    #      Note: Some math font spans have zero-length text (encoding issue in pymupdf)
-    #      — we count their presence to flag the page as math-containing.
-    #   2. Extract formula-like lines from the regular text layer as math_text,
-    #      since the text layer captures the numeric content even when font spans
-    #      can't be decoded.
+    # Also collects text-block bounding boxes (reused by vector detection below
+    # to distinguish charts from coloured text-box formatting).
     math_spans: list[str] = []
     has_math_font_on_page = False
+    text_block_rects: list[tuple] = []   # (x0, y0, x1, y1) of every text block
     try:
         rawdict = page.get_text("rawdict")
         for block in rawdict.get("blocks", []):
+            if block.get("type") == 0:  # text block
+                b = block.get("bbox")
+                if b:
+                    text_block_rects.append(b)
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
                     font = span.get("font", "")
@@ -240,19 +240,48 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
                 math_spans.append(stripped)
 
     # ── Vector graphic detection ─────────────────────────────────────────────
-    # Charts/graphs in this textbook are PDF vector paths, not raster images.
-    # Count drawing paths; pages with >20 paths likely have a significant chart.
+    # Goal: detect pages with genuine charts/graphs while ignoring coloured
+    # text-box formatting (learning-objective boxes, example callouts, etc.)
+    # that is common in textbooks such as OpenStax.
+    #
+    # Key insight:
+    #   - Coloured formatting box  → filled rectangle that CONTAINS text blocks
+    #   - Chart bar / pie slice    → filled shape with NO text blocks inside it
+    #
+    # Algorithm:
+    #   For each filled shape, compute how much of its area overlaps with
+    #   text blocks (re-using rawdict already fetched for math detection).
+    #   Only shapes with < 30% text-overlap are counted as "graphic area".
+    #   Flag the page when graphic area > 5% of the page.
     has_vector_graphics = False
     try:
-        drawings = page.get_drawings()
-        # Filter out minor decorations (horizontal rules, borders): require
-        # at least some curved or non-horizontal/non-vertical paths.
-        complex_paths = [
-            d for d in drawings
-            if d.get("type") in ("f", "s", "fs")  # fill, stroke, fill+stroke
-            and len(d.get("items", [])) > 3
-        ]
-        has_vector_graphics = len(complex_paths) > 15
+        page_area = page.rect.width * page.rect.height
+        if page_area > 0:
+            graphic_area = 0.0
+            for d in page.get_drawings():
+                if "f" not in d.get("type", ""):    # skip pure stroked lines/borders
+                    continue
+                r = d.get("rect")
+                if not r:
+                    continue
+                rx0, ry0, rx1, ry1 = r[0], r[1], r[2], r[3]
+                w, h = abs(rx1 - rx0), abs(ry1 - ry0)
+                if w < 5 or h < 5:                  # skip dots / tick marks
+                    continue
+                shape_area = w * h
+
+                # Sum the area of this shape that is covered by text blocks
+                text_overlap = 0.0
+                for tx0, ty0, tx1, ty1 in text_block_rects:
+                    ix = max(0.0, min(rx1, tx1) - max(rx0, tx0))
+                    iy = max(0.0, min(ry1, ty1) - max(ry0, ty0))
+                    text_overlap += ix * iy
+
+                # If ≥ 30% of the shape is covered by text → formatting, not chart
+                if text_overlap / shape_area < 0.30:
+                    graphic_area += shape_area
+
+            has_vector_graphics = (graphic_area / page_area) > 0.05
     except Exception as exc:
         logger.debug(f"Drawing detection failed on page {page.number}: {exc}")
 
@@ -457,14 +486,54 @@ async def describe_graph_chunks(
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     semaphore = _asyncio.Semaphore(concurrency)
 
+    # Hash cache: render → MD5 → check MongoDB before calling API.
+    # Same page content (re-upload, second edition) reuses cached description.
+    import hashlib as _hashlib
+    _cache_collection = None
+    try:
+        from app.core.config import settings as _settings
+        if getattr(_settings, "MONGODB_ENABLED", False):
+            from app.services.mongo_vector_store import _get_collection as _get_mongo
+            _cache_collection = await _get_mongo()
+            # Use a sibling collection for descriptions
+            _cache_collection = _cache_collection.database["page_description_cache"]
+    except Exception:
+        pass  # cache unavailable — just call API every time
+
     async def _describe_page(page_num: int, context: str) -> str:
         async with semaphore:
             try:
                 page = doc[page_num - 1]  # fitz is 0-indexed
-                mat = fitz.Matrix(1.5, 1.5)  # 1.5× zoom — good quality, smaller payload
+                mat = fitz.Matrix(1.5, 1.5)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img_bytes = pix.tobytes("png")
+
+                # Check hash cache before calling API
+                page_hash = _hashlib.md5(img_bytes).hexdigest()
+                if _cache_collection is not None:
+                    try:
+                        cached = await _cache_collection.find_one({"_id": page_hash})
+                        if cached:
+                            logger.debug(f"Vision cache hit for page {page_num}")
+                            return cached.get("description", "")
+                    except Exception:
+                        pass
+
                 description = await vision_client.describe_image(img_bytes, context=context)
+
+                # Store in cache (fire-and-forget)
+                if _cache_collection is not None and description:
+                    try:
+                        from datetime import datetime, timezone
+                        await _cache_collection.replace_one(
+                            {"_id": page_hash},
+                            {"_id": page_hash, "description": description,
+                             "created_at": datetime.now(timezone.utc)},
+                            upsert=True,
+                        )
+                    except Exception:
+                        pass
+
                 return description
             except Exception as exc:
                 logger.debug(f"Vision description failed for page {page_num}: {exc}")
