@@ -33,6 +33,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("ingest_book")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # ── Load .env ──────────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).parent.parent
@@ -679,6 +681,8 @@ async def main():
         if i % 50 == 0:
             log.info(f"  Embedding chunk {i + 1}/{len(chunks)}…")
         try:
+            if i:
+                await asyncio.sleep(0.8)
             embed_text = "\n\n".join(part for part in [
                 f"{chunk.chapter_title} {chunk.section_title}",
                 chunk.text[:1500],

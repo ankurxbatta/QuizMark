@@ -17,14 +17,27 @@ All share the same interface:  .generate(prompt) → str
 """
 import asyncio
 import base64
+import logging
 import re
 
 import httpx
 from app.core.config import settings
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 def _redact_url_secrets(message: str) -> str:
     return re.sub(r"([?&]key=)[^&\s']+", r"\1***", message)
+
+
+async def _sleep_before_retry(resp: httpx.Response, attempt: int) -> None:
+    retry_after = resp.headers.get("retry-after")
+    try:
+        delay = float(retry_after) if retry_after else 0.0
+    except ValueError:
+        delay = 0.0
+    await asyncio.sleep(max(delay, 5.0 * (attempt + 1)))
 
 
 class OllamaClient:
@@ -77,13 +90,13 @@ class GeminiClient:
         }
         if self.model.startswith("gemini-2.5-flash"):
             payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
-        for attempt in range(3):
+        for attempt in range(5):
             async with httpx.AsyncClient(timeout=90) as client:
                 resp = await client.post(
                     endpoint, params={"key": settings.GEMINI_API_KEY}, json=payload
                 )
-            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+                await _sleep_before_retry(resp, attempt)
                 continue
             try:
                 resp.raise_for_status()
@@ -102,13 +115,13 @@ class GeminiClient:
             "taskType": "SEMANTIC_SIMILARITY",
             "outputDimensionality": 768,
         }
-        for attempt in range(3):
+        for attempt in range(6):
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     endpoint, params={"key": settings.GEMINI_API_KEY}, json=payload
                 )
-            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 5:
+                await _sleep_before_retry(resp, attempt)
                 continue
             try:
                 resp.raise_for_status()
@@ -139,15 +152,20 @@ class GeminiClient:
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{self._base}/models/{self.model}:generateContent",
-                params={"key": settings.GEMINI_API_KEY},
-                json=payload,
-            )
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{self._base}/models/{self.model}:generateContent",
+                    params={"key": settings.GEMINI_API_KEY},
+                    json=payload,
+                )
+            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+                await _sleep_before_retry(resp, attempt)
+                continue
             resp.raise_for_status()
             result = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             return "" if result == "NO_CHART" else result
+        return ""
 
 
 class AnthropicClient:

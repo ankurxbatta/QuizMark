@@ -107,8 +107,11 @@ async def _run_ingest_only(job_id: str, pdf_bytes: bytes, book_id: str):
     # Embed + store chunks
     from app.services.mongo_vector_store import store_chunk as _mongo_store
     errors = 0
+    embed_delay = max(settings.GEMINI_EMBEDDING_DELAY_SECONDS, 0.0)
     for i, chunk in enumerate(chunks):
         try:
+            if i and embed_delay:
+                await asyncio.sleep(embed_delay)
             emb = await llm_service.embed(_chunk_embedding_text(chunk))
             await _mongo_store(chunk, emb, book_id)
         except Exception:
@@ -194,8 +197,11 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     mongo_errors = 0
     try:
         from app.services.mongo_vector_store import store_chunk as _mongo_store
-        for _chunk in chunks:
+        embed_delay = max(settings.GEMINI_EMBEDDING_DELAY_SECONDS, 0.0)
+        for i, _chunk in enumerate(chunks):
             try:
+                if i and embed_delay:
+                    await asyncio.sleep(embed_delay)
                 _emb = await llm_service.embed(_chunk_embedding_text(_chunk))
                 await _mongo_store(_chunk, _emb, job_id)
             except Exception:

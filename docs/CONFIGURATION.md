@@ -54,6 +54,8 @@ All config is in `.env` — copy `.env.example` to get started. Here's what ever
 | `OPENAI_API_KEY` | — | Required if provider is `openai` |
 | `GEMINI_API_KEY` | — | Required if provider is `gemini` |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta` | Gemini API endpoint — shouldn't need to change this |
+| `GEMINI_EMBEDDING_DELAY_SECONDS` | `0.8` | Per-chunk delay to avoid Gemini embedding rate limits during full-book ingest |
+| `GEMINI_VISION_DELAY_SECONDS` | `1.0` | Per-page delay to avoid Gemini Vision rate limits during chart description |
 
 See [GENERATION_LLM.md](GENERATION_LLM.md) for more detail on picking a provider.
 

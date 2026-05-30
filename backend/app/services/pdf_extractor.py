@@ -466,7 +466,7 @@ def extract_enhanced_chunks(
 async def describe_graph_chunks(
     chunks: list,
     pdf_bytes: bytes,
-    concurrency: int = 3,
+    concurrency: int = 1,
 ) -> None:
     """
     For each chunk that has vector-graphic pages, render those pages and call
@@ -477,6 +477,7 @@ async def describe_graph_chunks(
     Falls back to Gemini if GEMINI_API_KEY is set and Ollama vision is unavailable.
     """
     import asyncio as _asyncio
+    from app.core.config import settings as _settings
 
     try:
         from app.services.llm_service import GeminiClient
@@ -496,7 +497,6 @@ async def describe_graph_chunks(
     import hashlib as _hashlib
     _cache_collection = None
     try:
-        from app.core.config import settings as _settings
         if getattr(_settings, "MONGODB_ENABLED", False):
             from app.services.mongo_vector_store import _get_collection as _get_mongo
             _cache_collection = await _get_mongo()
@@ -524,6 +524,9 @@ async def describe_graph_chunks(
                     except Exception:
                         pass
 
+                delay = max(getattr(_settings, "GEMINI_VISION_DELAY_SECONDS", 0.0), 0.0)
+                if delay:
+                    await _asyncio.sleep(delay)
                 description = await vision_client.describe_image(img_bytes, context=context)
 
                 # Store in cache (fire-and-forget)

@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"  # 768-dim (via outputDimensionality)
+    GEMINI_EMBEDDING_DELAY_SECONDS: float = 0.8
+    GEMINI_VISION_DELAY_SECONDS: float = 1.0
 
     # ── LLM settings (used by GeminiClient) ─────────────────────────────────
     LLM_TEMPERATURE: float = 0.2
