@@ -56,6 +56,7 @@ _ENV = _load_env()
 
 MONGODB_URL    = os.environ.get("MONGODB_URL", _ENV.get("MONGODB_URL", "mongodb://localhost:27017"))
 MONGODB_DB     = os.environ.get("MONGODB_DB_NAME", _ENV.get("MONGODB_DB_NAME", "marking_tools"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", _ENV.get("OPENAI_API_KEY", ""))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", _ENV.get("GEMINI_API_KEY", ""))
 GEMINI_MODEL   = os.environ.get("GENERATION_LLM_MODEL", _ENV.get("GENERATION_LLM_MODEL", "gemini-2.5-flash"))
 GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
@@ -385,28 +386,72 @@ async def _describe_with_gemini(image_bytes: bytes, context: str) -> str:
         "axis labels, key values/ranges, data trends, and what statistical concept it demonstrates. "
         "Be specific and quantitative. If no meaningful chart is visible, respond: NO_CHART"
     )
-    payload = {
-        "contents": [{"parts": [
-            {"text": f"Context: {context}\n\n{prompt}"},
-            {"inline_data": {"mime_type": "image/png", "data": b64}},
-        ]}],
-        "generationConfig": {
-            "maxOutputTokens": 400,
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
-    }
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
-                params={"key": GEMINI_API_KEY},
-                json=payload,
-            )
-            resp.raise_for_status()
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return "" if text == "NO_CHART" else text
-    except Exception as exc:
-        log.debug(f"Gemini vision failed: {exc}")
+    if OPENAI_API_KEY:
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Context: {context}\n\n{prompt}"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+                    ]
+                }
+            ],
+            "max_tokens": 400
+        }
+        for attempt in range(4):
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                        json=payload,
+                    )
+                if resp.status_code in {429, 500, 503} and attempt < 3:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                text = resp.json()["choices"][0]["message"]["content"].strip()
+                return "" if text == "NO_CHART" else text
+            except Exception as exc:
+                log.debug(f"OpenAI vision failed on attempt {attempt+1}: {exc}")
+                if attempt < 3:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                return ""
+        return ""
+    else:
+        payload = {
+            "contents": [{"parts": [
+                {"text": f"Context: {context}\n\n{prompt}"},
+                {"inline_data": {"mime_type": "image/png", "data": b64}},
+            ]}],
+            "generationConfig": {
+                "maxOutputTokens": 400,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+        for attempt in range(4):
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
+                        params={"key": GEMINI_API_KEY},
+                        json=payload,
+                    )
+                if resp.status_code in {429, 500, 503} and attempt < 3:
+                    await asyncio.sleep(4 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                return "" if text == "NO_CHART" else text
+            except Exception as exc:
+                log.debug(f"Gemini vision failed on attempt {attempt+1}: {exc}")
+                if attempt < 3:
+                    await asyncio.sleep(4 * (attempt + 1))
+                    continue
+                return ""
         return ""
 
 
@@ -417,7 +462,7 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
         return
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(1)
     graph_chunks = [(i, c) for i, c in enumerate(chunks) if c.graph_page_nums]
     if not graph_chunks:
         doc.close()
@@ -440,6 +485,8 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
             except Exception as exc:
                 log.debug(f"Page {page_num} vision error: {exc}")
                 return chunk_idx, ""
+            finally:
+                await asyncio.sleep(2)  # Base delay between vision API calls
 
     tasks = []
     for ci, chunk in graph_chunks:
