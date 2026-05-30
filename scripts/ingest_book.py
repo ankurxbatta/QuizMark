@@ -198,11 +198,7 @@ def _find_chapter(text: str) -> Optional[tuple[int, str]]:
 def _is_skip_block(text: str) -> bool:
     if not text.strip():
         return True
-    lines = text.splitlines()
-    ex = sum(1 for l in lines if re.match(r"^\s*\d{1,3}\.\s+[A-Z]", l))
-    if lines and ex / len(lines) > 0.35:
-        return True
-    return bool(_SKIP_SIGNALS.search(text[:300]))
+    return False
 
 
 def _teaching_density(text: str) -> float:
