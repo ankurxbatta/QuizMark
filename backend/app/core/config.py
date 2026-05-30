@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     ONLINE_LLM_MODEL: str = "claude-sonnet-4-20250514"
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_VISION_MODEL: str = "gpt-4o-mini"  # used for chart/graph descriptions
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -70,6 +71,11 @@ class Settings(BaseSettings):
     # ── Confidence router ────────────────────────────────────────────────────
     CONFIDENCE_HIGH: float = 0.85
     CONFIDENCE_MID: float = 0.55
+
+    # ── MongoDB Atlas Local (vector store for PDF source chunks) ─────────────
+    MONGODB_ENABLED: bool = False
+    MONGODB_URL: str = "mongodb://localhost:27017"
+    MONGODB_DB_NAME: str = "marking_tools"
 
     # ── PDF ingestion ─────────────────────────────────────────────────────────
     UPLOAD_MAX_SIZE_MB: int = 25

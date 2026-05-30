@@ -89,6 +89,45 @@ async def _run_ingest(
             await db.commit()
             return
 
+        # ── Step 1b: Embed chunks and store in MongoDB for vector search ────────
+        if getattr(__import__("app.core.config", fromlist=["settings"]).settings, "MONGODB_ENABLED", False):
+            try:
+                from app.services.mongo_vector_store import store_chunk as _mongo_store
+                mongo_errors = 0
+                for _chunk in chunks:
+                    try:
+                        _emb = await llm_service.embed(_chunk.text[:1500])
+                        await _mongo_store(_chunk, _emb, job_id)
+                    except Exception:
+                        mongo_errors += 1
+                if mongo_errors:
+                    job.progress_message = (
+                        f"Parsed {len(chunks)} chunks. "
+                        f"MongoDB: {mongo_errors} storage errors (non-fatal)."
+                    )
+                    job.last_heartbeat_at = datetime.utcnow()
+                    await db.commit()
+            except Exception as _exc:
+                job.progress_message = f"MongoDB storage skipped: {str(_exc)[:120]}"
+                job.last_heartbeat_at = datetime.utcnow()
+                await db.commit()
+
+        # ── Step 1c: Describe vector-graphic pages via GPT-4o Vision ────────────
+        try:
+            from app.services.pdf_extractor import describe_graph_chunks, EnhancedChunk
+            has_graph_chunks = any(
+                getattr(c, "graph_page_nums", None) for c in chunks
+            )
+            if has_graph_chunks:
+                job.progress_message = "Describing charts and graphs with GPT-4o Vision…"
+                job.last_heartbeat_at = datetime.utcnow()
+                await db.commit()
+                await describe_graph_chunks(chunks, pdf_bytes)
+        except Exception as _exc:
+            job.progress_message = f"Graph vision skipped: {str(_exc)[:120]}"
+            job.last_heartbeat_at = datetime.utcnow()
+            await db.commit()
+
         # ── Step 2: Group by chapter ─────────────────────────────────────────
         # chapters_map: chapter_num → list of chunks
         chapters_map: dict[int, list] = defaultdict(list)

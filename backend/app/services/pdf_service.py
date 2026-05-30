@@ -326,7 +326,16 @@ def parse_pdf_into_chunks(
 ) -> list[TextChunk]:
     """
     Parse an entire textbook PDF into semantically labelled TextChunk objects.
+
+    Delegates to pdf_extractor.extract_enhanced_chunks() (pymupdf + OCR) when
+    available, falling back to the pdfplumber implementation below.
     """
+    try:
+        from app.services.pdf_extractor import extract_enhanced_chunks
+        return extract_enhanced_chunks(file_bytes, max_pages, min_chunk_chars, max_chunk_chars)
+    except Exception:
+        pass  # Fall through to pdfplumber below
+
     chunks: list[TextChunk] = []
     current_chapter_num = 0
     current_chapter_title = "Unknown"

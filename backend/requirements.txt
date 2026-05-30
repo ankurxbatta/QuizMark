@@ -17,3 +17,12 @@ httpx==0.27.0
 python-dotenv==1.0.1
 pdfplumber==0.11.0
 pypdf==4.2.0
+
+# Enhanced PDF extraction
+PyMuPDF==1.24.5
+pytesseract==0.3.13
+Pillow==10.3.0
+
+# MongoDB async driver
+motor==3.4.0
+pymongo==4.7.2

@@ -109,6 +109,51 @@ class OpenAIClient:
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
 
+    async def describe_image(self, image_bytes: bytes, context: str = "") -> str:
+        """
+        Send a rendered page image to GPT-4o Vision and return a text description.
+        image_bytes: PNG bytes of the rendered page.
+        context: surrounding text (chapter/section title) for better descriptions.
+        """
+        if not settings.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not set.")
+
+        import base64
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+        system_prompt = (
+            "You are an expert at reading statistical charts and graphs in textbooks. "
+            "Describe what each chart/graph on this page shows. Focus on: the type of "
+            "visualisation, axis labels, key values, trends, and what the data demonstrates. "
+            "If no meaningful chart is present, respond with exactly: NO_CHART"
+        )
+        user_content = []
+        if context:
+            user_content.append({"type": "text", "text": f"Context: {context}\n\nDescribe the chart(s) on this page:"})
+        else:
+            user_content.append({"type": "text", "text": "Describe the chart(s) or graph(s) on this page:"})
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "low"},
+        })
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                json={
+                    "model": getattr(settings, "OPENAI_VISION_MODEL", "gpt-4o-mini"),
+                    "max_tokens": 300,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                },
+            )
+            resp.raise_for_status()
+            result = resp.json()["choices"][0]["message"]["content"].strip()
+            return "" if result == "NO_CHART" else result
+
     async def embed(self, text: str) -> list[float]:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(

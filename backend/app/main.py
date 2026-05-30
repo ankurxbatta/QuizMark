@@ -69,3 +69,14 @@ async def ensure_admin_user():
             user.role = desired_role
             user.hashed_password = desired_hash
             await session.commit()
+
+
+@app.on_event("startup")
+async def ensure_mongo_vector_index():
+    if not settings.MONGODB_ENABLED:
+        return
+    try:
+        from app.services.mongo_vector_store import ensure_vector_index
+        await ensure_vector_index()
+    except Exception as exc:
+        print(f"[MONGO] Vector index setup failed (non-fatal): {exc}")

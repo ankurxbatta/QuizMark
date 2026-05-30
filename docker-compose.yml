@@ -38,6 +38,8 @@ services:
         condition: service_started
       llm:
         condition: service_healthy
+      mongodb:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
       interval: 10s
@@ -108,6 +110,7 @@ services:
       - broker
       - db
       - llm
+      - mongodb
     volumes:
       - ./data/uploads:/app/uploads
     networks:
@@ -120,9 +123,25 @@ services:
     networks:
       - app-network
 
+  mongodb:
+    image: mongodb/mongodb-atlas-local:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping').ok", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 volumes:
   pgdata:
   ollama_data:
+  mongodata:
 
 networks:
   app-network:
