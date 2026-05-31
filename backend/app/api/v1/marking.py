@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_db
@@ -59,19 +59,23 @@ async def override_mark(
 
 @router.get("/flagged")
 async def list_flagged(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    subs = await db["submissions"].find({"is_flagged": True}).to_list(length=2000)
+    subs = await db["submissions"].find({"is_flagged": True}).skip(skip).limit(limit).to_list(length=limit)
     return [_sub_out(s) for s in subs]
 
 
 @router.get("/audit-log")
 async def get_audit_log(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    logs = await db["audit_logs"].find({}).sort("timestamp", -1).to_list(length=5000)
+    logs = await db["audit_logs"].find({}).sort("timestamp", -1).skip(skip).limit(limit).to_list(length=limit)
     return [
         {
             "id": str(l["_id"]),

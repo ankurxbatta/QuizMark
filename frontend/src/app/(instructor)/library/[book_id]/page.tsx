@@ -6,7 +6,7 @@ import Select from "@/components/Select";
 import {
   BookOpen, Database, Layers, Table2, FlaskConical, ImageIcon,
   Loader2, ArrowLeft, Zap, CheckCircle, RefreshCw, CalendarDays,
-  ChevronRight,
+  ChevronRight, ServerCrash, X,
 } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -26,13 +26,31 @@ interface Book {
 
 interface Job {
   job_id: string;
+  filename: string;
   status: "queued" | "processing" | "done" | "failed";
   total_chapters: number;
   chapters_done: number;
   current_chapter_title: string | null;
   questions_created: number;
   progress_message: string | null;
-  error_message?: string | null;
+  error?: string | null;
+}
+
+const JOBS_LS_KEY = "active_ingest_jobs";
+
+function saveActiveJobIds(currentJobs: Job[], allStoredIds: string[]) {
+  const thisActiveIds = currentJobs
+    .filter(j => j.status !== "done" && j.status !== "failed")
+    .map(j => j.job_id);
+  // Merge: keep other pages' IDs + this page's active IDs
+  const thisAllIds = currentJobs.map(j => j.job_id);
+  const otherIds = allStoredIds.filter(id => !thisAllIds.includes(id));
+  const merged = [...new Set([...otherIds, ...thisActiveIds])];
+  if (merged.length > 0) {
+    localStorage.setItem(JOBS_LS_KEY, JSON.stringify(merged));
+  } else {
+    localStorage.removeItem(JOBS_LS_KEY);
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -63,6 +81,71 @@ function Stat({ icon: Icon, value, label, colour }: {
   );
 }
 
+function JobCard({ job, onDismiss }: { job: Job; onDismiss: (id: string) => void }) {
+  const pct = job.status === "done" ? 100
+    : job.total_chapters > 0 ? Math.min((job.chapters_done / job.total_chapters) * 100, 95)
+    : 5;
+
+  return (
+    <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {(job.status === "queued" || job.status === "processing") && (
+            <Loader2 size={16} className="animate-spin text-indigo-500 shrink-0" />
+          )}
+          {job.status === "done" && <CheckCircle size={16} className="text-green-500 shrink-0" />}
+          {job.status === "failed" && <ServerCrash size={16} className="text-red-500 shrink-0" />}
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+            job.status === "done"       ? "bg-green-100 text-green-700" :
+            job.status === "failed"     ? "bg-red-100 text-red-700"     :
+            job.status === "processing" ? "bg-blue-100 text-blue-700"   :
+            "bg-gray-200 text-gray-500"
+          }`}>{job.status}</span>
+          {job.status !== "queued" && job.status !== "processing" && (
+            <span className="text-xs text-gray-400">
+              {job.questions_created} questions
+            </span>
+          )}
+        </div>
+        {(job.status === "done" || job.status === "failed") && (
+          <button
+            onClick={() => onDismiss(job.job_id)}
+            className="text-gray-300 hover:text-gray-500 transition-colors"
+            aria-label="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      {(job.status === "queued" || job.status === "processing") && (
+        <>
+          <ProgressBar
+            pct={pct}
+            label={job.total_chapters > 0
+              ? `Chapters: ${job.chapters_done} / ${job.total_chapters}`
+              : "Starting…"}
+          />
+          {job.progress_message && (
+            <p className="text-xs text-gray-500 truncate">{job.progress_message}</p>
+          )}
+        </>
+      )}
+
+      {job.status === "done" && (
+        <p className="text-xs text-green-600">
+          {job.questions_created} questions ready —{" "}
+          <a href="/questions" className="underline hover:text-green-800">View Q&amp;A Bank</a>
+        </p>
+      )}
+
+      {job.status === "failed" && (
+        <p className="text-xs text-red-600">{job.error || "Generation failed."}</p>
+      )}
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 export default function BookDetailPage({ params }: { params: Promise<{ book_id: string }> }) {
   const { book_id } = use(params);
@@ -78,10 +161,17 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
   const [qtype, setQtype]           = useState("short_answer");
   const [difficulty, setDifficulty] = useState("all");
   const [count, setCount]           = useState(10);
-  const [job, setJob]               = useState<Job | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [genError, setGenError]     = useState("");
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Multiple jobs
+  const [jobs, setJobs]     = useState<Job[]>([]);
+  const jobsRef             = useRef<Job[]>([]);
+  const pollRef             = useRef<ReturnType<typeof setInterval> | null>(null);
+  const storedIdsRef        = useRef<string[]>([]);
+
+  // Keep ref in sync for interval
+  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
   // Load book
   useEffect(() => {
@@ -94,19 +184,47 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
       .finally(() => setLoading(false));
   }, [bookId]);
 
-  // Poll job
+  // Recover jobs for this book from localStorage on mount
   useEffect(() => {
-    if (!job || job.status === "done" || job.status === "failed") return;
+    try {
+      const raw = localStorage.getItem(JOBS_LS_KEY);
+      if (!raw) return;
+      const ids: string[] = JSON.parse(raw);
+      storedIdsRef.current = ids;
+      if (!Array.isArray(ids) || ids.length === 0) return;
+      Promise.all(ids.map(id => api.get(`/questions/jobs/${id}`).then(r => r.data).catch(() => null)))
+        .then(results => {
+          const valid = results.filter(Boolean) as Job[];
+          // Only show jobs that belong to this book (filename === bookId)
+          const bookJobs = valid.filter(j => j.filename === bookId);
+          if (bookJobs.length > 0) setJobs(bookJobs);
+        })
+        .catch(() => {});
+    } catch {}
+  }, [bookId]);
+
+  // Poll active jobs
+  useEffect(() => {
     pollRef.current = setInterval(async () => {
+      const active = jobsRef.current.filter(j => j.status !== "done" && j.status !== "failed");
+      if (active.length === 0) return;
       try {
-        const { data } = await api.get(`/questions/jobs/${job.job_id}`);
-        setJob(data);
-        if (data.status === "done" || data.status === "failed")
-          clearInterval(pollRef.current!);
-      } catch { /* ignore */ }
+        const updated = await Promise.all(
+          active.map(j => api.get(`/questions/jobs/${j.job_id}`).then(r => r.data))
+        );
+        setJobs(prev => {
+          const next = [...prev];
+          updated.forEach(uj => {
+            const idx = next.findIndex(x => x.job_id === uj.job_id);
+            if (idx !== -1) next[idx] = uj;
+          });
+          saveActiveJobIds(next, storedIdsRef.current);
+          return next;
+        });
+      } catch {}
     }, 3000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [job?.job_id, job?.status]);
+  }, []);
 
   const toggleChapter = (num: number) =>
     setSelectedChapters((prev) => {
@@ -137,7 +255,16 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
       const { data } = await api.post(
         `/questions/generate/from-book?book_id=${encodeURIComponent(bookId)}&question_type=${qtype}&count_per_chapter=${count}&difficulty=${difficulty}${chParam}`
       );
-      setJob(data);
+      setJobs(prev => {
+        const next = [data, ...prev];
+        // Persist to shared localStorage key
+        const stored = storedIdsRef.current;
+        const activeIds = next.filter(j => j.status !== "done" && j.status !== "failed").map(j => j.job_id);
+        const merged = [...new Set([...stored.filter(id => !next.map(j => j.job_id).includes(id)), ...activeIds])];
+        storedIdsRef.current = merged;
+        if (merged.length > 0) localStorage.setItem(JOBS_LS_KEY, JSON.stringify(merged));
+        return next;
+      });
     } catch (err: any) {
       setGenError(err.response?.data?.detail || "Generation failed.");
     } finally {
@@ -145,10 +272,12 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
     }
   };
 
-  const resetJob = () => {
-    setJob(null);
-    setGenError("");
-    if (pollRef.current) clearInterval(pollRef.current);
+  const dismissJob = (jobId: string) => {
+    setJobs(prev => {
+      const next = prev.filter(j => j.job_id !== jobId);
+      saveActiveJobIds(next, storedIdsRef.current);
+      return next;
+    });
   };
 
   // ── Loading / error ────────────────────────────────────────────────────────
@@ -179,12 +308,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
 
   const activeChapters = book.chapters.filter((c) => selectedChapters.has(c.num));
   const estimated = activeChapters.length * count;
-
-  const jobPct = job
-    ? job.status === "done" ? 100
-    : job.total_chapters > 0 ? Math.min((job.chapters_done / job.total_chapters) * 100, 95)
-    : 5
-    : 0;
+  const activeJobCount = jobs.filter(j => j.status === "queued" || j.status === "processing").length;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -259,161 +383,121 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
             </div>
           </div>
 
-          {/* ── Generate panel (right) ── */}
+          {/* ── Right panel ── */}
           <div className="lg:col-span-3 space-y-5">
+
+            {/* Generate form — always visible */}
             <div className="bg-white rounded-xl border shadow-sm p-6 space-y-5">
-              <h2 className="font-semibold text-gray-800">Generate Questions</h2>
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold text-gray-800">Generate Questions</h2>
+                {activeJobCount > 0 && (
+                  <span className="flex items-center gap-1.5 text-xs bg-blue-50 text-blue-600 px-2.5 py-1 rounded-full font-medium">
+                    <Loader2 size={11} className="animate-spin" />
+                    {activeJobCount} job{activeJobCount > 1 ? "s" : ""} running
+                  </span>
+                )}
+              </div>
 
-              {!job ? (
-                <>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
-                        Question Type
-                      </label>
-                      <Select
-                        value={qtype}
-                        onChange={setQtype}
-                        options={[
-                          { value: "short_answer", label: "Short Answer" },
-                          { value: "mcq",          label: "Multiple Choice (MCQ)" },
-                          { value: "true_false",   label: "True / False" },
-                        ]}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
-                        Difficulty
-                      </label>
-                      <Select
-                        value={difficulty}
-                        onChange={setDifficulty}
-                        options={[
-                          { value: "all",    label: "Mixed — AI decides" },
-                          { value: "easy",   label: "Easy — recall & definitions" },
-                          { value: "medium", label: "Medium — apply & interpret" },
-                          { value: "hard",   label: "Hard — multi-step analysis" },
-                        ]}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
-                      Questions per Chapter
-                    </label>
-                    <input
-                      type="number" min={1} max={50} value={count}
-                      onChange={(e) => setCount(Math.max(1, parseInt(e.target.value) || 1))}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    />
-                  </div>
-
-                  {/* Summary */}
-                  <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-sm text-indigo-700 space-y-1">
-                    <p className="font-medium">
-                      ~{estimated} questions from {activeChapters.length} chapter{activeChapters.length !== 1 ? "s" : ""}
-                    </p>
-                    {activeChapters.length < book.chapters.length && (
-                      <p className="text-xs text-indigo-500">
-                        Selected: {activeChapters.map((c) => `Ch ${c.num}`).join(", ")}
-                      </p>
-                    )}
-                    {difficulty !== "all" && (
-                      <p className="text-xs text-indigo-500 capitalize">Difficulty: {difficulty}</p>
-                    )}
-                  </div>
-
-                  {genError && (
-                    <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
-                      {genError}
-                    </p>
-                  )}
-
-                  <button
-                    onClick={handleGenerate}
-                    disabled={submitting || selectedChapters.size === 0}
-                    className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
-                  >
-                    {submitting
-                      ? <><Loader2 size={17} className="animate-spin" /> Starting…</>
-                      : <><Zap size={17} /> Generate {estimated > 0 ? `~${estimated}` : ""} Questions</>}
-                  </button>
-                </>
-              ) : (
-                /* Job progress */
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className={`text-sm px-3 py-1 rounded-full font-medium ${
-                      job.status === "done"       ? "bg-green-100 text-green-700" :
-                      job.status === "failed"     ? "bg-red-100 text-red-700"     :
-                      job.status === "processing" ? "bg-blue-100 text-blue-700"   :
-                      "bg-gray-100 text-gray-500"
-                    }`}>{job.status}</span>
-
-                    {(job.status === "done" || job.status === "failed") && (
-                      <button
-                        onClick={resetJob}
-                        className="text-sm text-gray-400 hover:text-gray-600 flex items-center gap-1"
-                      >
-                        <RefreshCw size={13} /> Generate again
-                      </button>
-                    )}
-                  </div>
-
-                  <ProgressBar
-                    pct={jobPct}
-                    label={`Chapters: ${job.chapters_done} / ${job.total_chapters}`}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
+                    Question Type
+                  </label>
+                  <Select
+                    value={qtype}
+                    onChange={setQtype}
+                    options={[
+                      { value: "short_answer", label: "Short Answer" },
+                      { value: "mcq",          label: "Multiple Choice (MCQ)" },
+                      { value: "true_false",   label: "True / False" },
+                    ]}
                   />
-
-                  {job.current_chapter_title && job.status === "processing" && (
-                    <p className="text-sm text-gray-500">
-                      Generating: <span className="text-gray-700 font-medium">{job.current_chapter_title}</span>
-                    </p>
-                  )}
-
-                  {job.progress_message && (
-                    <p className="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
-                      {job.progress_message}
-                    </p>
-                  )}
-
-                  {job.status === "done" && (
-                    <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-5 py-4 text-green-700">
-                      <CheckCircle size={20} />
-                      <div>
-                        <p className="font-semibold">{job.questions_created} questions generated</p>
-                        <p className="text-sm text-green-600 mt-0.5">
-                          Ready in the Q&amp;A Bank —{" "}
-                          <a href="/questions" className="underline hover:text-green-800">View now</a>
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {job.status === "failed" && (
-                    <div className="bg-red-50 border border-red-200 rounded-xl px-5 py-4 text-red-700 text-sm">
-                      <p className="font-semibold mb-1">Generation failed</p>
-                      <p>{job.error_message || "An error occurred."}</p>
-                    </div>
-                  )}
-
-                  {/* Stats while running */}
-                  {job.status !== "failed" && (
-                    <div className="grid grid-cols-2 gap-3 text-center">
-                      <div className="bg-gray-50 rounded-xl p-3">
-                        <p className="text-2xl font-bold text-indigo-600">{job.questions_created}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">Questions so far</p>
-                      </div>
-                      <div className="bg-gray-50 rounded-xl p-3">
-                        <p className="text-2xl font-bold text-gray-700">{job.chapters_done}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">Chapters done</p>
-                      </div>
-                    </div>
-                  )}
                 </div>
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
+                    Difficulty
+                  </label>
+                  <Select
+                    value={difficulty}
+                    onChange={setDifficulty}
+                    options={[
+                      { value: "all",    label: "Mixed — AI decides" },
+                      { value: "easy",   label: "Easy — recall & definitions" },
+                      { value: "medium", label: "Medium — apply & interpret" },
+                      { value: "hard",   label: "Hard — multi-step analysis" },
+                    ]}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
+                  Questions per Chapter
+                </label>
+                <input
+                  type="number" min={1} max={50} value={count}
+                  onChange={(e) => setCount(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Summary */}
+              <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-sm text-indigo-700 space-y-1">
+                <p className="font-medium">
+                  ~{estimated} questions from {activeChapters.length} chapter{activeChapters.length !== 1 ? "s" : ""}
+                </p>
+                {activeChapters.length < book.chapters.length && (
+                  <p className="text-xs text-indigo-500">
+                    Selected: {activeChapters.map((c) => `Ch ${c.num}`).join(", ")}
+                  </p>
+                )}
+                {difficulty !== "all" && (
+                  <p className="text-xs text-indigo-500 capitalize">Difficulty: {difficulty}</p>
+                )}
+              </div>
+
+              {genError && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
+                  {genError}
+                </p>
               )}
+
+              <button
+                onClick={handleGenerate}
+                disabled={submitting || selectedChapters.size === 0}
+                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
+              >
+                {submitting
+                  ? <><Loader2 size={17} className="animate-spin" /> Queuing job…</>
+                  : <><Zap size={17} /> Generate {estimated > 0 ? `~${estimated}` : ""} Questions</>}
+              </button>
             </div>
+
+            {/* Jobs list */}
+            {jobs.length > 0 && (
+              <div className="bg-white rounded-xl border shadow-sm p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-gray-800 text-sm">Generation Jobs</h3>
+                  <button
+                    onClick={() => {
+                      setJobs(prev => {
+                        const next = prev.filter(j => j.status === "queued" || j.status === "processing");
+                        saveActiveJobIds(next, storedIdsRef.current);
+                        return next;
+                      });
+                    }}
+                    className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1"
+                  >
+                    <RefreshCw size={11} /> Clear finished
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {jobs.map(job => (
+                    <JobCard key={job.job_id} job={job} onDismiss={dismissJob} />
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Quick nav to Q&A bank */}
             <a

@@ -1,16 +1,19 @@
 "use client";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import Cookies from "js-cookie";
 import {
   LayoutDashboard, Upload, BookOpen,
-  CheckSquare, BarChart2, Download, LogOut, Database,
+  CheckSquare, BarChart2, Download, LogOut, Database, Loader2,
 } from "lucide-react";
+
+const JOBS_LS_KEY = "active_ingest_jobs";
 
 const NAV = [
   { label: "Dashboard",  href: "/dashboard",  icon: LayoutDashboard },
-  { label: "Add Book",    href: "/generate",   icon: Upload },
-  { label: "Library",    href: "/library",    icon: Database },
+  { label: "Add Book",    href: "/generate",   icon: Upload,   showJobBadge: true },
+  { label: "Library",    href: "/library",    icon: Database, showJobBadge: true },
   { label: "Questions",  href: "/questions",  icon: BookOpen },
   { label: "Marking",    href: "/marking",    icon: CheckSquare },
   { label: "Analytics",  href: "/analytics",  icon: BarChart2 },
@@ -20,6 +23,23 @@ const NAV = [
 export default function InstructorLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [activeJobCount, setActiveJobCount] = useState(0);
+
+  // Poll localStorage for active job IDs every 3s so the badge stays in sync
+  useEffect(() => {
+    const read = () => {
+      try {
+        const raw = localStorage.getItem(JOBS_LS_KEY);
+        const ids: string[] = raw ? JSON.parse(raw) : [];
+        setActiveJobCount(Array.isArray(ids) ? ids.length : 0);
+      } catch {
+        setActiveJobCount(0);
+      }
+    };
+    read();
+    const interval = setInterval(read, 3000);
+    return () => clearInterval(interval);
+  }, []);
 
   const signOut = () => {
     Cookies.remove("token");
@@ -37,8 +57,9 @@ export default function InstructorLayout({ children }: { children: React.ReactNo
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {NAV.map(({ label, href, icon: Icon }) => {
+          {NAV.map(({ label, href, icon: Icon, showJobBadge }) => {
             const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+            const showBadge = showJobBadge && activeJobCount > 0;
             return (
               <Link
                 key={href}
@@ -50,11 +71,28 @@ export default function InstructorLayout({ children }: { children: React.ReactNo
                 }`}
               >
                 <Icon size={17} />
-                {label}
+                <span className="flex-1">{label}</span>
+                {showBadge && (
+                  <span className="flex items-center gap-0.5 bg-blue-100 text-blue-600 text-xs font-semibold px-1.5 py-0.5 rounded-full">
+                    <Loader2 size={9} className="animate-spin" />
+                    {activeJobCount}
+                  </span>
+                )}
               </Link>
             );
           })}
         </nav>
+
+        {/* Active jobs notice */}
+        {activeJobCount > 0 && (
+          <div className="mx-3 mb-3 px-3 py-2.5 bg-blue-50 border border-blue-100 rounded-xl">
+            <p className="text-xs text-blue-600 font-medium flex items-center gap-1.5">
+              <Loader2 size={11} className="animate-spin shrink-0" />
+              {activeJobCount} job{activeJobCount > 1 ? "s" : ""} processing
+            </p>
+            <p className="text-xs text-blue-400 mt-0.5">Safe to navigate away</p>
+          </div>
+        )}
 
         <div className="px-3 py-4 border-t">
           <button

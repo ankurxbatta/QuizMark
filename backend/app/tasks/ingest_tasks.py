@@ -486,9 +486,10 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
             qtype = q_data.get("question_type", question_type)
             if qtype not in _ALLOWED_QTYPES:
                 qtype = question_type
-            difficulty = q_data.get("difficulty", "medium")
-            if difficulty not in _ALLOWED_DIFFICULTIES:
-                difficulty = "medium"
+            # Use q_difficulty to avoid shadowing the function parameter `difficulty`
+            q_difficulty = q_data.get("difficulty", "medium")
+            if q_difficulty not in _ALLOWED_DIFFICULTIES:
+                q_difficulty = "medium"
             try:
                 max_marks = float(q_data.get("max_marks", 5))
             except (TypeError, ValueError):
@@ -508,7 +509,7 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
                 "rubric": q_data.get("rubric", ""),
                 "max_marks": max_marks,
                 "topic_tag": q_data.get("topic_tag", topic_tag),
-                "difficulty": difficulty,
+                "difficulty": q_difficulty,
                 "source_page_range": q_data.get("_page_range", ""),
                 "source_chunk": q_data.get("_source_chunk", ""),
                 "embedding": embedding,

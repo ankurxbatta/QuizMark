@@ -55,11 +55,6 @@ class Settings(BaseSettings):
     GENERATION_LLM_MODEL: str = "gemini-2.5-flash"
     GENERATION_MAX_TOKENS: int = 4096
 
-    # ── Ollama (optional, kept for local/offline fallback) ───────────────────
-    OLLAMA_BASE_URL: str = "http://llm:11434"
-    EMBEDDING_MODEL: str = "nomic-embed-text"  # kept for reference / legacy
-    VISION_MODEL: str = "llava:7b"             # used if OllamaVisionClient is called
-
     # ── RAG ──────────────────────────────────────────────────────────────────
     SIMILARITY_THRESHOLD: float = 0.75
     TOP_K_RETRIEVAL: int = 5

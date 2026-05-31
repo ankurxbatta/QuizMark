@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -142,14 +143,13 @@ async def get_book(
     if not raw:
         raise HTTPException(404, f"Book '{book_id}' not found in Library.")
 
-    import re as _re
     doc = raw[0]
     ch_by_num: dict[int, str] = {}
     for c in doc.get("chapter_set", []):
         num, title = c.get("num"), c.get("title", "")
         if not title or num is None:
             continue
-        title = _re.sub(r"(\s*\.\s*){2,}$", "", title).strip()
+        title = re.sub(r"(\s*\.\s*){2,}$", "", title).strip()
         if num not in ch_by_num or len(title) < len(ch_by_num[num]):
             ch_by_num[num] = title
     chapters = sorted(ch_by_num.items(), key=lambda x: x[0])
@@ -264,13 +264,12 @@ async def list_books(
         book_id = doc["_id"] or "unknown"
         # Deduplicate by chapter number — keep the shortest, cleanest title
         # (guards against TOC dot-leader variants slipping through)
-        import re as _re
         ch_by_num: dict[int, str] = {}
         for c in doc.get("chapter_set", []):
             num, title = c.get("num"), c.get("title", "")
             if not title or num is None:
                 continue
-            title = _re.sub(r"(\s*\.\s*){2,}$", "", title).strip()
+            title = re.sub(r"(\s*\.\s*){2,}$", "", title).strip()
             if num not in ch_by_num or len(title) < len(ch_by_num[num]):
                 ch_by_num[num] = title
         chapters = sorted(ch_by_num.items(), key=lambda x: x[0])
@@ -444,6 +443,45 @@ async def generate_from_upload(
 
 
 # ── Job status ────────────────────────────────────────────────────────────────
+
+def _job_out(job: dict) -> dict:
+    def _iso(v):
+        return v.isoformat() if v else None
+    return {
+        "job_id": job["_id"],
+        "filename": job.get("filename", ""),
+        "total_pages": job.get("total_pages", 0),
+        "status": job["status"],
+        "total_chapters": job.get("total_chapters", 0),
+        "chapters_done": job.get("chapters_done", 0),
+        "current_chapter": job.get("current_chapter"),
+        "current_chapter_title": job.get("current_chapter_title"),
+        "questions_created": job.get("questions_created", 0),
+        "progress_message": job.get("progress_message"),
+        "last_heartbeat_at": _iso(job.get("last_heartbeat_at")),
+        "error": job.get("error_message"),
+        "created_at": _iso(job.get("created_at")),
+        "started_at": _iso(job.get("started_at")),
+        "completed_at": _iso(job.get("completed_at")),
+    }
+
+
+@router.get("/jobs")
+async def list_jobs(
+    status: Optional[str] = Query(None, description="Comma-separated statuses, e.g. 'queued,processing'"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    _: dict = Depends(require_instructor),
+):
+    """List recent ingest/generation jobs. Filter by status for active-job polling."""
+    filt: dict = {}
+    if status:
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if statuses:
+            filt["status"] = {"$in": statuses}
+    jobs = await db["ingest_jobs"].find(filt).sort("created_at", -1).limit(limit).to_list(length=limit)
+    return [_job_out(j) for j in jobs]
+
 
 @router.get("/jobs/{job_id}")
 async def get_job_status(

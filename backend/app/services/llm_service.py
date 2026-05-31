@@ -1,19 +1,18 @@
 """
 llm_service.py  —  Unified LLM adapter.
 
-All AI work is routed through Gemini (generation_service / online_service).
-OllamaClient is retained for optional local use but is NOT instantiated
-as a default service — Gemini is the only active backend.
+All AI work is routed through Gemini. AnthropicClient and OpenAIClient
+are available as optional overrides via ONLINE_LLM_PROVIDER config.
 
 Public singletons:
   slm_service        → GeminiClient (embeddings + fast scoring)
-  llm_service        → GeminiClient (generation fallback, same as online)
-  online_service     → GeminiClient (marking)
-  generation_service → GeminiClient (question generation)
+  llm_service        → GeminiClient (generation fallback)
+  online_service     → GeminiClient / AnthropicClient / OpenAIClient (marking)
+  generation_service → GeminiClient / AnthropicClient / OpenAIClient (question generation)
 
 All share the same interface:  .generate(prompt) → str
                                 .embed(text)      → list[float]
-                                .describe_image() → str  (vision-capable clients)
+                                .describe_image() → str  (GeminiClient only)
 """
 import asyncio
 import base64
@@ -38,35 +37,6 @@ async def _sleep_before_retry(resp: httpx.Response, attempt: int) -> None:
     except ValueError:
         delay = 0.0
     await asyncio.sleep(max(delay, 5.0 * (attempt + 1)))
-
-
-class OllamaClient:
-    """Talks to a local Ollama model. Kept for optional local use; not active by default."""
-
-    def __init__(self, model: str, temperature: float, max_tokens: int):
-        self.base_url = settings.OLLAMA_BASE_URL
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-
-    async def generate(self, prompt: str) -> str:
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": self.temperature, "num_predict": self.max_tokens},
-        }
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(f"{self.base_url}/api/generate", json=payload)
-            resp.raise_for_status()
-            return resp.json()["response"]
-
-    async def embed(self, text: str) -> list[float]:
-        payload = {"model": settings.EMBEDDING_MODEL, "prompt": text}
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(f"{self.base_url}/api/embeddings", json=payload)
-            resp.raise_for_status()
-            return resp.json()["embedding"]
 
 
 class GeminiClient:
@@ -232,32 +202,8 @@ class OpenAIClient:
             return resp.json()["data"][0]["embedding"]
 
 
-class OllamaVisionClient:
-    """Calls a local Ollama vision model. Kept for optional local use."""
-
-    def __init__(self, model: str | None = None):
-        self.base_url = settings.OLLAMA_BASE_URL
-        self.model = model or getattr(settings, "VISION_MODEL", "llava:7b")
-
-    async def describe_image(self, image_bytes: bytes, context: str = "") -> str:
-        import base64 as _b64
-        b64 = _b64.b64encode(image_bytes).decode("utf-8")
-        prompt = (
-            "You are an expert at reading statistical charts and graphs in textbooks. "
-            "Describe what the chart or graph shows. If no chart is present: NO_CHART"
-        )
-        if context:
-            prompt = f"Context: {context}\n\n{prompt}"
-        payload = {"model": self.model, "prompt": prompt, "images": [b64], "stream": False}
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{self.base_url}/api/generate", json=payload)
-            resp.raise_for_status()
-            result = resp.json()["response"].strip()
-            return "" if result == "NO_CHART" else result
-
-
 # ── Module-level singletons ─────────────────────────────────────────────────────
-# All AI work goes through Gemini. OllamaClient is not active.
+# All AI work goes through Gemini.
 
 # Tier-1: "SLM" — now Gemini flash (better accuracy, no local compute)
 slm_service = GeminiClient(

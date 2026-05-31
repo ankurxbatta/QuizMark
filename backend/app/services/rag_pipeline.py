@@ -211,7 +211,15 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
     else:
         raw = await llm_service.generate(prompt)
 
-    res = _parse_llm_json(raw, question["max_marks"])
+    try:
+        res = _parse_llm_json(raw, question["max_marks"])
+    except (ValueError, json.JSONDecodeError):
+        res = {
+            "mark": 0.0,
+            "feedback": "Automated marking could not parse the AI response. Please review manually.",
+            "flagged": True,
+            "confidence": 0.0,
+        }
     if slm.route == "LOW":
         res["flagged"] = True
 
