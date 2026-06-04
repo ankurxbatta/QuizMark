@@ -58,14 +58,14 @@ _ENV = _load_env()
 MONGODB_URL    = os.environ.get("MONGODB_URL", _ENV.get("MONGODB_URL", "mongodb://localhost:27017"))
 MONGODB_DB     = os.environ.get("MONGODB_DB_NAME", _ENV.get("MONGODB_DB_NAME", "marking_tools"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", _ENV.get("GEMINI_API_KEY", ""))
-GEMINI_MODEL   = os.environ.get("GENERATION_LLM_MODEL", _ENV.get("GENERATION_LLM_MODEL", "gemini-2.5-flash"))
+GEMINI_MODEL   = "gemini-2.5-flash"  # always use a Gemini model; GENERATION_LLM_MODEL is for Groq
 GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_EMBED_MODEL = "gemini-embedding-001"  # truncated to 768-dim via outputDimensionality
 
 # Groq — used exclusively for math formula extraction (free tier, vision-capable)
 GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", _ENV.get("GROQ_API_KEY", ""))
 GROQ_BASE     = "https://api.groq.com/openai/v1"
-GROQ_MODEL    = os.environ.get("GROQ_MATH_MODEL", _ENV.get("GROQ_MATH_MODEL", "llama-3.2-11b-vision-preview"))
+GROQ_MODEL    = os.environ.get("GROQ_MATH_MODEL", _ENV.get("GROQ_MATH_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"))
 
 MAX_PAGES         = 700
 MIN_CHUNK_CHARS   = 300
@@ -316,14 +316,9 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
     # Math fonts — collect spans and record which page has math
     math_spans: list[str] = []
     has_math_font = False
-    text_block_rects: list[tuple] = []
     try:
         rawdict = page.get_text("rawdict")
         for block in rawdict.get("blocks", []):
-            if block.get("type") == 0:
-                b = block.get("bbox")
-                if b:
-                    text_block_rects.append(b)
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
                     font = span.get("font", "")
@@ -347,7 +342,10 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
             if s and fl.search(s):
                 math_spans.append(s)
 
-    # Vector graphic detection (charts vs coloured formatting boxes)
+    # Vector graphic detection — flag pages with significant filled drawing area.
+    # No text-overlap filter: chart axis labels and value labels overlap with
+    # drawing bboxes and the old 30% threshold incorrectly excluded real charts.
+    # Gemini Vision will say NO_CHART for coloured text boxes sent by mistake.
     has_vector = False
     try:
         page_area = page.rect.width * page.rect.height
@@ -359,19 +357,11 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
                 r = d.get("rect")
                 if not r:
                     continue
-                rx0, ry0, rx1, ry1 = r[0], r[1], r[2], r[3]
-                w, h = abs(rx1 - rx0), abs(ry1 - ry0)
+                w, h = abs(r[2] - r[0]), abs(r[3] - r[1])
                 if w < 5 or h < 5:
                     continue
-                shape_area = w * h
-                text_overlap = sum(
-                    max(0.0, min(rx1, tx1) - max(rx0, tx0)) *
-                    max(0.0, min(ry1, ty1) - max(ry0, ty0))
-                    for tx0, ty0, tx1, ty1 in text_block_rects
-                )
-                if text_overlap / shape_area < 0.30:
-                    graphic_area += shape_area
-            has_vector = (graphic_area / page_area) > 0.03  # lowered from 0.05
+                graphic_area += w * h
+            has_vector = (graphic_area / page_area) > 0.03
     except Exception:
         pass
 
@@ -594,16 +584,17 @@ async def _add_math_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
 
     results = await asyncio.gather(*tasks)
 
+    # Collect Groq LaTeX per chunk (may span multiple pages), then replace
+    # the text-layer math_text entirely — Groq Vision is the authoritative source.
+    chunk_latex: dict[int, list[str]] = {}
     for ci, math_text in results:
         if math_text:
-            existing = chunks[ci].math_text
-            if existing:
-                existing_lines = set(existing.splitlines())
-                new_lines = [l for l in math_text.splitlines() if l not in existing_lines]
-                if new_lines:
-                    chunks[ci].math_text = existing + "\n" + "\n".join(new_lines)
-            else:
-                chunks[ci].math_text = math_text
+            chunk_latex.setdefault(ci, []).append(math_text)
+
+    for ci, latex_pages in chunk_latex.items():
+        combined = "\n".join(latex_pages)
+        deduped = list(dict.fromkeys(l for l in combined.splitlines() if l.strip()))
+        chunks[ci].math_text = "\n".join(deduped)
 
     doc.close()
     described = sum(1 for _, m in results if m)

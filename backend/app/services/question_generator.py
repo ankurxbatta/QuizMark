@@ -5,15 +5,24 @@ Pipeline:
   1. Receive a list of TextChunk objects from pdf_service.parse_pdf_into_chunks()
   2. Score and rank chunks by teaching value
   3. Group chunks by topic so questions are spread across all chapters
-  4. For each topic group, run Two-Stage generation:
-       Stage A — Online LLM: rapid concept extraction from chunk
-       Stage B — Online LLM: rich question construction with rubric
+  4. For each topic group, generate questions with:
+       - Bloom's Taxonomy cognitive level distribution
+       - 4-level uniqueness enforcement vs existing questions
   5. Post-process: validate JSON, deduplicate, assign final metadata
   6. Return sorted list of question dicts ready for DB insertion
 
-For plain-text (.txt) input, falls back to the original single-stage approach.
+Bloom's Taxonomy levels (inspired by Shiksha Copilot's question bank approach):
+  L1 Remember  — Recall definitions, facts, formulas directly stated
+  L2 Understand — Explain or interpret a concept
+  L3 Apply     — Use a formula/method to solve a new scenario
+  L4 Analyze   — Compare methods, identify patterns, critique
+  L5 Evaluate  — Justify a choice or assess a statistical approach
 
-Note: Question generation now uses online LLM (Claude/GPT/Gemini) for better speed and reliability.
+Uniqueness enforcement (4-level, from Shiksha's question_bank_parts_gen):
+  1. No direct repetition of existing questions
+  2. No rewording of existing questions
+  3. No conceptual overlap (same skill tested)
+  4. No computational equivalence (same calculation, different numbers)
 """
 from __future__ import annotations
 
@@ -34,122 +43,38 @@ def _safe_exception_message(exc: Exception) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Bloom's Taxonomy distribution (Shiksha-inspired)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BLOOMS_GUIDE = """\
+BLOOM'S TAXONOMY — distribute questions across these cognitive levels:
+  L1 Remember  (easy)   — Recall a definition, fact, formula, or label directly from source
+  L2 Understand (easy)  — Explain a concept, summarise what a result means, or classify data
+  L3 Apply    (medium)  — Use a formula/method to solve a specific numerical scenario
+  L4 Analyze  (medium)  — Compare two methods, identify an assumption, or break down a problem
+  L5 Evaluate  (hard)   — Justify a statistical decision, critique an approach, or assess validity
+
+Target distribution for {count} questions:
+  ~20% L1 Remember, ~20% L2 Understand, ~30% L3 Apply, ~20% L4 Analyze, ~10% L5 Evaluate
+
+Add a "bloom_level" field (L1–L5) to every question object.
+"""
+
+_UNIQUENESS_BLOCK = """\
+UNIQUENESS REQUIREMENTS — your questions must NOT:
+  1. Directly repeat any existing question (verbatim match)
+  2. Be a reworded version of any existing question (same concept, different phrasing)
+  3. Conceptually overlap (test the exact same skill or fact as an existing question)
+  4. Be computationally equivalent (same calculation with only the numbers changed)
+
+EXISTING QUESTIONS IN THE BANK (avoid overlap with ALL of these):
+{existing_questions_block}
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Prompt templates
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Stage A: Online LLM extracts raw concept skeletons from a single chunk
-_SLM_CONCEPT_PROMPT = """\
-You are a statistics exam question author reading a textbook section.
-
-SOURCE SECTION:
-{chunk_text}
-
-Task: Identify {count} distinct testable concepts from this section.
-For each concept output EXACTLY ONE line in this format:
-<concept name> | <one-sentence factual answer>
-
-Rules:
-- Focus on definitions, formulas, conditions, interpretations, and applied scenarios.
-- Prefer concepts that can be turned into calculation or application questions.
-- Do NOT copy exercise questions from the text.
-- Do NOT output anything except the pipe-separated lines.
-"""
-
-# Stage B: LLM turns skeletons into full exam questions
-_LLM_ENRICH_PROMPT = """\
-You are a statistics assessment author writing exam questions for a business statistics course.
-
-SOURCE CONTEXT (use this to write accurate questions):
-{chunk_text}
-
-CONCEPT SKELETONS TO EXPAND:
-{skeletons}
-
-QUESTION TYPE REQUIRED: {qtype}
-
-Write each skeleton into a complete, high-quality exam question. Study the style rules and examples below carefully.
-
-━━━ SHORT ANSWER ━━━
-Style rules:
-- Ask about a SPECIFIC concept, formula, condition, or calculation — never vague "explain" or "describe" prompts.
-- Where the source contains numbers, formulas, or scenarios, build the question around them.
-- Questions may present a scenario or data and ask the student to calculate, identify, or interpret.
-- Model answer: 2–5 precise sentences a student could realistically write. Include formulas or numeric results where relevant.
-- Rubric: one criterion per mark. Format: "1 mark: <what student must state>. 1 mark: ..."
-
-Good short-answer examples (style to emulate):
-  • "Svetlana charges a one-time fee of $25 plus $15 per hour for tutoring. Write the linear equation for her total earnings per session, and identify the independent and dependent variables."
-  • "The ages of smartphone users (13–55+) follow a normal distribution with mean 36.9 years and standard deviation 13.9 years. What is the probability that a randomly selected user is at most 50.8 years old?"
-  • "Explain the expected value of the F-ratio when the null hypothesis is true, and what causes deviations from this value."
-  • "Under what conditions is the Finite Population Correction Factor applied, and what is its purpose?"
-
-BAD short-answer example (do NOT write this style):
-  • "Based on the text, explain in your own words what conditional probability means." ← too vague, not grounded in source data
-
-━━━ MCQ ━━━
-Style rules:
-- The stem must pose a clear, meaningful question about a statistical concept, condition, formula, or scenario.
-- Put the stem and options together in question_text using EXACTLY this line format:
-  Stem text?
-  A. First option
-  B. Second option
-  C. Third option
-  D. Fourth option
-- NEVER generate fill-in-the-blank sentences that just blank out a word from the text.
-- NEVER use the source text wording directly as an answer option.
-- All four options (A–D) must be substantive and plausible; distractors should reflect common misconceptions.
-- Only one option is unambiguously correct.
-- Model answer: start with the correct letter, then a concise explanation, e.g. "B. Increasing n lowers the standard error, so the interval becomes narrower."
-- Never omit the options. Preferred format: put the A-D options inside question_text. If you use a separate options/choices field, it must be an object with keys A, B, C, D.
-
-Good MCQ examples (style to emulate):
-  • question_text: "A researcher increases the sample size of a study from 36 to 100 while keeping all other factors constant. What happens to the confidence interval?
-A. It becomes wider.
-B. It becomes narrower.
-C. It remains the same.
-D. It becomes less accurate."
-  • question_text: "Which of the following is NOT a characteristic of a binomial experiment?
-A. There are only two possible outcomes per trial.
-B. The probability of success changes with each trial.
-C. The number of trials is fixed.
-D. Each trial is independent."
-  • question_text: "In a one-way ANOVA, what does the null hypothesis state?
-A. All group means are equal.
-B. All individual observations are identical.
-C. The sample variances must all be zero.
-D. The data must contain exactly two groups."
-
-BAD MCQ example (do NOT write this style):
-  • "Which term best completes the statement? '____ is called the chi-square distribution.'" ← this is a trivial cloze, not a real question.
-
-━━━ TRUE/FALSE ━━━
-Style rules:
-- The statement must test application or interpretation, NOT just a definition from the text.
-- Prefer statements that involve a specific numerical claim, a consequence of a formula, or a practical condition.
-- Avoid pure theory statements that any student could guess without understanding.
-- Model answer: state "True" or "False" then give a 1–2 sentence justification citing the source concept.
-
-Good T/F examples (style to emulate):
-  • "True or False: When constructing a confidence interval for a population mean, if the sample size is 80, it is acceptable to substitute the sample standard deviation (s) for σ without significant bias."
-  • "True or False: Increasing the sample size when constructing a confidence interval, while keeping all other factors constant, will result in a wider confidence interval."
-
-━━━ ALL QUESTION TYPES ━━━
-Also provide:
-- max_marks: integer (2 for simple recall, 4 for standard application, 6 for analysis, 8 for multi-step)
-- topic_tag: chapter/topic (e.g. "Normal Distribution", "Confidence Intervals")
-- difficulty: easy | medium | hard
-  easy   = recall a definition or read a formula directly
-  medium = apply a formula, interpret a result, or reason through a scenario
-  hard   = multi-step calculation or critical comparison of concepts
-
-Respond ONLY as a valid JSON array. Each element must have these required keys:
-question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty
-MCQ elements may also include an optional options or choices object with keys A, B, C, D.
-
-No preamble. No trailing text. Just the JSON array.
-"""
-
-# Fallback for plain-text (no chunks)
 _PLAIN_TEXT_PROMPT = """\
 You are a statistics assessment author writing exam questions for a business statistics course.
 
@@ -157,6 +82,9 @@ SOURCE TEXT:
 {content}
 
 Generate {count} high-quality exam questions of type "{qtype}".
+
+{blooms_guide}
+{uniqueness_block}
 
 Follow the style rules and examples below carefully.
 
@@ -193,11 +121,6 @@ A. It becomes wider.
 B. It becomes narrower.
 C. It stays exactly the same.
 D. It becomes less connected to the sample."
-  • question_text: "Which is NOT a characteristic of a binomial experiment?
-A. There are only two possible outcomes per trial.
-B. The probability of success changes from trial to trial.
-C. The number of trials is fixed.
-D. Trials are independent."
 
 BAD example (avoid): "Which term best completes: '____ is the chi-square distribution'?" ← trivial cloze.
 
@@ -212,12 +135,13 @@ Good examples:
 
 ━━━ ALL TYPES ━━━
 - Spread questions across different concepts in the source.
-- max_marks: 2–8 depending on complexity.
-- difficulty: easy (recall) | medium (apply/interpret) | hard (multi-step/compare).
+- max_marks: 2–8 depending on complexity (L1=2, L2=2, L3=4, L4=6, L5=8).
+- difficulty: easy (L1–L2) | medium (L3–L4) | hard (L5).
 - topic_tag: the chapter or concept area (e.g. "Confidence Intervals", "Normal Distribution").
+- bloom_level: "L1" | "L2" | "L3" | "L4" | "L5"
 
 Respond ONLY as a valid JSON array with required keys:
-question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty
+question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty, bloom_level
 MCQ elements may also include an optional options or choices object with keys A, B, C, D.
 """
 
@@ -337,10 +261,18 @@ async def _llm_enrich_chunk(
 
 
 _DIFFICULTY_INSTRUCTION = {
-    "easy":   "DIFFICULTY REQUIREMENT: ALL questions must be EASY — recall of a single definition, term, or fact directly stated in the source. No calculation or multi-step reasoning.",
-    "medium": "DIFFICULTY REQUIREMENT: ALL questions must be MEDIUM — apply a formula, interpret a statistical result, or reason through a scenario. Not pure recall.",
-    "hard":   "DIFFICULTY REQUIREMENT: ALL questions must be HARD — require multi-step calculation, comparison of two+ concepts, or critical evaluation of a method or result.",
+    "easy":   "DIFFICULTY REQUIREMENT: ALL questions must be EASY (Bloom's L1–L2) — recall of a single definition, term, or fact directly stated in the source. No calculation or multi-step reasoning.",
+    "medium": "DIFFICULTY REQUIREMENT: ALL questions must be MEDIUM (Bloom's L3–L4) — apply a formula, interpret a statistical result, or reason through a scenario. Not pure recall.",
+    "hard":   "DIFFICULTY REQUIREMENT: ALL questions must be HARD (Bloom's L5) — require multi-step calculation, comparison of two+ concepts, or critical evaluation of a method or result.",
 }
+
+
+def _build_uniqueness_block(existing_questions: list[str]) -> str:
+    """Build the uniqueness instruction block from a list of existing question texts."""
+    if not existing_questions:
+        return ""
+    lines = "\n".join(f"  - {q[:120]}" for q in existing_questions[:40])
+    return _UNIQUENESS_BLOCK.format(existing_questions_block=lines)
 
 
 async def _generate_from_chunk(
@@ -348,14 +280,23 @@ async def _generate_from_chunk(
     question_type: str,
     questions_per_chunk: int,
     difficulty: str = "all",
+    existing_questions: Optional[list[str]] = None,
 ) -> list[dict]:
-    """Robust single-stage generation. Direct prompt per chunk, no fragile Stage A dependency."""
+    """Single-stage generation with Bloom's Taxonomy distribution and uniqueness enforcement."""
     diff_note = _DIFFICULTY_INSTRUCTION.get(difficulty, "")
-    extra = f"\n\n{diff_note}" if diff_note else ""
+    content = chunk.to_prompt_block()
+    if diff_note:
+        content += f"\n\n{diff_note}"
+
+    blooms_guide = _BLOOMS_GUIDE.format(count=questions_per_chunk)
+    uniqueness_block = _build_uniqueness_block(existing_questions or [])
+
     prompt = _PLAIN_TEXT_PROMPT.format(
-        content=chunk.to_prompt_block() + extra,
+        content=content,
         count=questions_per_chunk,
         qtype=question_type,
+        blooms_guide=blooms_guide,
+        uniqueness_block=uniqueness_block,
     )
     try:
         raw = await generation_service.generate(prompt)
@@ -399,41 +340,49 @@ async def generate_questions_from_chunks(
     count: int = 20,
     topic_filter: Optional[str] = None,
     difficulty: str = "all",
+    existing_questions: Optional[list[str]] = None,
 ) -> list[dict]:
     """
     Generate `count` questions from a list of TextChunk objects.
-    Uses two-stage SLM+LLM pipeline per chunk.
+
+    Applies Bloom's Taxonomy distribution and 4-level uniqueness enforcement
+    against any existing questions passed via `existing_questions`.
     Spreads questions across topics unless topic_filter is set.
-    difficulty: "easy" | "medium" | "hard" | "all" (LLM decides)
+    difficulty: "easy" | "medium" | "hard" | "all" (LLM distributes across Bloom's)
     """
     print(f"[GEN] generate_questions_from_chunks: {len(chunks)} chunks, qtype={question_type}, count={count}, difficulty={difficulty}")
-    
+
     if not chunks:
         print("[GEN] No chunks provided!")
         return []
 
     # How many chunks to process and questions per chunk
-    # Use more chunks for larger counts to ensure diversity
     num_chunks = min(max((count + 2) // 3, 1), len(chunks), 15)
     questions_per_chunk = max(2, (count // num_chunks) + 1)
-    
+
     print(f"[GEN] Processing {num_chunks} chunks, {questions_per_chunk} questions per chunk")
 
     selected = _select_chunks(chunks, num_chunks, topic_filter)
     print(f"[GEN] Selected {len(selected)} chunks")
 
-    # Process chunks concurrently (up to 3 at a time to avoid OOM on Ollama)
+    # Process chunks concurrently (up to 3 at a time)
     all_questions: list[dict] = []
     semaphore = asyncio.Semaphore(3)
 
     async def _bounded(chunk):
         async with semaphore:
-            return await _generate_from_chunk(chunk, question_type, questions_per_chunk, difficulty=difficulty)
+            return await _generate_from_chunk(
+                chunk,
+                question_type,
+                questions_per_chunk,
+                difficulty=difficulty,
+                existing_questions=existing_questions,
+            )
 
     results = await asyncio.gather(*[_bounded(c) for c in selected])
     for r in results:
         all_questions.extend(r)
-    
+
     print(f"[GEN] Generated {len(all_questions)} questions from all chunks")
 
     # Deduplicate by question_text similarity (simple prefix check)
@@ -458,20 +407,24 @@ async def generate_questions(
     content: str,
     question_type: str,
     count: int = 20,
+    existing_questions: Optional[list[str]] = None,
 ) -> list[dict]:
     """
-    Simplified direct generation without intermediate skeleton extraction.
-    Uses the fallback approach that works better with limited resources.
+    Direct generation from plain text with Bloom's Taxonomy distribution
+    and uniqueness enforcement vs existing_questions.
     """
     print(f"[GEN] Starting direct question generation with question_type={question_type}, count={count}")
     print(f"[GEN] Content length: {len(content)} chars")
-    
-    # Direct LLM generation without skeleton extraction
-    # This is more reliable on resource-constrained systems
+
+    blooms_guide = _BLOOMS_GUIDE.format(count=count)
+    uniqueness_block = _build_uniqueness_block(existing_questions or [])
+
     prompt = _PLAIN_TEXT_PROMPT.format(
         content=content[:4000],
         count=count,
         qtype=question_type,
+        blooms_guide=blooms_guide,
+        uniqueness_block=uniqueness_block,
     )
     try:
         print("[GEN] Generating questions directly...")
@@ -491,7 +444,7 @@ async def generate_questions(
             count,
             topic_tag="Statistics",
         )
-    
+
     result = _validate_questions(all_questions, question_type)[:count]
     print(f"[GEN] Valid after validation: {len(result)}")
     return result
@@ -981,5 +934,10 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
         if diff not in {"easy", "medium", "hard"}:
             diff = "medium"
         q["difficulty"] = diff
+        # Normalise bloom_level (optional field, default based on difficulty)
+        bloom = _stringify_llm_value(q.get("bloom_level", "")).upper()
+        if bloom not in {"L1", "L2", "L3", "L4", "L5"}:
+            bloom = {"easy": "L2", "medium": "L3", "hard": "L5"}.get(diff, "L3")
+        q["bloom_level"] = bloom
         valid.append(q)
     return valid

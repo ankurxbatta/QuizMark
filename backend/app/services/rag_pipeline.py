@@ -1,11 +1,16 @@
 """
 rag_pipeline.py  —  Hybrid SLM + RAG + LLM marking pipeline (MongoDB backend).
 
-RAG context for marking now pulls from two sources:
+RAG context for marking pulls from two sources:
   1. pdf_chunks   — actual textbook sections (text, tables, formulas, image
-                    descriptions) retrieved by semantic similarity to the
-                    student's answer. Gives the LLM the source material.
+                    descriptions) retrieved via multi-query decomposition.
   2. questions    — similar stored Q&A pairs for comparison calibration.
+
+Multi-query retrieval (inspired by Shiksha Copilot):
+  Instead of a single embedding lookup on the student answer, we decompose
+  the (question + rubric) into 3 concept-level queries, retrieve chunks for
+  each in parallel, then deduplicate. This surfaces all relevant textbook
+  material even when the student uses different terminology.
 
 Tier routing:
   HIGH  (confidence >= CONFIDENCE_HIGH)  → SLM mark accepted, no LLM call
@@ -14,6 +19,7 @@ Tier routing:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -94,35 +100,87 @@ def _extract_true_false(model_answer: str) -> str | None:
     return match.group(1).capitalize() if match else None
 
 
-async def _retrieve_context(emb: list[float], k: int) -> str:
+def _build_concept_queries(question_text: str, rubric: str) -> list[str]:
     """
-    Build marking context from two MongoDB sources:
-      1. Textbook chunks (primary) — rich content: text, tables, formulas, images
-      2. Similar stored Q&A pairs (secondary) — calibration reference
+    Derive 3 focused retrieval queries from the question and rubric.
+
+    Instead of retrieving with only the student's answer embedding (which may
+    use non-standard terminology), we target the underlying concepts directly:
+      Q1 — the core topic of the question
+      Q2 — the first rubric criterion (most heavily weighted)
+      Q3 — the formula or method the question tests (extracted from rubric)
+    """
+    # Strip rubric down to first criterion
+    first_criterion = re.split(r"\.\s*\d+\s*mark", rubric, maxsplit=1)[0][:200].strip()
+    # Extract likely formula/method mentions (words before "mark:" entries)
+    method_hint = re.sub(r"\d+ mark[s]?:?", "", rubric, flags=re.IGNORECASE)[:150].strip()
+    queries = [
+        question_text[:200],
+        first_criterion or question_text[:200],
+        method_hint or question_text[:200],
+    ]
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for q in queries:
+        key = q.lower().strip()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(q)
+    return deduped or [question_text[:200]]
+
+
+async def _retrieve_context(
+    answer_emb: list[float],
+    question_text: str,
+    rubric: str,
+    k: int,
+) -> str:
+    """
+    Build marking context from two MongoDB sources using multi-query retrieval.
+
+    Multi-query approach (Shiksha-inspired):
+      - Generate 3 concept-level queries from the question + rubric
+      - Embed each query and search in parallel
+      - Deduplicate results → richer, more complete textbook coverage
     """
     parts: list[str] = []
 
-    # ── Source 1: textbook chunks (the key RAG improvement) ───────────────────
-    chunks = await vector_search(emb, k=k)
-    for i, chunk in enumerate(chunks, 1):
+    # ── Source 1: multi-query textbook chunk retrieval ─────────────────────────
+    concept_queries = _build_concept_queries(question_text, rubric)
+    concept_embeddings = await asyncio.gather(
+        *[slm_service.embed(q) for q in concept_queries]
+    )
+    k_per_query = max(2, k // len(concept_embeddings))
+    raw_batches = await asyncio.gather(
+        *[vector_search(emb, k=k_per_query) for emb in concept_embeddings]
+    )
+
+    # Deduplicate chunks by _id
+    seen_ids: set[str] = set()
+    chunks: list[dict] = []
+    for batch in raw_batches:
+        for chunk in batch:
+            cid = chunk.get("_id", "")
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                chunks.append(chunk)
+
+    for i, chunk in enumerate(chunks[:k], 1):
         section = f"{chunk.get('chapter_title', '')} — {chunk.get('section_title', '')}"
         block = [f"[TEXTBOOK {i}: {section} | pp.{chunk.get('page_start','')}–{chunk.get('page_end','')}]"]
         block.append(chunk.get("text", ""))
-
         if chunk.get("table_texts"):
             for t in chunk["table_texts"]:
                 block.append(f"[TABLE]\n{t}")
-
         if chunk.get("math_text"):
             block.append(f"[FORMULAS] {chunk['math_text']}")
-
         if chunk.get("image_texts"):
             block.append("[VISUAL CONTENT]\n" + "\n".join(chunk["image_texts"]))
-
         parts.append("\n".join(block))
 
     # ── Source 2: similar stored Q&A pairs ────────────────────────────────────
-    similar_qs = await search_similar_questions(emb, k=min(3, k))
+    similar_qs = await search_similar_questions(answer_emb, k=min(3, k))
     for i, q in enumerate(similar_qs, 1):
         parts.append(
             f"[SIMILAR Q{i}]\n"
@@ -189,7 +247,12 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
     # ── MID / LOW: RAG retrieval from MongoDB (chunks + questions) ────────────
     answer_emb = await slm_service.embed(submission["answer_text"])
     k = settings.TOP_K_RETRIEVAL if slm.route == "MID" else settings.TOP_K_WIDE_RETRIEVAL
-    context = await _retrieve_context(answer_emb, k)
+    context = await _retrieve_context(
+        answer_emb,
+        question_text=question["question_text"],
+        rubric=question["rubric"],
+        k=k,
+    )
 
     prompt = _MARKING_PROMPT.format(
         question_text=question["question_text"],

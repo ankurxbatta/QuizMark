@@ -229,6 +229,10 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     total_created = 0
     chapter_failures: list[str] = []
 
+    # Seed uniqueness context from existing questions in the DB
+    existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)
+    existing_q_texts: list[str] = [d.get("question_text", "") for d in existing_q_docs if d.get("question_text")]
+
     # ── Step 5: Generate questions per chapter ────────────────────────────────
     for idx, ch_num in enumerate(chapter_nums, start=1):
         ch_chunks = chapters_map[ch_num]
@@ -251,7 +255,10 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
 
         try:
             questions_data = await generate_questions_from_chunks(
-                ch_chunks, question_type=question_type, count=count_per_chapter,
+                ch_chunks,
+                question_type=question_type,
+                count=count_per_chapter,
+                existing_questions=existing_q_texts,
             )
         except Exception as exc:
             msg = f"{chapter_label} generation failed: {str(exc)[:180]}"
@@ -295,6 +302,7 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
                 "max_marks": max_marks,
                 "topic_tag": q_data.get("topic_tag", topic_tag),
                 "difficulty": difficulty,
+                "bloom_level": q_data.get("bloom_level", "L3"),
                 "source_page_range": q_data.get("_page_range", ""),
                 "source_chunk": q_data.get("_source_chunk", ""),
                 "embedding": embedding,
@@ -304,6 +312,8 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
             try:
                 await db["questions"].insert_one(q_doc)
                 chapter_created += 1
+                # Accumulate for subsequent chapter uniqueness checks
+                existing_q_texts.append(q_text)
             except Exception as exc:
                 msg = f"{chapter_label} question persistence failed: {str(exc)[:180]}"
                 chapter_failures.append(msg)
@@ -448,6 +458,10 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         progress_message=f"Loaded {len(chunks)} chunks. Generating from {len(selected_chapter_nums)} chapters{diff_label}.",
     )
 
+    # Seed uniqueness context from existing questions in the DB
+    existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)
+    existing_q_texts: list[str] = [d.get("question_text", "") for d in existing_q_docs if d.get("question_text")]
+
     total_created = 0
     chapter_failures: list[str] = []
 
@@ -469,7 +483,11 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
 
         try:
             questions_data = await generate_questions_from_chunks(
-                ch_chunks, question_type=question_type, count=count_per_chapter, difficulty=difficulty,
+                ch_chunks,
+                question_type=question_type,
+                count=count_per_chapter,
+                difficulty=difficulty,
+                existing_questions=existing_q_texts,
             )
         except Exception as exc:
             msg = f"{chapter_label} generation failed: {str(exc)[:180]}"
@@ -486,7 +504,6 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
             qtype = q_data.get("question_type", question_type)
             if qtype not in _ALLOWED_QTYPES:
                 qtype = question_type
-            # Use q_difficulty to avoid shadowing the function parameter `difficulty`
             q_difficulty = q_data.get("difficulty", "medium")
             if q_difficulty not in _ALLOWED_DIFFICULTIES:
                 q_difficulty = "medium"
@@ -510,6 +527,7 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
                 "max_marks": max_marks,
                 "topic_tag": q_data.get("topic_tag", topic_tag),
                 "difficulty": q_difficulty,
+                "bloom_level": q_data.get("bloom_level", "L3"),
                 "source_page_range": q_data.get("_page_range", ""),
                 "source_chunk": q_data.get("_source_chunk", ""),
                 "embedding": embedding,
@@ -519,6 +537,7 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
             try:
                 await db["questions"].insert_one(q_doc)
                 chapter_created += 1
+                existing_q_texts.append(q_text)
             except Exception as exc:
                 chapter_failures.append(f"{chapter_label}: {str(exc)[:120]}")
 

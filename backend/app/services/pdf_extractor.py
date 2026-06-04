@@ -208,18 +208,11 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
                 logger.debug(f"Whole-page render OCR failed on page {page.number}: {exc}")
 
     # ── Math detection ────────────────────────────────────────────────────────
-    # Also collects text-block bounding boxes (reused by vector detection below
-    # to distinguish charts from coloured text-box formatting).
     math_spans: list[str] = []
     has_math_font_on_page = False
-    text_block_rects: list[tuple] = []   # (x0, y0, x1, y1) of every text block
     try:
         rawdict = page.get_text("rawdict")
         for block in rawdict.get("blocks", []):
-            if block.get("type") == 0:  # text block
-                b = block.get("bbox")
-                if b:
-                    text_block_rects.append(b)
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
                     font = span.get("font", "")
@@ -248,48 +241,26 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
                 math_spans.append(stripped)
 
     # ── Vector graphic detection ─────────────────────────────────────────────
-    # Goal: detect pages with genuine charts/graphs while ignoring coloured
-    # text-box formatting (learning-objective boxes, example callouts, etc.)
-    # that is common in textbooks such as OpenStax.
-    #
-    # Key insight:
-    #   - Coloured formatting box  → filled rectangle that CONTAINS text blocks
-    #   - Chart bar / pie slice    → filled shape with NO text blocks inside it
-    #
-    # Algorithm:
-    #   For each filled shape, compute how much of its area overlaps with
-    #   text blocks (re-using rawdict already fetched for math detection).
-    #   Only shapes with < 30% text-overlap are counted as "graphic area".
-    #   Flag the page when graphic area > 5% of the page.
+    # Flag pages with significant filled drawing area (>3% of page).
+    # No text-overlap filter: axis labels in charts overlap with drawing
+    # bboxes and the old 30% threshold incorrectly excluded real charts.
+    # Gemini Vision handles false positives (coloured boxes) by returning NO_CHART.
     has_vector_graphics = False
     try:
         page_area = page.rect.width * page.rect.height
         if page_area > 0:
             graphic_area = 0.0
             for d in page.get_drawings():
-                if "f" not in d.get("type", ""):    # skip pure stroked lines/borders
+                if "f" not in d.get("type", ""):
                     continue
                 r = d.get("rect")
                 if not r:
                     continue
-                rx0, ry0, rx1, ry1 = r[0], r[1], r[2], r[3]
-                w, h = abs(rx1 - rx0), abs(ry1 - ry0)
-                if w < 5 or h < 5:                  # skip dots / tick marks
+                w, h = abs(r[2] - r[0]), abs(r[3] - r[1])
+                if w < 5 or h < 5:
                     continue
-                shape_area = w * h
-
-                # Sum the area of this shape that is covered by text blocks
-                text_overlap = 0.0
-                for tx0, ty0, tx1, ty1 in text_block_rects:
-                    ix = max(0.0, min(rx1, tx1) - max(rx0, tx0))
-                    iy = max(0.0, min(ry1, ty1) - max(ry0, ty0))
-                    text_overlap += ix * iy
-
-                # If ≥ 30% of the shape is covered by text → formatting, not chart
-                if text_overlap / shape_area < 0.30:
-                    graphic_area += shape_area
-
-            has_vector_graphics = (graphic_area / page_area) > 0.05
+                graphic_area += w * h
+            has_vector_graphics = (graphic_area / page_area) > 0.03
     except Exception as exc:
         logger.debug(f"Drawing detection failed on page {page.number}: {exc}")
 

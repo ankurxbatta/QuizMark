@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     GROQ_GENERATION_MODEL: str = "llama-3.3-70b-versatile"
-    GROQ_MATH_MODEL: str = "llama-3.2-11b-vision-preview"
+    GROQ_MATH_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # ── Mistral — answer marking ──────────────────────────────────────────────
     MISTRAL_API_KEY: Optional[str] = None
@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     PDF_MAX_PAGES: int = 700
     PDF_MIN_CHUNK_CHARS: int = 300
     PDF_MAX_CHUNK_CHARS: int = 3000
+
+    # ── DeepSearch (web augmentation) ────────────────────────────────────────
+    TAVILY_API_KEY: Optional[str] = None
 
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50

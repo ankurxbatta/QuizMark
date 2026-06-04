@@ -44,7 +44,7 @@ class GeminiClient:
     """Calls the Google Gemini Generative Language API (generation + embeddings + vision)."""
 
     def __init__(self, model: str | None = None, max_tokens: int | None = None):
-        self.model = (model or settings.GENERATION_LLM_MODEL).removeprefix("models/")
+        self.model = (model or "gemini-2.5-flash").removeprefix("models/")  # always a Gemini model
         self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
         self._base = settings.GEMINI_BASE_URL
 

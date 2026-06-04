@@ -155,7 +155,10 @@ async def get_book(
     chapters = sorted(ch_by_num.items(), key=lambda x: x[0])
 
     job = await db["ingest_jobs"].find_one({"_id": book_id}, projection={"filename": 1})
-    display_name = (job.get("filename", "") if job else "") or book_id.replace("-", " ").replace("_", " ").title()
+    raw_name = (job.get("filename", "") if job else "") or book_id
+    # Split CamelCase and hyphens/underscores → readable title
+    display_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw_name).replace("-", " ").replace("_", " ")
+    display_name = re.sub(r"\s+", " ", display_name).strip().title()
 
     return {
         "book_id": book_id,
