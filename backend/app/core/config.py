@@ -31,23 +31,25 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str
     CELERY_RESULT_BACKEND: str
 
-    # ── Gemini — embeddings + chart vision only ───────────────────────────────
+    # ── Gemini — embeddings only ──────────────────────────────────────────────
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
-    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"  # 768-dim (matches MongoDB index)
-    GEMINI_EMBEDDING_DELAY_SECONDS: float = 0.8
-    GEMINI_VISION_DELAY_SECONDS: float = 1.0
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
 
-    # ── Groq — question generation + math vision ──────────────────────────────
-    GROQ_API_KEY: Optional[str] = None
-    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
-    GROQ_GENERATION_MODEL: str = "llama-3.3-70b-versatile"
-    GROQ_MATH_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # ── OpenAI — primary paid provider ───────────────────────────────────────
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    OPENAI_VISION_MODEL: str = "gpt-4o-mini"
+    OPENAI_GENERATION_MODEL: str = "gpt-4o-mini"
+    OPENAI_MARKING_MODEL: str = "gpt-4o-mini"
 
-    # ── Mistral — answer marking ──────────────────────────────────────────────
-    MISTRAL_API_KEY: Optional[str] = None
-    MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
-    MISTRAL_MARKING_MODEL: str = "mistral-small-latest"
+    # ── Anthropic — fallback for all LLM tasks ────────────────────────────────
+    ANTHROPIC_API_KEY: Optional[str] = None
+    ANTHROPIC_BASE_URL: str = "https://api.anthropic.com/v1"
+    ANTHROPIC_VISION_MODEL: str = "claude-haiku-4-5-20251001"
+    ANTHROPIC_GENERATION_MODEL: str = "claude-haiku-4-5-20251001"
+    ANTHROPIC_MARKING_MODEL: str = "claude-haiku-4-5-20251001"
 
     # ── LLM settings ─────────────────────────────────────────────────────────
     LLM_TEMPERATURE: float = 0.2
@@ -55,19 +57,13 @@ class Settings(BaseSettings):
 
     # ── Online LLM (answer marking) ───────────────────────────────────────────
     ONLINE_LLM_ENABLED: bool = True
-    ONLINE_LLM_PROVIDER: str = "groq"
-    ONLINE_LLM_MODEL: str = "llama-3.3-70b-versatile"
-    ANTHROPIC_API_KEY: Optional[str] = None
-    OPENAI_API_KEY: Optional[str] = None
-    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
-    OPENAI_VISION_MODEL: str = "gpt-4o-mini"
-    ANTHROPIC_VISION_MODEL: str = "claude-haiku-4-5-20251001"
+    ONLINE_LLM_PROVIDER: str = "openai"
+    ONLINE_LLM_MODEL: str = "gpt-4o-mini"
 
     # ── Generation LLM (question generation) ─────────────────────────────────
     GENERATION_LLM_ENABLED: bool = True
-    GENERATION_LLM_PROVIDER: str = "groq"
-    GENERATION_LLM_MODEL: str = "llama-3.3-70b-versatile"
+    GENERATION_LLM_PROVIDER: str = "openai"
+    GENERATION_LLM_MODEL: str = "gpt-4o-mini"
     GENERATION_MAX_TOKENS: int = 4096
 
     # ── RAG ──────────────────────────────────────────────────────────────────
@@ -89,16 +85,16 @@ class Settings(BaseSettings):
     PDF_MAX_PAGES: int = 700
     PDF_MIN_CHUNK_CHARS: int = 300
     PDF_MAX_CHUNK_CHARS: int = 3000
-    ENABLE_VISION_EXTRACTION: bool = True  # Enable Gemini Vision for figures and math
-    EMBEDDING_BATCH_SIZE: int = 100         # Texts per batch embed API call
+    ENABLE_VISION_EXTRACTION: bool = True
+    EMBEDDING_BATCH_SIZE: int = 100
 
     # ── Resumable page-by-page ingestion ──────────────────────────────────────
-    INGEST_PAGE_WINDOW: int = 6             # Pages processed + checkpointed per window
-    INGEST_TIME_BUDGET_SECONDS: int = 1500  # Re-queue task after this long (< Celery soft limit)
+    INGEST_PAGE_WINDOW: int = 6
+    INGEST_TIME_BUDGET_SECONDS: int = 1500
 
     # ── Question generation throughput ────────────────────────────────────────
-    GEN_CHAPTER_CONCURRENCY: int = 3        # Chapters generated in parallel per job
-    DEDUP_SIMILARITY_THRESHOLD: float = 0.92  # Cosine ≥ this ⇒ near-duplicate question dropped
+    GEN_CHAPTER_CONCURRENCY: int = 5        # OpenAI/Anthropic handle higher concurrency
+    DEDUP_SIMILARITY_THRESHOLD: float = 0.92
 
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50
@@ -109,9 +105,7 @@ class Settings(BaseSettings):
     def _require_admin_password(cls, v, info):
         admin_enabled = info.data.get("ADMIN_ENABLED", True)
         if admin_enabled and not v:
-            raise ValueError(
-                "ADMIN_PASSWORD must be set in .env when ADMIN_ENABLED=true."
-            )
+            raise ValueError("ADMIN_PASSWORD must be set in .env when ADMIN_ENABLED=true.")
         return v
 
 

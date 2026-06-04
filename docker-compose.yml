@@ -89,7 +89,7 @@ services:
     networks:
       - app-network
 
-  # ── Worker: Math (formula extraction via Groq → OpenAI) ───────────────────────
+  # ── Worker: Math (formula extraction via OpenAI → Anthropic) ─────────────────
   worker-math:
     build:
       context: ./backend
@@ -135,7 +135,24 @@ services:
     networks:
       - app-network
 
-  # ── Worker: Generation (question generation via Groq → OpenAI → Anthropic) ─────
+  # ── Worker: DeepSearch (multi-query RAG retrieval for question generation) ─────
+  # Runs vector searches + sub-query decomposition. Separated so retrieval
+  # bottlenecks never slow down the generation or marking workers.
+  worker-deepsearch:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q deepsearch_tasks -n deepsearch@%h --concurrency=3 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Worker: Generation (question generation via OpenAI → Anthropic → Gemini) ──
   worker-gen:
     build:
       context: ./backend
@@ -172,7 +189,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.tasks.celery_app flower --port=5555 --broker_api=${CELERY_BROKER_URL}
+    command: celery -A app.tasks.celery_app flower --port=5555
     ports:
       - "5555:5555"
     env_file:

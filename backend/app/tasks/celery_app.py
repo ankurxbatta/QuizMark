@@ -10,6 +10,7 @@ celery_app = Celery(
         "app.tasks.marking_tasks",
         "app.tasks.ingest_tasks",
         "app.tasks.clean_tasks",
+        "app.tasks.deepsearch_tasks",
     ],
 )
 
@@ -35,6 +36,7 @@ TASK_QUEUES = (
     Queue("math_tasks",    _default_exchange, routing_key="math_tasks"),
     Queue("clean_tasks",   _default_exchange, routing_key="clean_tasks"),
     Queue("embed_tasks",   _default_exchange, routing_key="embed_tasks"),
+    Queue("deepsearch_tasks", _default_exchange, routing_key="deepsearch_tasks"),
     Queue("gen_tasks",     _default_exchange, routing_key="gen_tasks"),
     Queue("mark_tasks",    _default_exchange, routing_key="mark_tasks"),
 )
@@ -50,6 +52,8 @@ TASK_ROUTES = {
     "app.tasks.clean_tasks.clean_book_chunks_task":      {"queue": "clean_tasks"},
     "app.tasks.clean_tasks.clean_all_chunks_task":       {"queue": "clean_tasks"},
     "app.tasks.clean_tasks.clean_chunk_by_id_task":      {"queue": "clean_tasks"},
+    # DeepSearch (RAG retrieval for question generation)
+    "app.tasks.deepsearch_tasks.*":                      {"queue": "deepsearch_tasks"},
     # Marking
     "app.tasks.marking_tasks.*":                         {"queue": "mark_tasks"},
 }

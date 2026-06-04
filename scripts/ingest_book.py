@@ -62,12 +62,7 @@ GEMINI_MODEL   = "gemini-2.5-flash"
 GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_EMBED_MODEL = "gemini-embedding-001"
 
-# Groq — math formula extraction (free tier, vision-capable)
-GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", _ENV.get("GROQ_API_KEY", ""))
-GROQ_BASE     = "https://api.groq.com/openai/v1"
-GROQ_MODEL    = os.environ.get("GROQ_MATH_MODEL", _ENV.get("GROQ_MATH_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"))
-
-# OpenAI — paid fallback for embeddings + vision
+# OpenAI — primary paid provider for embeddings, vision, math
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY", _ENV.get("OPENAI_API_KEY", "")).strip()
 OPENAI_BASE     = "https://api.openai.com/v1"
 OPENAI_EMBED_MODEL = "text-embedding-3-small"
@@ -96,19 +91,37 @@ except ImportError:
 import unicodedata as _ud
 def _clean_text(text: str) -> str:
     if not text: return text
-    _ligs = {"ﬀ":"ff","ﬁ":"fi","ﬂ":"fl","ﬃ":"ffi","ﬄ":"ffl","ﬅ":"st","ﬆ":"st","ſ":"s"}
-    for bad, good in _ligs.items(): text = text.replace(bad, good)
-    _mojibake = [("â€™","'"),("â€˜","'"),("â€œ",'"'),("â€"","—"),("â€"","–"),("â€¦","…"),("â€\x9d",'"'),("â‚¬","€"),("Ã©","é"),("Ã¨","è")]
-    for bad, good in _mojibake:
+    # Ligatures
+    for bad, good in [("ﬀ","ff"),("ﬁ","fi"),("ﬂ","fl"),("ﬃ","ffi"),("ﬄ","ffl"),("ſ","s")]:
+        text = text.replace(bad, good)
+    # Mojibake (UTF-8 read as Latin-1) — use unicode escapes to avoid source encoding issues
+    for bad, good in [
+        ("â\x80\x99", "’"), ("â\x80\x98", "‘"),
+        ("â\x80\x9c", "“"), ("â\x80\x9d", "”"),
+        ("â\x80\x94", "—"), ("â\x80\x93", "–"),
+        ("â\x80\xa6", "…"), ("â\x82\xac", "€"),
+        ("\xc3\xa9", "\xe9"), ("\xc3\xa8", "\xe8"),
+        ("\xef\xbf\xbd", ""),  # replacement char
+    ]:
         if bad in text: text = text.replace(bad, good)
-    text = re.sub(r"[​‌‍﻿­]", "", text)   # zero-width chars
-    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)  # control chars
+    # Normalize smart quotes/dashes to ASCII
+    text = text.replace("‘", "'").replace("’", "'")
+    text = text.replace("“", '"').replace("”", '"')
+    text = text.replace("—", "--").replace("–", "-").replace("−", "-")
+    # Zero-width and control chars
+    text = re.sub(r"[​‌‍﻿­]", "", text)
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
     text = _ud.normalize("NFC", text)
-    text = re.sub(r"-\s*\n\s*([a-z])", r"\1", text)    # soft hyphen line-breaks
-    text = re.sub(r"(?<![.!?:;])\n(?=[a-z])", " ", text)  # inline line-breaks
-    text = re.sub(r"^[^\n]*(This OpenStax book is available|Access for free at openstax|CC BY 4\.0)[^\n]*", "", text, flags=re.IGNORECASE|re.MULTILINE)
-    text = re.sub(r"^(?:\d{1,4}\s+)?Chapter\s+\d{1,2}\s*\|[^\n]{0,80}$", "", text, flags=re.IGNORECASE|re.MULTILINE)
-    text = re.sub(r"^\s*\d{1,4}\s*$", "", text, flags=re.MULTILINE)  # bare page numbers
+    # Soft-hyphen line-breaks: "distri-\nbution" -> "distribution"
+    text = re.sub(r"-\s*\n\s*([a-z])", r"\1", text)
+    # Inline line-breaks (single \n inside a sentence)
+    text = re.sub(r"(?<![.!?:;])\n(?=[a-z])", " ", text)
+    # Boilerplate
+    text = re.sub(r"^[^\n]*(This OpenStax book is available|Access for free at openstax|CC BY 4\.0)[^\n]*",
+                  "", text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r"^(?:\d{1,4}\s+)?Chapter\s+\d{1,2}\s*\|[^\n]{0,80}$",
+                  "", text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r"^\s*\d{1,4}\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"[^\S\n]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -584,14 +597,15 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
         return
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    semaphore = asyncio.Semaphore(1)
+    # Paid API (OpenAI/Anthropic): 5 concurrent — ~5× faster than free-tier serial
+    semaphore = asyncio.Semaphore(5)
     graph_chunks = [(i, c) for i, c in enumerate(chunks) if c.graph_page_nums]
     if not graph_chunks:
         doc.close()
         return
 
     total_pages = sum(len(c.graph_page_nums) for _, c in graph_chunks)
-    log.info(f"Describing {total_pages} chart pages via Gemini Vision…")
+    log.info(f"Describing {total_pages} chart pages (concurrency=5)…")
 
     async def _do_page(chunk_idx: int, page_num: int, context: str) -> tuple[int, str]:
         async with semaphore:
@@ -608,7 +622,7 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
                 log.debug(f"Page {page_num} vision error: {exc}")
                 return chunk_idx, ""
             finally:
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.2)  # minimal courtesy delay for paid tier
 
     tasks = []
     for ci, chunk in graph_chunks:
@@ -627,7 +641,7 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
     log.info(f"Chart descriptions: {described}/{total_pages} pages described")
 
 
-# ── Groq Vision (math formula extraction) ─────────────────────────────────────
+# ── OpenAI Vision (math formula extraction) — paid, high concurrency ──────────
 
 _MATH_PROMPT = (
     "You are an expert at reading mathematical formulas from statistics textbooks. "
@@ -643,64 +657,89 @@ _MATH_PROMPT = (
     "If no mathematical formulas are present on this page, respond exactly: NO_MATH"
 )
 
+_openai_math_state = _ProviderState("openai_math")
 
-async def _extract_math_with_groq(image_bytes: bytes, context: str) -> str:
-    """Extract LaTeX math formulas from a rendered page image via Groq Vision (free tier)."""
-    if not GROQ_API_KEY:
-        return ""
+
+async def _extract_math_with_openai(image_bytes: bytes, context: str) -> str:
+    """Extract LaTeX math formulas using OpenAI GPT-4o-mini vision (paid, 500 RPM)."""
+    if not OPENAI_API_KEY or not _openai_math_state.available:
+        raise RuntimeError("openai_math unavailable")
     b64 = base64.b64encode(image_bytes).decode()
     payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Page context: {context}\n\n{_MATH_PROMPT}"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                ],
-            }
-        ],
+        "model": OPENAI_VISION_MODEL,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": f"Page context: {context}\n\n{_MATH_PROMPT}"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        ]}],
         "max_tokens": 1000,
         "temperature": 0.1,
     }
     for attempt in range(4):
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{OPENAI_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        if resp.status_code == 429:
+            _openai_math_state.rate_limited(15)
+            await asyncio.sleep(15)
+            continue
+        if resp.status_code in {500, 502, 503} and attempt < 3:
+            await asyncio.sleep(3 * (attempt + 1))
+            continue
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        _openai_math_state.success()
+        return "" if text == "NO_MATH" else text
+    return ""
+
+
+async def _extract_math_with_anthropic(image_bytes: bytes, context: str) -> str:
+    """Anthropic Claude Haiku fallback for math extraction."""
+    if not ANTHROPIC_API_KEY or not _anthropic_vis_state.available:
+        raise RuntimeError("anthropic_math unavailable")
+    b64 = base64.b64encode(image_bytes).decode()
+    payload = {
+        "model": ANTHROPIC_VISION_MODEL,
+        "max_tokens": 1000,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+            {"type": "text", "text": f"Page context: {context}\n\n{_MATH_PROMPT}"},
+        ]}],
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json=payload,
+        )
+    if resp.status_code == 429:
+        _anthropic_vis_state.rate_limited(15)
+        raise RuntimeError("Anthropic math 429")
+    resp.raise_for_status()
+    _anthropic_vis_state.success()
+    text = resp.json()["content"][0]["text"].strip()
+    return "" if text == "NO_MATH" else text
+
+
+async def _extract_math(image_bytes: bytes, context: str) -> str:
+    """Math extraction with OpenAI → Anthropic fallback."""
+    for fn in [_extract_math_with_openai, _extract_math_with_anthropic]:
         try:
-            async with httpx.AsyncClient(timeout=90) as client:
-                resp = await client.post(
-                    f"{GROQ_BASE}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-            if resp.status_code == 429:
-                wait = 10 * (attempt + 1)
-                log.debug(f"Groq rate-limited — waiting {wait}s")
-                await asyncio.sleep(wait)
-                continue
-            if resp.status_code in {500, 503} and attempt < 3:
-                await asyncio.sleep(3 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"].strip()
-            if text == "NO_MATH" or not text:
-                return ""
-            return text
+            return await fn(image_bytes, context)
         except Exception as exc:
-            log.debug(f"Groq math extraction failed on attempt {attempt+1}: {exc}")
-            if attempt < 3:
-                await asyncio.sleep(3 * (attempt + 1))
+            log.debug(f"Math provider failed: {exc}")
     return ""
 
 
 async def _add_math_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
     """
-    For each chunk with math-font pages, render those pages and extract accurate
-    LaTeX formulas via Groq Vision. Updates chunk.math_text in-place.
+    Extract LaTeX formulas from math-font pages via OpenAI GPT-4o-mini (primary)
+    and Anthropic Claude Haiku (fallback). Concurrency=5 — paid APIs support 500 RPM.
     """
-    if not GROQ_API_KEY:
-        log.warning("GROQ_API_KEY not set — math formula extraction skipped")
+    if not OPENAI_API_KEY and not ANTHROPIC_API_KEY:
+        log.warning("No paid math provider available — skipping math extraction")
         return
 
     math_chunks = [(i, c) for i, c in enumerate(chunks) if c.math_page_nums]
@@ -709,28 +748,28 @@ async def _add_math_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
         return
 
     total_pages = sum(len(c.math_page_nums) for _, c in math_chunks)
-    log.info(f"Extracting math formulas from {total_pages} pages via Groq ({GROQ_MODEL})…")
+    log.info(f"Extracting math from {total_pages} pages via OpenAI→Anthropic (concurrency=5)…")
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    # Groq free tier: keep concurrency at 1 to avoid rate limits
-    semaphore = asyncio.Semaphore(1)
+    # Paid APIs: 5 concurrent — ~5× faster, well within 500 RPM limit
+    semaphore = asyncio.Semaphore(5)
 
     async def _do_page(chunk_idx: int, page_num: int, context: str) -> tuple[int, str]:
         async with semaphore:
             try:
                 page = doc[page_num - 1]
-                mat = fitz.Matrix(2.0, 2.0)  # 2× zoom for clearer formula rendering
+                mat = fitz.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img_bytes = pix.tobytes("png")
-                result = await _extract_math_with_groq(img_bytes, context)
+                result = await _extract_math(img_bytes, context)
                 if result:
                     log.info(f"  Math p.{page_num}: {result[:100]}…")
                 return chunk_idx, result
             except Exception as exc:
-                log.debug(f"Page {page_num} Groq math failed: {exc}")
+                log.debug(f"Page {page_num} math failed: {exc}")
                 return chunk_idx, ""
             finally:
-                await asyncio.sleep(2.0)  # respect Groq free tier rate limits
+                await asyncio.sleep(0.1)  # minimal delay for paid tier
 
     tasks = []
     for ci, chunk in math_chunks:
@@ -1013,10 +1052,9 @@ async def main():
     log.info(f"  Gemini key:    {'SET' if GEMINI_API_KEY else 'NOT SET'}")
     log.info(f"  OpenAI key:    {'SET' if OPENAI_API_KEY else 'NOT SET'} (paid fallback)")
     log.info(f"  Anthropic key: {'SET' if ANTHROPIC_API_KEY else 'NOT SET'} (paid fallback)")
-    log.info(f"  Groq key:      {'SET' if GROQ_API_KEY else 'NOT SET'}")
-    log.info(f"  Embedding chain: Gemini {GEMINI_EMBED_MODEL} (768-dim) → OpenAI {OPENAI_EMBED_MODEL} (768-dim)")
+    log.info(f"  Embed chain:   Gemini {GEMINI_EMBED_MODEL} (768-dim) → OpenAI {OPENAI_EMBED_MODEL} (768-dim, batch)")
     log.info(f"  Vision chain:  Gemini {GEMINI_MODEL} → OpenAI {OPENAI_VISION_MODEL} → Anthropic {ANTHROPIC_VISION_MODEL}")
-    log.info(f"  Math chain:    Groq {GROQ_MODEL}")
+    log.info(f"  Math chain:    OpenAI {OPENAI_VISION_MODEL} → Anthropic {ANTHROPIC_VISION_MODEL} (concurrency=5)")
     log.info("─────────────────────────────────────────────────────────────")
 
     pdf_bytes = pdf_path.read_bytes()
@@ -1035,31 +1073,74 @@ async def main():
     log.info("Step 3/5: Extracting math formulas via DeepSeek API…")
     await _add_math_descriptions(chunks, pdf_bytes)
 
-    # ── Step 4: Embeddings via Gemini ─────────────────────────────────────────
-    if GEMINI_API_KEY:
-        log.info(f"Step 4/5: Generating embeddings via Gemini {GEMINI_EMBED_MODEL}…")
-    else:
-        log.warning("Step 4/5: GEMINI_API_KEY not set — skipping embeddings")
+    # ── Step 4: Batch embeddings (Gemini → OpenAI fallback, one round-trip) ──────
+    log.info(f"Step 4/5: Batch embedding {len(chunks)} chunks…")
 
+    def _embed_text(chunk) -> str:
+        return "\n\n".join(p for p in [
+            f"{chunk.chapter_title} {chunk.section_title}",
+            chunk.text[:1500],
+            ("Tables:\n" + "\n".join(chunk.table_texts)[:1200]) if chunk.table_texts else "",
+            ("Images:\n" + "\n".join(chunk.image_texts)[:1200]) if chunk.image_texts else "",
+            (f"Math:\n{chunk.math_text[:800]}") if chunk.math_text else "",
+        ] if p)
+
+    embed_texts = [_embed_text(c) for c in chunks]
+
+    # Try Gemini batch first (free), fall back to OpenAI batch (paid)
     embeddings: list[list[float]] = []
-    for i, chunk in enumerate(chunks):
-        if i % 50 == 0:
-            log.info(f"  Embedding chunk {i + 1}/{len(chunks)}…")
-        try:
-            if i:
-                await asyncio.sleep(0.8)
-            embed_text = "\n\n".join(part for part in [
-                f"{chunk.chapter_title} {chunk.section_title}",
-                chunk.text[:1500],
-                ("Tables:\n" + "\n".join(chunk.table_texts)[:1200]) if chunk.table_texts else "",
-                ("Images and charts:\n" + "\n".join(chunk.image_texts)[:1200]) if chunk.image_texts else "",
-                (f"Math formulas:\n{chunk.math_text[:800]}") if chunk.math_text else "",
-            ] if part)
-            emb = await _embed(embed_text)
-            embeddings.append(emb)
-        except Exception as exc:
-            log.warning(f"Chunk {i} embed failed: {exc}")
-            embeddings.append([])
+    try:
+        if GEMINI_API_KEY and _gemini_embed_state.available:
+            log.info("  Using Gemini batch embed…")
+            # Gemini batch: up to 100 per call — process in chunks of 100
+            BATCH = 100
+            for start in range(0, len(embed_texts), BATCH):
+                batch = embed_texts[start:start + BATCH]
+                model_path = f"models/{GEMINI_EMBED_MODEL}"
+                payload = {"requests": [
+                    {"model": model_path, "content": {"parts": [{"text": t[:2048]}]},
+                     "taskType": "SEMANTIC_SIMILARITY", "outputDimensionality": 768}
+                    for t in batch
+                ]}
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        f"{GEMINI_BASE}/{model_path}:batchEmbedContents",
+                        params={"key": GEMINI_API_KEY}, json=payload,
+                    )
+                if resp.status_code == 429 or resp.status_code >= 400:
+                    body = resp.text
+                    _gemini_embed_state.quota_exhausted(body)
+                    raise RuntimeError(f"Gemini batch embed failed ({resp.status_code})")
+                data = resp.json()
+                embeddings.extend(item.get("values", []) for item in data.get("embeddings", []))
+                log.info(f"  Gemini embedded {min(start + BATCH, len(embed_texts))}/{len(embed_texts)}")
+                await asyncio.sleep(0.3)
+        else:
+            raise RuntimeError("Gemini unavailable")
+    except Exception as exc:
+        log.warning(f"Gemini batch embed failed ({exc}) — using OpenAI batch…")
+        embeddings = []
+        if not OPENAI_API_KEY:
+            log.error("No embedding provider available — chunks will have no vectors!")
+        else:
+            # OpenAI supports up to 2048 inputs per call
+            BATCH = 500
+            for start in range(0, len(embed_texts), BATCH):
+                batch = embed_texts[start:start + BATCH]
+                async with httpx.AsyncClient(timeout=90) as client:
+                    resp = await client.post(
+                        f"{OPENAI_BASE}/embeddings",
+                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                        json={"model": OPENAI_EMBED_MODEL, "input": [t[:8191] for t in batch], "dimensions": 768},
+                    )
+                resp.raise_for_status()
+                items = sorted(resp.json()["data"], key=lambda x: x["index"])
+                embeddings.extend(item["embedding"] for item in items)
+                log.info(f"  OpenAI embedded {min(start + BATCH, len(embed_texts))}/{len(embed_texts)}")
+
+    # Pad any missing embeddings
+    while len(embeddings) < len(chunks):
+        embeddings.append([])
 
     _print_provider_status()
 
