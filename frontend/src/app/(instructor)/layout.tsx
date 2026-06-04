@@ -25,9 +25,44 @@ export default function InstructorLayout({ children }: { children: React.ReactNo
   const router = useRouter();
   const [activeJobCount, setActiveJobCount] = useState(0);
 
-  // Poll localStorage for active job IDs every 3s so the badge stays in sync
+  // On mount: verify stored job IDs against the API and purge stale ones
   useEffect(() => {
-    const read = () => {
+    const verify = async () => {
+      try {
+        const raw = localStorage.getItem(JOBS_LS_KEY);
+        const ids: string[] = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(ids) || ids.length === 0) {
+          setActiveJobCount(0);
+          return;
+        }
+        // Check each job — keep only ones that are genuinely still active
+        const token = Cookies.get("token");
+        const checks = await Promise.all(
+          ids.map(id =>
+            fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/questions/jobs/${id}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            })
+              .then(r => r.ok ? r.json() : null)
+              .catch(() => null)
+          )
+        );
+        const stillActive = ids.filter((_, i) => {
+          const job = checks[i];
+          if (!job) return false; // 404 or error — stale
+          return job.status === "queued" || job.status === "processing";
+        });
+        if (stillActive.length !== ids.length) {
+          if (stillActive.length > 0) localStorage.setItem(JOBS_LS_KEY, JSON.stringify(stillActive));
+          else localStorage.removeItem(JOBS_LS_KEY);
+        }
+        setActiveJobCount(stillActive.length);
+      } catch {
+        setActiveJobCount(0);
+      }
+    };
+    verify();
+    // After initial verify, poll every 5s (no API check needed — generate page manages the list)
+    const interval = setInterval(() => {
       try {
         const raw = localStorage.getItem(JOBS_LS_KEY);
         const ids: string[] = raw ? JSON.parse(raw) : [];
@@ -35,9 +70,7 @@ export default function InstructorLayout({ children }: { children: React.ReactNo
       } catch {
         setActiveJobCount(0);
       }
-    };
-    read();
-    const interval = setInterval(read, 3000);
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
