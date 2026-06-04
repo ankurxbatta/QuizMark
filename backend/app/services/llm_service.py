@@ -100,6 +100,8 @@ class GeminiClient:
                 raise RuntimeError(_redact_url_secrets(str(exc))) from exc
             return resp.json()["embedding"]["values"]
 
+
+
     async def describe_image(self, image_bytes: bytes, context: str = "") -> str:
         """Describe a chart/graph image using Gemini Vision."""
         if not settings.GEMINI_API_KEY:
@@ -174,6 +176,50 @@ class GroqClient:
                 await _sleep_before_retry(resp, attempt)
                 continue
             if resp.status_code in {500, 502, 503, 504} and attempt < 4:
+                await asyncio.sleep(5.0 * (attempt + 1))
+                continue
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return resp.json()["choices"][0]["message"]["content"]
+
+    async def describe_image(self, image_bytes: bytes, context: str = "") -> str:
+        if not settings.GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY is not set.")
+        
+        model = getattr(settings, "GROQ_MATH_MODEL", "llama-3.2-11b-vision-preview")
+        b64_img = base64.b64encode(image_bytes).decode('utf-8')
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": context or "Describe this image."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
+                    ]
+                }
+            ],
+            "max_tokens": self.max_tokens,
+            "temperature": 0.0,
+        }
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    f"{self._base}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            if resp.status_code == 429 and attempt < 4:
+                await _sleep_before_retry(resp, attempt)
+                continue
+            if resp.status_code in {500, 502, 503, 504} and attempt < 4:
+                import asyncio
                 await asyncio.sleep(5.0 * (attempt + 1))
                 continue
             try:

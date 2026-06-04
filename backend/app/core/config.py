@@ -85,6 +85,8 @@ class Settings(BaseSettings):
     PDF_MAX_PAGES: int = 700
     PDF_MIN_CHUNK_CHARS: int = 300
     PDF_MAX_CHUNK_CHARS: int = 3000
+    ENABLE_VISION_EXTRACTION: bool = True  # Enable Gemini Vision for figures and math
+    EMBEDDING_BATCH_SIZE: int = 100         # Texts per batch embed API call
 
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50

@@ -64,6 +64,8 @@ class EnhancedChunk(TextChunk):
     has_tables: bool = False
     has_math_font: bool = False   # True if math fonts detected on any page in range
     graph_page_nums: list[int] = field(default_factory=list)  # pages with vector graphics
+    figure_rects: list[dict] = field(default_factory=list)  # {"page_num": int, "rect": [x0, y0, x1, y1]}
+    math_rects: list[dict] = field(default_factory=list)    # {"page_num": int, "rect": [x0, y0, x1, y1]}
 
 
 # ── OCR helper ────────────────────────────────────────────────────────────────
@@ -122,7 +124,7 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
     Extract all content from a single fitz.Page.
     Returns a dict: {text, table_texts, image_texts, math_spans}
     """
-    # ── Text (markdown mode preserves headings, bullet lists) ─────────────────
+    # ── Text (markdown mode preserves headings, bullet lists) ─────────────
     try:
         text = page.get_text("markdown") or ""
     except Exception:
@@ -157,6 +159,44 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
     except Exception as exc:
         logger.debug(f"Table extraction failed on page {page.number}: {exc}")
 
+    # ── Math detection (must run before image OCR which references has_math_font_on_page) ─
+    math_spans: list[str] = []
+    page_math_rects: list[dict] = []
+    has_math_font_on_page = False
+    try:
+        rawdict = page.get_text("rawdict")
+        for block in rawdict.get("blocks", []):
+            block_has_math = False
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    font = span.get("font", "")
+                    is_math_font = any(frag in font for frag in _MATH_FONT_FRAGMENTS)
+                    if is_math_font:
+                        has_math_font_on_page = True
+                        block_has_math = True
+                        span_text = span.get("text", "").strip()
+                        if span_text and len(span_text) > 1:
+                            math_spans.append(span_text)
+            if block_has_math and "bbox" in block:
+                page_math_rects.append({"page_num": page.number + 1, "rect": list(block["bbox"])})
+    except Exception as exc:
+        logger.debug(f"rawdict math extraction failed on page {page.number}: {exc}")
+
+    # If math fonts detected but no text decoded, extract formula lines from text layer
+    if has_math_font_on_page and not math_spans:
+        import re as _re
+        _formula_line_re = _re.compile(
+            r"[=÷×±√∑∫µσ²]|"
+            r"\b\d+\s*/\s*\d+\b|"           # fractions like 1/2
+            r"\b[A-Za-z]\s*=\s*[\d(]|"      # variable = number
+            r"\b(?:P|E|Var|SD|SE)\s*\(|"    # P(), E(), Var(), etc.
+            r"z\s*=|t\s*=|χ²|α\s*=|β\s*="
+        )
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and _formula_line_re.search(stripped):
+                math_spans.append(stripped)
+
     # ── Images → OCR ──────────────────────────────────────────────────────────
     # Strategy:
     #   1. Try embedded raster images (fast, precise)
@@ -184,7 +224,7 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
                         "text": text,
                         "table_texts": table_texts,
                         "image_texts": [],
-                        "math_spans": [],
+                        "math_spans": math_spans,
                         "has_math_font": has_math_font_on_page,
                         "has_vector_graphics": False,
                         "_ocr_disabled": True,
@@ -207,62 +247,44 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
             except Exception as exc:
                 logger.debug(f"Whole-page render OCR failed on page {page.number}: {exc}")
 
-    # ── Math detection ────────────────────────────────────────────────────────
-    math_spans: list[str] = []
-    has_math_font_on_page = False
-    try:
-        rawdict = page.get_text("rawdict")
-        for block in rawdict.get("blocks", []):
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    font = span.get("font", "")
-                    is_math_font = any(frag in font for frag in _MATH_FONT_FRAGMENTS)
-                    if is_math_font:
-                        has_math_font_on_page = True
-                        span_text = span.get("text", "").strip()
-                        if span_text and len(span_text) > 1:
-                            math_spans.append(span_text)
-    except Exception as exc:
-        logger.debug(f"rawdict math extraction failed on page {page.number}: {exc}")
-
-    # If math fonts detected but no text decoded, extract formula lines from text layer
-    if has_math_font_on_page and not math_spans:
-        import re as _re
-        _formula_line_re = _re.compile(
-            r"[=÷×±√∑∫µσ²]|"
-            r"\b\d+\s*/\s*\d+\b|"           # fractions like 1/2
-            r"\b[A-Za-z]\s*=\s*[\d(]|"      # variable = number
-            r"\b(?:P|E|Var|SD|SE)\s*\(|"    # P(), E(), Var(), etc.
-            r"z\s*=|t\s*=|χ²|α\s*=|β\s*="
-        )
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped and _formula_line_re.search(stripped):
-                math_spans.append(stripped)
-
-    # ── Vector graphic detection ─────────────────────────────────────────────
-    # Flag pages with significant filled drawing area (>3% of page).
-    # No text-overlap filter: axis labels in charts overlap with drawing
-    # bboxes and the old 30% threshold incorrectly excluded real charts.
-    # Gemini Vision handles false positives (coloured boxes) by returning NO_CHART.
+    # ── Vector graphic detection & Figure snipping ───────────────────────────
     has_vector_graphics = False
+    page_figure_rects = []
     try:
+        rects_to_merge = []
+        for img in page.get_image_info():
+            if "bbox" in img:
+                rects_to_merge.append(fitz.Rect(img["bbox"]))
+        for d in page.get_drawings():
+            if "rect" in d:
+                rects_to_merge.append(fitz.Rect(d["rect"]))
+                
+        merged_rects = []
+        for r in rects_to_merge:
+            r = fitz.Rect(r)
+            r.x0 -= 10; r.y0 -= 10; r.x1 += 10; r.y1 += 10
+            intersected = False
+            for m in merged_rects:
+                if r.intersects(m):
+                    m.include_rect(r)
+                    intersected = True
+                    break
+            if not intersected:
+                merged_rects.append(r)
+                
+        for m in merged_rects:
+            m.x0 += 10; m.y0 += 10; m.x1 -= 10; m.y1 -= 10
+            m.intersect(page.rect)
+            if m.width > 30 and m.height > 30:
+                page_figure_rects.append({"page_num": page.number + 1, "rect": list(m)})
+
         page_area = page.rect.width * page.rect.height
         if page_area > 0:
-            graphic_area = 0.0
-            for d in page.get_drawings():
-                if "f" not in d.get("type", ""):
-                    continue
-                r = d.get("rect")
-                if not r:
-                    continue
-                w, h = abs(r[2] - r[0]), abs(r[3] - r[1])
-                if w < 5 or h < 5:
-                    continue
-                graphic_area += w * h
-            has_vector_graphics = (graphic_area / page_area) > 0.03
+            graphic_area = sum(m.width * m.height for m in merged_rects)
+            if graphic_area / page_area > 0.03:
+                has_vector_graphics = True
     except Exception as exc:
-        logger.debug(f"Drawing detection failed on page {page.number}: {exc}")
+        logger.debug(f"Vector graphic detection failed on page {page.number}: {exc}")
 
     return {
         "text": text,
@@ -271,6 +293,8 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
         "math_spans": math_spans,
         "has_math_font": has_math_font_on_page,
         "has_vector_graphics": has_vector_graphics,
+        "figure_rects": page_figure_rects,
+        "math_rects": page_math_rects,
         "_ocr_disabled": False,
     }
 
@@ -306,6 +330,8 @@ def extract_enhanced_chunks(
     buffer_math_spans: list[str] = []
     buffer_has_math_font: bool = False
     buffer_graph_pages: list[int] = []
+    buffer_figure_rects: list[dict] = []
+    buffer_math_rects: list[dict] = []
     buffer_page_start = 1
 
     ocr_active = _OCR_AVAILABLE
@@ -321,7 +347,7 @@ def extract_enhanced_chunks(
     )
 
     def _flush(page_end: int):
-        nonlocal buffer_lines, buffer_image_texts, buffer_table_texts, buffer_math_spans, buffer_has_math_font, buffer_graph_pages, buffer_page_start
+        nonlocal buffer_lines, buffer_image_texts, buffer_table_texts, buffer_math_spans, buffer_has_math_font, buffer_graph_pages, buffer_figure_rects, buffer_math_rects, buffer_page_start
 
         text = "\n".join(buffer_lines).strip()
         if len(text) < min_chunk_chars or _is_skip_block(text):
@@ -331,6 +357,8 @@ def extract_enhanced_chunks(
             buffer_math_spans = []
             buffer_has_math_font = False
             buffer_graph_pages = []
+            buffer_figure_rects = []
+            buffer_math_rects = []
             return
 
         sub_chunks = _split_into_sub_chunks(text, max_chunk_chars)
@@ -359,6 +387,8 @@ def extract_enhanced_chunks(
                 has_tables=bool(buffer_table_texts),
                 has_math_font=buffer_has_math_font,
                 graph_page_nums=list(buffer_graph_pages),
+                figure_rects=list(buffer_figure_rects),
+                math_rects=list(buffer_math_rects),
             ))
 
         buffer_lines = []
@@ -367,6 +397,8 @@ def extract_enhanced_chunks(
         buffer_math_spans = []
         buffer_has_math_font = False
         buffer_graph_pages = []
+        buffer_figure_rects = []
+        buffer_math_rects = []
 
     for page in pages:
         page_num = page.number + 1  # 1-based
@@ -411,6 +443,10 @@ def extract_enhanced_chunks(
         buffer_has_math_font = buffer_has_math_font or page_data.get("has_math_font", False)
         if page_data.get("has_vector_graphics"):
             buffer_graph_pages.append(page_num)
+        if page_data.get("figure_rects"):
+            buffer_figure_rects.extend(page_data["figure_rects"])
+        if page_data.get("math_rects"):
+            buffer_math_rects.extend(page_data["math_rects"])
 
         # Flush if buffer is large
         total_chars = sum(len(l) for l in buffer_lines)
@@ -440,12 +476,9 @@ async def describe_graph_chunks(
     concurrency: int = 1,
 ) -> None:
     """
-    For each chunk that has vector-graphic pages, render those pages and call
+    For each chunk that has figure_rects, render those specific rects and call
     a vision model to describe the charts. Descriptions are appended to
     chunk.image_texts in-place. Non-fatal — errors are logged and skipped.
-
-    Uses Ollama Vision (local, no API key required) by default.
-    Falls back to Gemini if GEMINI_API_KEY is set and Ollama vision is unavailable.
     """
     import asyncio as _asyncio
     from app.core.config import settings as _settings
@@ -476,12 +509,14 @@ async def describe_graph_chunks(
     except Exception:
         pass  # cache unavailable — just call API every time
 
-    async def _describe_page(page_num: int, context: str) -> str:
+    async def _describe_fig(fig_dict: dict, context: str) -> str:
         async with semaphore:
             try:
+                page_num = fig_dict["page_num"]
+                rect = fitz.Rect(fig_dict["rect"])
                 page = doc[page_num - 1]  # fitz is 0-indexed
-                mat = fitz.Matrix(1.5, 1.5)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
+                mat = fitz.Matrix(2.0, 2.0) # slightly higher res for snippets
+                pix = page.get_pixmap(matrix=mat, alpha=False, clip=rect)
                 img_bytes = pix.tobytes("png")
 
                 # Check hash cache before calling API
@@ -490,7 +525,7 @@ async def describe_graph_chunks(
                     try:
                         cached = await _cache_collection.find_one({"_id": page_hash})
                         if cached:
-                            logger.debug(f"Vision cache hit for page {page_num}")
+                            logger.debug(f"Vision cache hit for figure on page {page_num}")
                             return cached.get("description", "")
                     except Exception:
                         pass
@@ -498,7 +533,10 @@ async def describe_graph_chunks(
                 delay = max(getattr(_settings, "GEMINI_VISION_DELAY_SECONDS", 0.0), 0.0)
                 if delay:
                     await _asyncio.sleep(delay)
-                description = await vision_client.describe_image(img_bytes, context=context)
+                
+                # Context prompt explicitly asks for description
+                full_prompt = f"{context}\n\nPlease describe this chart/figure in detail."
+                description = await vision_client.describe_image(img_bytes, context=full_prompt)
 
                 # Store in cache (fire-and-forget)
                 if _cache_collection is not None and description:
@@ -515,31 +553,30 @@ async def describe_graph_chunks(
 
                 return description
             except Exception as exc:
-                logger.debug(f"Vision description failed for page {page_num}: {exc}")
+                logger.debug(f"Vision description failed for figure on page {fig_dict.get('page_num')}: {exc}")
                 return ""
 
-    tasks = []
-    chunk_page_map = []  # (chunk_index, page_num, context)
+    chunk_fig_map = []  # (chunk_index, fig_dict, context)
 
     for i, chunk in enumerate(chunks):
-        if not chunk.graph_page_nums:
+        if not getattr(chunk, "figure_rects", None):
             continue
-        context = f"{chunk.chapter_title} — {chunk.section_title} (pp. {chunk.page_start}–{chunk.page_end})"
-        for page_num in chunk.graph_page_nums:
-            chunk_page_map.append((i, page_num, context))
+        context = f"Context: {chunk.chapter_title} — {chunk.section_title} (pp. {chunk.page_start}–{chunk.page_end})"
+        for fig in chunk.figure_rects:
+            chunk_fig_map.append((i, fig, context))
 
-    if not chunk_page_map:
+    if not chunk_fig_map:
         doc.close()
         return
 
-    logger.info(f"describe_graph_chunks: sending {len(chunk_page_map)} pages to Gemini Vision")
+    logger.info(f"describe_graph_chunks: sending {len(chunk_fig_map)} figure snips to Gemini Vision")
 
     descriptions = await _asyncio.gather(
-        *[_describe_page(pn, ctx) for (_, pn, ctx) in chunk_page_map],
+        *[_describe_fig(fig, ctx) for (_, fig, ctx) in chunk_fig_map],
         return_exceptions=True,
     )
 
-    for (chunk_idx, _, _ctx), desc in zip(chunk_page_map, descriptions):
+    for (chunk_idx, _, _), desc in zip(chunk_fig_map, descriptions):
         if isinstance(desc, str) and desc:
             chunks[chunk_idx].image_texts.append(desc)
             chunks[chunk_idx].has_images = True
@@ -549,3 +586,78 @@ async def describe_graph_chunks(
         f"describe_graph_chunks: added descriptions to "
         f"{sum(1 for c in chunks if c.has_images)} chunks"
     )
+
+async def transcribe_math_chunks(
+    chunks: list,
+    pdf_bytes: bytes,
+    concurrency: int = 1,
+) -> None:
+    """
+    For each chunk that has math_rects, render those specific rects and call
+    a vision model to extract the Math formulas as LaTeX. 
+    LaTeX is appended to chunk.math_text.
+    """
+    import asyncio as _asyncio
+    from app.core.config import settings as _settings
+
+    try:
+        from app.services.llm_service import GroqClient
+        vision_client = GroqClient()
+    except Exception as exc:
+        logger.warning(f"transcribe_math_chunks: could not initialise Groq client: {exc}")
+        return
+
+    if not _PYMUPDF_AVAILABLE:
+        return
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    semaphore = _asyncio.Semaphore(concurrency)
+
+    async def _transcribe_math(math_dict: dict) -> str:
+        async with semaphore:
+            try:
+                page_num = math_dict["page_num"]
+                rect = fitz.Rect(math_dict["rect"])
+                # Add a small padding to math rects
+                rect.x0 -= 5; rect.y0 -= 5; rect.x1 += 5; rect.y1 += 5
+                page = doc[page_num - 1]
+                mat = fitz.Matrix(2.5, 2.5) # higher res for small math
+                pix = page.get_pixmap(matrix=mat, alpha=False, clip=rect)
+                img_bytes = pix.tobytes("png")
+
+                delay = max(getattr(_settings, "GEMINI_VISION_DELAY_SECONDS", 0.0), 0.0)
+                if delay:
+                    await _asyncio.sleep(delay)
+                
+                prompt = "Transcribe all mathematical formulas in this image into valid LaTeX format. Do not describe the image, just output the LaTeX. Surround inline math with $...$ and block math with $$...$$"
+                latex = await vision_client.describe_image(img_bytes, context=prompt)
+                return latex
+            except Exception as exc:
+                logger.debug(f"Math vision transcription failed for page {math_dict.get('page_num')}: {exc}")
+                return ""
+
+    chunk_math_map = []
+    for i, chunk in enumerate(chunks):
+        if not getattr(chunk, "math_rects", None):
+            continue
+        for mrect in chunk.math_rects:
+            chunk_math_map.append((i, mrect))
+
+    if not chunk_math_map:
+        doc.close()
+        return
+
+    logger.info(f"transcribe_math_chunks: sending {len(chunk_math_map)} math snips to Gemini Vision")
+
+    results = await _asyncio.gather(
+        *[_transcribe_math(m) for (_, m) in chunk_math_map],
+        return_exceptions=True,
+    )
+
+    for (chunk_idx, _), latex in zip(chunk_math_map, results):
+        if isinstance(latex, str) and latex:
+            # Append to existing math text
+            chunks[chunk_idx].math_text += f"\n{latex}\n"
+
+    doc.close()
+    logger.info(f"transcribe_math_chunks: finished processing math snippets")

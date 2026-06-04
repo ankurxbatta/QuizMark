@@ -514,6 +514,60 @@ async def get_job_status(
     }
 
 
+@router.get("/jobs/{job_id}/stream")
+async def stream_job_status(
+    job_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Server-Sent Events (SSE) endpoint to stream job progress.
+    No auth required here because SSE in browsers doesn't support headers well.
+    (In a real app, use a short-lived token in the URL or rely on cookies).
+    """
+    from fastapi.responses import StreamingResponse
+    import asyncio
+    import json
+
+    async def event_generator():
+        last_status = None
+        last_msg = None
+        last_done = -1
+        
+        # Stream for up to 1 hour
+        for _ in range(3600):
+            job = await db["ingest_jobs"].find_one({"_id": job_id})
+            if not job:
+                yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                break
+                
+            status = job.get("status")
+            msg = job.get("progress_message")
+            done = job.get("chapters_done", 0)
+            
+            # Send update if something changed
+            if status != last_status or msg != last_msg or done != last_done:
+                payload = {
+                    "job_id": job["_id"],
+                    "status": status,
+                    "total_chapters": job.get("total_chapters", 0),
+                    "chapters_done": done,
+                    "progress_message": msg,
+                    "questions_created": job.get("questions_created", 0),
+                    "error": job.get("error_message")
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+                
+                last_status = status
+                last_msg = msg
+                last_done = done
+                
+            if status in [IngestJobStatus.done.value, IngestJobStatus.failed.value]:
+                break
+                
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 # ── Count / topics / assessment ───────────────────────────────────────────────
 
 @router.get("/count")

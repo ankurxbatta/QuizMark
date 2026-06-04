@@ -3,17 +3,20 @@ ingest_tasks.py  —  Celery background task for full-textbook PDF ingestion.
 
 Processes a PDF chapter-by-chapter:
   1. parse_pdf_into_chunks() — deep structural parsing
-  2. Run describe_graph_chunks() via Gemini Vision
-  3. Store chunks in MongoDB with embeddings (RAG source)
+  2. Run describe_graph_chunks() via Gemini Vision (optional, off by default)
+  3. Store chunks in MongoDB with batch embeddings (RAG source)
   4. Group chunks by chapter, generate questions per chapter
   5. Persist each question to MongoDB questions collection
   6. Update IngestJob progress in real time
 """
 import asyncio
 import base64
+import logging
 import uuid
 from datetime import datetime, timezone
 from collections import defaultdict
+
+from celery.exceptions import SoftTimeLimitExceeded
 
 from app.tasks.celery_app import celery_app
 from app.core.config import settings
@@ -23,6 +26,8 @@ from app.services.pdf_service import parse_pdf_into_chunks
 from app.services.question_generator import generate_questions_from_chunks, DbChunk
 from app.services.question_orchestrator import orchestrate_question_bank
 from app.services.llm_service import llm_service
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_QTYPES = {"mcq", "true_false", "short_answer"}
 _ALLOWED_DIFFICULTIES = {"easy", "medium", "hard"}
@@ -45,7 +50,49 @@ def _chunk_embedding_text(chunk) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-@celery_app.task(bind=True, max_retries=0, time_limit=3600)
+async def _embed_and_store_sequential(chunks, book_id, db, job_id):
+    """
+    Embed chunks sequentially and store them in MongoDB.
+    Avoids batch processing to prevent API exhaustion and 429 errors.
+    Returns (stored_count, error_count).
+    """
+    from app.services.mongo_vector_store import store_chunk as _mongo_store
+
+    if not chunks:
+        return 0, 0
+
+    await _update_job(db, job_id,
+        progress_message=f"Embedding and storing {len(chunks)} chunks sequentially…",
+    )
+
+    stored = 0
+    errors = 0
+    for i, chunk in enumerate(chunks):
+        text = _chunk_embedding_text(chunk)
+        try:
+            emb = await llm_service.embed(text)
+            if emb:
+                await _mongo_store(chunk, emb, book_id)
+                stored += 1
+            else:
+                errors += 1
+        except Exception as exc:
+            logger.error(f"Sequential embedding failed for chunk {i}: {exc}")
+            errors += 1
+
+        # Update the UI every 10 chunks so it never gets stuck
+        if i % 10 == 0 and i > 0:
+            await _update_job(db, job_id,
+                progress_message=f"Stored {i}/{len(chunks)} chunks…",
+            )
+            
+        # Small delay to prevent rate limiting
+        await asyncio.sleep(settings.GEMINI_EMBEDDING_DELAY_SECONDS)
+
+    return stored, errors
+
+
+@celery_app.task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=2100)
 def ingest_book_only_task(self, job_id: str, pdf_b64: str, book_id: str):
     """Parse PDF into chunks + embed + store in Library. No question generation."""
     loop = asyncio.new_event_loop()
@@ -53,6 +100,8 @@ def ingest_book_only_task(self, job_id: str, pdf_b64: str, book_id: str):
     try:
         pdf_bytes = base64.b64decode(pdf_b64)
         loop.run_until_complete(_run_ingest_only(job_id, pdf_bytes, book_id))
+    except SoftTimeLimitExceeded:
+        loop.run_until_complete(_mark_failed(job_id, "Task timed out after 30 minutes. The PDF may be too large or the API is slow."))
     except Exception as exc:
         loop.run_until_complete(_mark_failed(job_id, str(exc)))
     finally:
@@ -93,34 +142,28 @@ async def _run_ingest_only(job_id: str, pdf_bytes: bytes, book_id: str):
 
     await _update_job(db, job_id,
         total_chapters=total_chapters,
-        progress_message=f"Parsed {len(chunks)} chunks across {total_chapters} chapters. Storing…",
+        progress_message=f"Parsed {len(chunks)} chunks across {total_chapters} chapters.",
     )
 
-    # Describe charts before storing, so extracted descriptions are persisted.
-    try:
-        from app.services.pdf_extractor import describe_graph_chunks
-        if any(getattr(c, "graph_page_nums", None) for c in chunks):
-            await _update_job(db, job_id, progress_message="Describing charts with Gemini Vision…")
-            await describe_graph_chunks(chunks, pdf_bytes)
-    except Exception:
-        pass
-
-    # Embed + store chunks
-    from app.services.mongo_vector_store import store_chunk as _mongo_store
-    errors = 0
-    embed_delay = max(settings.GEMINI_EMBEDDING_DELAY_SECONDS, 0.0)
-    for i, chunk in enumerate(chunks):
+    # Describe charts and transcribe math (via Gemini Vision)
+    if settings.ENABLE_VISION_EXTRACTION:
         try:
-            if i and embed_delay:
-                await asyncio.sleep(embed_delay)
-            emb = await llm_service.embed(_chunk_embedding_text(chunk))
-            await _mongo_store(chunk, emb, book_id)
-        except Exception:
-            errors += 1
-        if i % 50 == 0:
-            await _update_job(db, job_id,
-                progress_message=f"Stored {i+1}/{len(chunks)} chunks…",
-            )
+            from app.services.pdf_extractor import describe_graph_chunks, transcribe_math_chunks
+            
+            if any(getattr(c, "figure_rects", None) for c in chunks):
+                await _update_job(db, job_id, progress_message="Describing charts with Gemini Vision…")
+                await describe_graph_chunks(chunks, pdf_bytes)
+
+            if any(getattr(c, "math_rects", None) for c in chunks):
+                await _update_job(db, job_id, progress_message="Transcribing math equations to LaTeX…")
+                await transcribe_math_chunks(chunks, pdf_bytes)
+        except Exception as exc:
+            logger.error(f"Vision extraction error: {exc}")
+    else:
+        logger.info("Vision extraction disabled (ENABLE_VISION_EXTRACTION=false). Skipping chart descriptions and math API.")
+
+    # Embed + store chunks sequentially
+    stored, errors = await _embed_and_store_sequential(chunks, book_id, db, job_id)
 
     await _update_job(db, job_id,
         status=IngestJobStatus.done.value,
@@ -128,17 +171,19 @@ async def _run_ingest_only(job_id: str, pdf_bytes: bytes, book_id: str):
         chapters_done=total_chapters,
         completed_at=datetime.now(timezone.utc),
         error_message=f"{errors} embed errors (non-fatal)." if errors else None,
-        progress_message=f"Book stored in Library: {len(chunks)} chunks, {total_chapters} chapters.",
+        progress_message=f"Book stored in Library: {stored} chunks, {total_chapters} chapters.",
     )
 
 
-@celery_app.task(bind=True, max_retries=0, time_limit=3600)
+@celery_app.task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=2100)
 def ingest_pdf_task(self, job_id: str, pdf_b64: str, question_type: str, count_per_chapter: int):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         pdf_bytes = base64.b64decode(pdf_b64)
         loop.run_until_complete(_run_ingest(job_id, pdf_bytes, question_type, count_per_chapter))
+    except SoftTimeLimitExceeded:
+        loop.run_until_complete(_mark_failed(job_id, "Task timed out after 30 minutes. The PDF may be too large or the API is slow."))
     except Exception as exc:
         loop.run_until_complete(_mark_failed(job_id, str(exc)))
     finally:
@@ -182,38 +227,26 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         )
         return
 
-    # ── Step 2: Gemini Vision descriptions for chart pages ───────────────────
-    try:
-        from app.services.pdf_extractor import describe_graph_chunks
-        has_graph_chunks = any(getattr(c, "graph_page_nums", None) for c in chunks)
-        if has_graph_chunks:
-            await _update_job(db, job_id, progress_message="Describing charts with Gemini Vision…")
-            await describe_graph_chunks(chunks, pdf_bytes)
-    except Exception as _exc:
-        await _update_job(db, job_id,
-            progress_message=f"Graph vision skipped: {str(_exc)[:120]}"
-        )
-
-    # ── Step 3: Embed chunks → MongoDB vector store ───────────────────────────
-    mongo_errors = 0
-    try:
-        from app.services.mongo_vector_store import store_chunk as _mongo_store
-        embed_delay = max(settings.GEMINI_EMBEDDING_DELAY_SECONDS, 0.0)
-        for i, _chunk in enumerate(chunks):
-            try:
-                if i and embed_delay:
-                    await asyncio.sleep(embed_delay)
-                _emb = await llm_service.embed(_chunk_embedding_text(_chunk))
-                await _mongo_store(_chunk, _emb, job_id)
-            except Exception:
-                mongo_errors += 1
-        if mongo_errors:
+    # ── Step 2: Gemini Vision descriptions for chart pages (optional) ─────────
+    if settings.ENABLE_VISION_EXTRACTION:
+        try:
+            from app.services.pdf_extractor import describe_graph_chunks
+            has_graph_chunks = any(getattr(c, "graph_page_nums", None) for c in chunks)
+            if has_graph_chunks:
+                await _update_job(db, job_id, progress_message="Describing charts with Gemini Vision…")
+                await describe_graph_chunks(chunks, pdf_bytes)
+        except Exception as _exc:
             await _update_job(db, job_id,
-                progress_message=f"Parsed {len(chunks)} chunks. MongoDB: {mongo_errors} storage errors (non-fatal)."
+                progress_message=f"Graph vision skipped: {str(_exc)[:120]}"
             )
-    except Exception as _exc:
+    else:
+        logger.info("Vision extraction disabled. Skipping chart descriptions.")
+
+    # ── Step 3: Embed chunks → MongoDB vector store (sequential) ──────────────
+    stored, mongo_errors = await _embed_and_store_sequential(chunks, job_id, db, job_id)
+    if mongo_errors:
         await _update_job(db, job_id,
-            progress_message=f"MongoDB chunk storage skipped: {str(_exc)[:120]}"
+            progress_message=f"Parsed {len(chunks)} chunks. MongoDB: {mongo_errors} storage errors (non-fatal)."
         )
 
     # ── Step 4: Group by chapter ──────────────────────────────────────────────
@@ -357,13 +390,15 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         )
 
 
-@celery_app.task(bind=True, max_retries=0, time_limit=3600)
+@celery_app.task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=2100)
 def generate_from_book_task(self, job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all"):
     """Generate questions from chunks already stored in MongoDB (no PDF re-upload needed)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(_run_generate_from_book(job_id, book_id, question_type, count_per_chapter, chapter_nums, difficulty))
+    except SoftTimeLimitExceeded:
+        loop.run_until_complete(_mark_failed(job_id, "Task timed out after 30 minutes."))
     except Exception as exc:
         loop.run_until_complete(_mark_failed(job_id, str(exc)))
     finally:
@@ -414,8 +449,6 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         total_chapters=len(selected_chapters),
         progress_message=f"Found {len(selected_chapters)} chapters in '{book_id}'. Using DeepSearch retrieval{diff_label}.",
     )
-
-    # DbChunk is imported from question_generator — no inline definition needed
 
     # Seed uniqueness context from existing questions in the DB
     existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)

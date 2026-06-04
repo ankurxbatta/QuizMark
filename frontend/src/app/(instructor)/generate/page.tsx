@@ -46,42 +46,68 @@ export default function GeneratePage() {
   const jobsRef = useRef<JobStatus[]>([]);
   const router = useRouter();
 
-  // Keep ref in sync for interval
-  useEffect(() => {
-    jobsRef.current = jobs;
-  }, [jobs]);
+  // Remove pollRef sync effect as we no longer use setInterval
 
-  // Poll job progress
-  useEffect(() => {
-    pollRef.current = setInterval(async () => {
-      const currentJobs = jobsRef.current;
-      const activeJobs = currentJobs.filter(j => j.status !== "done" && j.status !== "failed");
-      if (activeJobs.length === 0) return;
 
-      try {
-        const updatedJobs = await Promise.all(
-          activeJobs.map(j => api.get(`/questions/jobs/${j.job_id}`).then(res => res.data))
-        );
-        
-        setJobs(prev => {
-          const newJobs = [...prev];
-          updatedJobs.forEach(uj => {
-            const idx = newJobs.findIndex(x => x.job_id === uj.job_id);
-            if (idx !== -1) newJobs[idx] = uj;
+  // Listen to SSE streams for active jobs
+  useEffect(() => {
+    const activeJobs = jobs.filter(j => j.status !== "done" && j.status !== "failed");
+    if (activeJobs.length === 0) return;
+
+    const eventSources = activeJobs.map(job => {
+      const url = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/questions/jobs/${job.job_id}/stream`;
+      const es = new EventSource(url);
+      
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.error) {
+            es.close();
+            return;
+          }
+          setJobs(prev => {
+            const newJobs = [...prev];
+            const idx = newJobs.findIndex(x => x.job_id === data.job_id);
+            if (idx !== -1) {
+              // Only update if something changed
+              if (newJobs[idx].status !== data.status || 
+                  newJobs[idx].progress_message !== data.progress_message || 
+                  newJobs[idx].chapters_done !== data.chapters_done) {
+                newJobs[idx] = { ...newJobs[idx], ...data };
+              }
+            }
+            return newJobs;
           });
           
-          const activeIds = newJobs.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
-          if (activeIds.length > 0) {
-            localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
-          } else {
-            localStorage.removeItem("active_ingest_jobs");
+          if (data.status === "done" || data.status === "failed") {
+            es.close();
+            // Update local storage
+            setJobs(prev => {
+              const activeIds = prev.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
+              if (activeIds.length > 0) {
+                localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
+              } else {
+                localStorage.removeItem("active_ingest_jobs");
+              }
+              return prev;
+            });
           }
-          return newJobs;
-        });
-      } catch { /* ignore transient errors */ }
-    }, 3000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, []);
+        } catch (err) {
+          console.error("SSE parse error", err);
+        }
+      };
+      
+      es.onerror = () => {
+        es.close();
+      };
+      
+      return es;
+    });
+
+    return () => {
+      eventSources.forEach(es => es.close());
+    };
+  }, [jobs.length]); // Re-run when job array length changes (new job added)
 
   // Recover active jobs on page load
   useEffect(() => {
