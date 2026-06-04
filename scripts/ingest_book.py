@@ -58,14 +58,24 @@ _ENV = _load_env()
 MONGODB_URL    = os.environ.get("MONGODB_URL", _ENV.get("MONGODB_URL", "mongodb://localhost:27017"))
 MONGODB_DB     = os.environ.get("MONGODB_DB_NAME", _ENV.get("MONGODB_DB_NAME", "marking_tools"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", _ENV.get("GEMINI_API_KEY", ""))
-GEMINI_MODEL   = "gemini-2.5-flash"  # always use a Gemini model; GENERATION_LLM_MODEL is for Groq
+GEMINI_MODEL   = "gemini-2.5-flash"
 GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_EMBED_MODEL = "gemini-embedding-001"  # truncated to 768-dim via outputDimensionality
+GEMINI_EMBED_MODEL = "gemini-embedding-001"
 
-# Groq — used exclusively for math formula extraction (free tier, vision-capable)
+# Groq — math formula extraction (free tier, vision-capable)
 GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", _ENV.get("GROQ_API_KEY", ""))
 GROQ_BASE     = "https://api.groq.com/openai/v1"
 GROQ_MODEL    = os.environ.get("GROQ_MATH_MODEL", _ENV.get("GROQ_MATH_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"))
+
+# OpenAI — paid fallback for embeddings + vision
+OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY", _ENV.get("OPENAI_API_KEY", "")).strip()
+OPENAI_BASE     = "https://api.openai.com/v1"
+OPENAI_EMBED_MODEL = "text-embedding-3-small"
+OPENAI_VISION_MODEL = "gpt-4o-mini"
+
+# Anthropic — paid fallback for vision
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", _ENV.get("ANTHROPIC_API_KEY", "")).strip()
+ANTHROPIC_VISION_MODEL = "claude-haiku-4-5-20251001"
 
 MAX_PAGES         = 700
 MIN_CHUNK_CHARS   = 300
@@ -81,6 +91,27 @@ try:
     import fitz  # PyMuPDF
 except ImportError:
     sys.exit("PyMuPDF not installed. Run: pip3 install PyMuPDF")
+
+# Text cleaner — inline copy so the script runs without importing the backend package
+import unicodedata as _ud
+def _clean_text(text: str) -> str:
+    if not text: return text
+    _ligs = {"ﬀ":"ff","ﬁ":"fi","ﬂ":"fl","ﬃ":"ffi","ﬄ":"ffl","ﬅ":"st","ﬆ":"st","ſ":"s"}
+    for bad, good in _ligs.items(): text = text.replace(bad, good)
+    _mojibake = [("â€™","'"),("â€˜","'"),("â€œ",'"'),("â€"","—"),("â€"","–"),("â€¦","…"),("â€\x9d",'"'),("â‚¬","€"),("Ã©","é"),("Ã¨","è")]
+    for bad, good in _mojibake:
+        if bad in text: text = text.replace(bad, good)
+    text = re.sub(r"[​‌‍﻿­]", "", text)   # zero-width chars
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)  # control chars
+    text = _ud.normalize("NFC", text)
+    text = re.sub(r"-\s*\n\s*([a-z])", r"\1", text)    # soft hyphen line-breaks
+    text = re.sub(r"(?<![.!?:;])\n(?=[a-z])", " ", text)  # inline line-breaks
+    text = re.sub(r"^[^\n]*(This OpenStax book is available|Access for free at openstax|CC BY 4\.0)[^\n]*", "", text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r"^(?:\d{1,4}\s+)?Chapter\s+\d{1,2}\s*\|[^\n]{0,80}$", "", text, flags=re.IGNORECASE|re.MULTILINE)
+    text = re.sub(r"^\s*\d{1,4}\s*$", "", text, flags=re.MULTILINE)  # bare page numbers
+    text = re.sub(r"[^\S\n]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 try:
     import httpx
@@ -377,47 +408,172 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
     }
 
 
-# ── Gemini Vision (chart/image descriptions) ───────────────────────────────────
+# ── Provider health tracking (quota / rate-limit rotation) ────────────────────
 
-async def _describe_with_gemini(image_bytes: bytes, context: str) -> str:
-    if not GEMINI_API_KEY:
-        return ""
+import time as _time
+
+class _ProviderState:
+    def __init__(self, name: str):
+        self.name = name
+        self.ok = True
+        self.cooldown_until: float = 0.0
+        self.requests = 0
+        self.errors = 0
+
+    @property
+    def available(self) -> bool:
+        return _time.time() > self.cooldown_until
+
+    def rate_limited(self, seconds: float = 60) -> None:
+        self.cooldown_until = _time.time() + seconds
+        self.errors += 1
+        log.warning(f"[rotation] {self.name} rate-limited — cooldown {seconds:.0f}s")
+
+    def quota_exhausted(self, msg: str = "") -> None:
+        self.cooldown_until = _time.time() + 3600
+        self.errors += 1
+        log.warning(f"[rotation] {self.name} quota exhausted — cooldown 1hr. {msg[:120]}")
+
+    def success(self) -> None:
+        self.requests += 1
+
+    def status(self) -> str:
+        if not self.available:
+            rem = int(self.cooldown_until - _time.time())
+            return f"cooldown {rem}s"
+        return "ok"
+
+
+_gemini_embed_state   = _ProviderState("gemini_embed")
+_openai_embed_state   = _ProviderState("openai_embed")
+_gemini_vision_state  = _ProviderState("gemini_vision")
+_openai_vision_state  = _ProviderState("openai_vision")
+_anthropic_vis_state  = _ProviderState("anthropic_vision")
+
+def _print_provider_status() -> None:
+    states = [
+        _gemini_embed_state, _openai_embed_state,
+        _gemini_vision_state, _openai_vision_state, _anthropic_vis_state,
+    ]
+    log.info("Provider status: " + " | ".join(
+        f"{s.name}:{s.status()} (req={s.requests},err={s.errors})" for s in states
+    ))
+
+
+def _is_quota_error(body: str) -> bool:
+    body_lower = body.lower()
+    return any(p in body_lower for p in (
+        "quota", "exhausted", "resource_exhausted", "billing",
+        "insufficient_quota", "rate_limit_exceeded", "daily limit",
+    ))
+
+
+# ── Vision (chart/image descriptions) with Gemini → OpenAI → Anthropic fallback
+
+_VISION_PROMPT = (
+    "You are an expert at reading statistical charts and graphs in a business statistics textbook. "
+    "Describe exactly what this chart or graph shows: the type of visualisation, "
+    "axis labels, key values/ranges, data trends, and what statistical concept it demonstrates. "
+    "Be specific and quantitative. If no meaningful chart or image is visible, respond: NO_CHART"
+)
+
+
+async def _vision_gemini(image_bytes: bytes, context: str) -> str:
+    if not GEMINI_API_KEY or not _gemini_vision_state.available:
+        raise RuntimeError("gemini_vision unavailable")
     b64 = base64.b64encode(image_bytes).decode()
-    prompt = (
-        "You are an expert at reading statistical charts and graphs in a business statistics textbook. "
-        "Describe exactly what this chart or graph shows: the type of visualisation, "
-        "axis labels, key values/ranges, data trends, and what statistical concept it demonstrates. "
-        "Be specific and quantitative. If no meaningful chart or image is visible, respond: NO_CHART"
-    )
     payload = {
         "contents": [{"parts": [
-            {"text": f"Context: {context}\n\n{prompt}"},
+            {"text": f"Context: {context}\n\n{_VISION_PROMPT}"},
             {"inline_data": {"mime_type": "image/png", "data": b64}},
         ]}],
-        "generationConfig": {
-            "maxOutputTokens": 500,
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
+        "generationConfig": {"maxOutputTokens": 500, "thinkingConfig": {"thinkingBudget": 0}},
     }
-    for attempt in range(4):
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY}, json=payload,
+        )
+    if resp.status_code == 429:
+        body = resp.text
+        if _is_quota_error(body):
+            _gemini_vision_state.quota_exhausted(body)
+        else:
+            _gemini_vision_state.rate_limited(60)
+        raise RuntimeError(f"Gemini vision 429: {body[:120]}")
+    resp.raise_for_status()
+    _gemini_vision_state.success()
+    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    return "" if text == "NO_CHART" else text
+
+
+async def _vision_openai(image_bytes: bytes, context: str) -> str:
+    if not OPENAI_API_KEY or not _openai_vision_state.available:
+        raise RuntimeError("openai_vision unavailable")
+    b64 = base64.b64encode(image_bytes).decode()
+    prompt = f"Context: {context}\n\n{_VISION_PROMPT}" if context else _VISION_PROMPT
+    payload = {
+        "model": OPENAI_VISION_MODEL,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        ]}],
+        "max_tokens": 500,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{OPENAI_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    if resp.status_code == 429:
+        _openai_vision_state.rate_limited(30)
+        raise RuntimeError(f"OpenAI vision 429")
+    resp.raise_for_status()
+    _openai_vision_state.success()
+    text = resp.json()["choices"][0]["message"]["content"].strip()
+    return "" if text == "NO_CHART" else text
+
+
+async def _vision_anthropic(image_bytes: bytes, context: str) -> str:
+    if not ANTHROPIC_API_KEY or not _anthropic_vis_state.available:
+        raise RuntimeError("anthropic_vision unavailable")
+    b64 = base64.b64encode(image_bytes).decode()
+    prompt = f"Context: {context}\n\n{_VISION_PROMPT}" if context else _VISION_PROMPT
+    payload = {
+        "model": ANTHROPIC_VISION_MODEL,
+        "max_tokens": 500,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+            {"type": "text", "text": prompt},
+        ]}],
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+        )
+    if resp.status_code == 429:
+        _anthropic_vis_state.rate_limited(30)
+        raise RuntimeError("Anthropic vision 429")
+    resp.raise_for_status()
+    _anthropic_vis_state.success()
+    text = resp.json()["content"][0]["text"].strip()
+    return "" if text == "NO_CHART" else text
+
+
+async def _describe_with_gemini(image_bytes: bytes, context: str) -> str:
+    """Vision with automatic Gemini → OpenAI → Anthropic fallback."""
+    for fn in [_vision_gemini, _vision_openai, _vision_anthropic]:
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
-                    params={"key": GEMINI_API_KEY},
-                    json=payload,
-                )
-            if resp.status_code in {429, 500, 503} and attempt < 3:
-                await asyncio.sleep(4 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return "" if text == "NO_CHART" else text
+            return await fn(image_bytes, context)
         except Exception as exc:
-            log.debug(f"Gemini vision failed on attempt {attempt+1}: {exc}")
-            if attempt < 3:
-                await asyncio.sleep(4 * (attempt + 1))
-            continue
+            log.debug(f"Vision provider failed: {exc}")
     return ""
 
 
@@ -731,30 +887,61 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
     return chunks
 
 
-# ── Embeddings via Gemini ──────────────────────────────────────────────────────
+# ── Embeddings with Gemini → OpenAI fallback (both 768-dim) ───────────────────
 
-async def _embed(text: str) -> list[float]:
-    """768-dim embeddings via Gemini text-embedding-004 (matches MongoDB vector index)."""
-    if not GEMINI_API_KEY:
-        return []
+async def _embed_gemini(text: str) -> list[float]:
+    if not GEMINI_API_KEY or not _gemini_embed_state.available:
+        raise RuntimeError("gemini_embed unavailable")
     payload = {
         "model": f"models/{GEMINI_EMBED_MODEL}",
         "content": {"parts": [{"text": text[:2048]}]},
         "taskType": "SEMANTIC_SIMILARITY",
         "outputDimensionality": 768,
     }
-    for attempt in range(3):
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{GEMINI_BASE}/models/{GEMINI_EMBED_MODEL}:embedContent",
-                params={"key": GEMINI_API_KEY},
-                json=payload,
-            )
-        if resp.status_code in {429, 500, 503} and attempt < 2:
-            await asyncio.sleep(2 * (attempt + 1))
-            continue
-        resp.raise_for_status()
-        return resp.json()["embedding"]["values"]
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GEMINI_BASE}/models/{GEMINI_EMBED_MODEL}:embedContent",
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+        )
+    if resp.status_code == 429:
+        body = resp.text
+        if _is_quota_error(body):
+            _gemini_embed_state.quota_exhausted(body)
+        else:
+            _gemini_embed_state.rate_limited(60)
+        raise RuntimeError(f"Gemini embed 429: {body[:120]}")
+    resp.raise_for_status()
+    _gemini_embed_state.success()
+    return resp.json()["embedding"]["values"]
+
+
+async def _embed_openai(text: str) -> list[float]:
+    if not OPENAI_API_KEY or not _openai_embed_state.available:
+        raise RuntimeError("openai_embed unavailable")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{OPENAI_BASE}/embeddings",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": OPENAI_EMBED_MODEL, "input": text[:8191], "dimensions": 768},
+        )
+    if resp.status_code == 429:
+        _openai_embed_state.rate_limited(30)
+        raise RuntimeError("OpenAI embed 429")
+    resp.raise_for_status()
+    _openai_embed_state.success()
+    return resp.json()["data"][0]["embedding"]
+
+
+async def _embed(text: str) -> list[float]:
+    """768-dim embedding with automatic Gemini → OpenAI fallback.
+    Both providers output exactly 768 dimensions so MongoDB vector index works with either."""
+    for fn in [_embed_gemini, _embed_openai]:
+        try:
+            return await fn(text)
+        except Exception as exc:
+            log.debug(f"Embed provider failed: {exc}")
+    log.error("All embedding providers failed — chunk will have no vector")
     return []
 
 
@@ -772,16 +959,21 @@ def _mongo_insert_chunks(chunks: list[Chunk], embeddings: list[list[float]]) -> 
 
     docs = []
     for chunk, emb in zip(chunks, embeddings):
+        # Apply noise cleaning before storing
+        clean_t      = _clean_text(chunk.text)
+        clean_math   = _clean_text(chunk.math_text)
+        clean_imgs   = [_clean_text(t) for t in chunk.image_texts]
+        clean_tables = [_clean_text(t) for t in chunk.table_texts]
         docs.append({
             "book_id": BOOK_ID,
             "chapter_num": chunk.chapter_num,
             "chapter_title": chunk.chapter_title,
             "section_title": chunk.section_title,
             "topic_tag": chunk.topic_tag,
-            "text": chunk.text,
-            "image_texts": chunk.image_texts,
-            "table_texts": chunk.table_texts,
-            "math_text": chunk.math_text,
+            "text": clean_t,
+            "image_texts": clean_imgs,
+            "table_texts": clean_tables,
+            "math_text": clean_math,
             "page_start": chunk.page_start,
             "page_end": chunk.page_end,
             "has_images": chunk.has_images,
@@ -817,9 +1009,15 @@ async def main():
 
     log.info(f"Book: {pdf_path.name} ({pdf_path.stat().st_size // 1024 // 1024} MB)")
     log.info(f"MongoDB: {MONGODB_URL}/{MONGODB_DB}")
-    log.info(f"Embeddings: Gemini {GEMINI_EMBED_MODEL} (768-dim)")
-    log.info(f"Gemini Vision (charts): {'ENABLED' if GEMINI_API_KEY else 'DISABLED'}")
-    log.info(f"Groq Vision (math formulas): {'ENABLED — ' + GROQ_MODEL if GROQ_API_KEY else 'DISABLED — set GROQ_API_KEY in .env'}")
+    log.info("── API Provider Configuration ──────────────────────────────")
+    log.info(f"  Gemini key:    {'SET' if GEMINI_API_KEY else 'NOT SET'}")
+    log.info(f"  OpenAI key:    {'SET' if OPENAI_API_KEY else 'NOT SET'} (paid fallback)")
+    log.info(f"  Anthropic key: {'SET' if ANTHROPIC_API_KEY else 'NOT SET'} (paid fallback)")
+    log.info(f"  Groq key:      {'SET' if GROQ_API_KEY else 'NOT SET'}")
+    log.info(f"  Embedding chain: Gemini {GEMINI_EMBED_MODEL} (768-dim) → OpenAI {OPENAI_EMBED_MODEL} (768-dim)")
+    log.info(f"  Vision chain:  Gemini {GEMINI_MODEL} → OpenAI {OPENAI_VISION_MODEL} → Anthropic {ANTHROPIC_VISION_MODEL}")
+    log.info(f"  Math chain:    Groq {GROQ_MODEL}")
+    log.info("─────────────────────────────────────────────────────────────")
 
     pdf_bytes = pdf_path.read_bytes()
 
@@ -862,6 +1060,8 @@ async def main():
         except Exception as exc:
             log.warning(f"Chunk {i} embed failed: {exc}")
             embeddings.append([])
+
+    _print_provider_status()
 
     # ── Step 5: MongoDB ───────────────────────────────────────────────────────
     log.info("Step 5/5: Inserting into MongoDB…")

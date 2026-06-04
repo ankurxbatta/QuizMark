@@ -2,6 +2,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import auth, questions, submissions, marking, export, analytics
+from app.api.v1 import admin as admin_v1
 from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.core.security import hash_password, verify_password
@@ -27,6 +28,7 @@ app.include_router(submissions.router, prefix="/api/v1/submissions",  tags=["sub
 app.include_router(marking.router,     prefix="/api/v1/marking",     tags=["marking"])
 app.include_router(export.router,      prefix="/api/v1/export",      tags=["export"])
 app.include_router(analytics.router,   prefix="/api/v1/analytics",   tags=["analytics"])
+app.include_router(admin_v1.router,    prefix="/api/v1/admin",        tags=["admin"])
 
 
 @app.get("/health")

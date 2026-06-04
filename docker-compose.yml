@@ -1,5 +1,6 @@
 services:
 
+  # ── Frontend ──────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -24,6 +25,7 @@ services:
     networks:
       - app-network
 
+  # ── Backend API ───────────────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
@@ -51,11 +53,13 @@ services:
     networks:
       - app-network
 
-  worker:
+  # ── Worker: Ingest (PDF parse, chunking, orchestration) ───────────────────────
+  # Handles: ingest_book_resumable_task, ingest_pdf_task
+  worker-ingest:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.tasks.celery_app worker -Q ingest_tasks -n ingest@%h --concurrency=2 --loglevel=info
     env_file:
       - .env
     depends_on:
@@ -63,10 +67,123 @@ services:
       - mongodb
     volumes:
       - ./data/uploads:/app/uploads
+      - ./Book:/app/Book:ro
     restart: unless-stopped
     networks:
       - app-network
 
+  # ── Worker: Vision (chart/image descriptions via Gemini → OpenAI → Anthropic) ─
+  # Memory-limited: image bytes are large. Concurrency=1 to respect free-tier limits.
+  worker-vision:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q vision_tasks -n vision@%h --concurrency=1 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    mem_limit: 1g
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Worker: Math (formula extraction via Groq → OpenAI) ───────────────────────
+  worker-math:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q math_tasks -n math@%h --concurrency=2 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Worker: Clean (PDF noise removal, CPU-only, no API calls) ─────────────────
+  # High concurrency — this is pure Python text processing, no I/O bottleneck.
+  worker-clean:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q clean_tasks -n clean@%h --concurrency=4 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Worker: Embed (embedding generation via Gemini → OpenAI) ──────────────────
+  worker-embed:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q embed_tasks -n embed@%h --concurrency=3 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Worker: Generation (question generation via Groq → OpenAI → Anthropic) ─────
+  worker-gen:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q gen_tasks -n gen@%h --concurrency=2 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Worker: Marking (answer marking via Mistral → Groq → OpenAI) ──────────────
+  worker-mark:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker -Q mark_tasks -n mark@%h --concurrency=4 --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - broker
+      - mongodb
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Flower (Celery task dashboard — replaces any custom manager containers) ─────
+  # Dashboard at http://localhost:5555
+  # Shows all queues, workers, tasks, retries, and failure rates live.
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app flower --port=5555 --broker_api=${CELERY_BROKER_URL}
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    depends_on:
+      - broker
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── Infrastructure ─────────────────────────────────────────────────────────────
   broker:
     image: redis:7-alpine
     ports:

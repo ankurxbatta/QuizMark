@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     ONLINE_LLM_MODEL: str = "llama-3.3-70b-versatile"
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    OPENAI_VISION_MODEL: str = "gpt-4o-mini"
+    ANTHROPIC_VISION_MODEL: str = "claude-haiku-4-5-20251001"
 
     # ── Generation LLM (question generation) ─────────────────────────────────
     GENERATION_LLM_ENABLED: bool = True

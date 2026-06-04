@@ -32,6 +32,7 @@ from app.services.pdf_service import parse_pdf_into_chunks
 from app.services.question_generator import generate_questions_from_chunks, DbChunk
 from app.services.question_orchestrator import orchestrate_question_bank
 from app.services.llm_service import llm_service
+from app.services.text_cleaner import clean_chunk_doc
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ async def _embed_and_store_sequential(chunks, book_id, db, job_id):
     return stored, errors
 
 
-@celery_app.task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=2100)
+@celery_app.task(bind=True, queue="ingest_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def ingest_book_resumable_task(self, job_id: str, pdf_b64: str, book_id: str, book_hash: str):
     """
     Page-by-page resumable PDF ingestion. Auto-continues across the Celery time
@@ -296,6 +297,24 @@ async def _process_window_chunks(
         except Exception as exc:
             logger.warning(f"Vision pass on window failed (non-fatal): {exc}")
 
+    # Clean PDF noise from each chunk before embedding
+    for c in chunks:
+        try:
+            cleaned = clean_chunk_doc({
+                "text": getattr(c, "text", ""),
+                "math_text": getattr(c, "math_text", ""),
+                "image_texts": getattr(c, "image_texts", []),
+                "table_texts": getattr(c, "table_texts", []),
+                "key_terms": getattr(c, "key_terms", []),
+            })
+            c.text = cleaned["text"]
+            c.math_text = cleaned.get("math_text", "")
+            c.image_texts = cleaned.get("image_texts", [])
+            c.table_texts = cleaned.get("table_texts", [])
+            c.key_terms = cleaned.get("key_terms", [])
+        except Exception:
+            pass  # never let cleaner break ingest
+
     # Batch embed
     texts = [_chunk_embedding_text(c) for c in chunks]
     embeddings: list[list[float]] = []
@@ -316,7 +335,7 @@ async def _process_window_chunks(
     return await store_chunks_bulk(chunks, embeddings, book_id, book_hash)
 
 
-@celery_app.task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=2100)
+@celery_app.task(bind=True, queue="ingest_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def ingest_pdf_task(self, job_id: str, pdf_b64: str, question_type: str, count_per_chapter: int):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -668,7 +687,7 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         )
 
 
-@celery_app.task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=2100)
+@celery_app.task(bind=True, queue="gen_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def generate_from_book_task(self, job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all"):
     """Generate questions from chunks already stored in MongoDB (no PDF re-upload needed)."""
     loop = asyncio.new_event_loop()
