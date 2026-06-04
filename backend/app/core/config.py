@@ -31,28 +31,39 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str
     CELERY_RESULT_BACKEND: str
 
-    # ── Gemini (primary AI backend) ──────────────────────────────────────────
+    # ── Gemini — embeddings + chart vision only ───────────────────────────────
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
-    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"  # 768-dim (via outputDimensionality)
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"  # 768-dim (matches MongoDB index)
     GEMINI_EMBEDDING_DELAY_SECONDS: float = 0.8
     GEMINI_VISION_DELAY_SECONDS: float = 1.0
 
-    # ── LLM settings (used by GeminiClient) ─────────────────────────────────
+    # ── Groq — question generation + math vision ──────────────────────────────
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_GENERATION_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MATH_MODEL: str = "llama-3.2-11b-vision-preview"
+
+    # ── Mistral — answer marking ──────────────────────────────────────────────
+    MISTRAL_API_KEY: Optional[str] = None
+    MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
+    MISTRAL_MARKING_MODEL: str = "mistral-small-latest"
+
+    # ── LLM settings ─────────────────────────────────────────────────────────
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 1024
 
-    # ── Online LLM (marking fallback) ────────────────────────────────────────
+    # ── Online LLM (answer marking) ───────────────────────────────────────────
     ONLINE_LLM_ENABLED: bool = True
-    ONLINE_LLM_PROVIDER: str = "gemini"
-    ONLINE_LLM_MODEL: str = "gemini-2.5-flash"
+    ONLINE_LLM_PROVIDER: str = "groq"
+    ONLINE_LLM_MODEL: str = "llama-3.3-70b-versatile"
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
 
-    # ── Generation LLM (for question generation) ─────────────────────────────
+    # ── Generation LLM (question generation) ─────────────────────────────────
     GENERATION_LLM_ENABLED: bool = True
-    GENERATION_LLM_PROVIDER: str = "gemini"
-    GENERATION_LLM_MODEL: str = "gemini-2.5-flash"
+    GENERATION_LLM_PROVIDER: str = "groq"
+    GENERATION_LLM_MODEL: str = "llama-3.3-70b-versatile"
     GENERATION_MAX_TOKENS: int = 4096
 
     # ── RAG ──────────────────────────────────────────────────────────────────

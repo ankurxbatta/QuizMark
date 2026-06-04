@@ -6,10 +6,11 @@ Usage:
     python3 scripts/ingest_book.py [path/to/book.pdf]
 
 Reads the PDF page-by-page, extracts text/tables/math/images, generates
-embeddings via Ollama (nomic-embed-text), describes charts via Gemini Vision,
-then stores everything directly in MongoDB (pdf_chunks collection).
+embeddings via Gemini, describes charts via Gemini Vision, extracts math
+formulas via DeepSeek Vision API, then stores everything directly in MongoDB
+(pdf_chunks collection).
 
-No OpenAI key required. Reads credentials from .env in the project root.
+No local models required. Reads credentials from .env in the project root.
 """
 from __future__ import annotations
 
@@ -56,16 +57,24 @@ _ENV = _load_env()
 
 MONGODB_URL    = os.environ.get("MONGODB_URL", _ENV.get("MONGODB_URL", "mongodb://localhost:27017"))
 MONGODB_DB     = os.environ.get("MONGODB_DB_NAME", _ENV.get("MONGODB_DB_NAME", "marking_tools"))
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", _ENV.get("OPENAI_API_KEY", ""))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", _ENV.get("GEMINI_API_KEY", ""))
 GEMINI_MODEL   = os.environ.get("GENERATION_LLM_MODEL", _ENV.get("GENERATION_LLM_MODEL", "gemini-2.5-flash"))
 GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_EMBED_MODEL = "gemini-embedding-001"  # truncated to 768-dim via outputDimensionality
 
-MAX_PAGES      = 700
-MIN_CHUNK_CHARS = 300
-MAX_CHUNK_CHARS = 3000
-BOOK_ID        = "IntroductoryBusinessStatistics-OP"
+# Groq — used exclusively for math formula extraction (free tier, vision-capable)
+GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", _ENV.get("GROQ_API_KEY", ""))
+GROQ_BASE     = "https://api.groq.com/openai/v1"
+GROQ_MODEL    = os.environ.get("GROQ_MATH_MODEL", _ENV.get("GROQ_MATH_MODEL", "llama-3.2-11b-vision-preview"))
+
+MAX_PAGES         = 700
+MIN_CHUNK_CHARS   = 300
+MAX_CHUNK_CHARS   = 3000
+BOOK_ID           = "IntroductoryBusinessStatistics-OP"
+
+# Pages before this are treated as front matter — chapter detection disabled.
+# Avoids TOC entries (e.g. "12  Introduction…") being mistaken for chapter headers.
+FRONT_MATTER_PAGES = 20
 
 # ── Third-party imports ────────────────────────────────────────────────────────
 try:
@@ -120,6 +129,7 @@ class Chunk:
     has_tables: bool = False
     has_math_font: bool = False
     graph_page_nums: list[int] = field(default_factory=list)
+    math_page_nums: list[int] = field(default_factory=list)
 
 
 # ── Regex patterns ─────────────────────────────────────────────────────────────
@@ -157,12 +167,6 @@ _TEACHING_SIGNALS = re.compile(
     r"\bregression\b|\bvariance\b|\bconfidence\b|\bcorrelation\b",
     re.IGNORECASE,
 )
-_SKIP_SIGNALS = re.compile(
-    r"\bpractice\s+test\b|\bhomework\b|\breview\s+questions?\b|"
-    r"\bchapter\s+review\b|\bkey\s+terms?\b|\bthis\s+openstax\b|"
-    r"\bdownload\s+for\s+free\b|\btable\s+of\s+contents\b|\bappendix\b|\bindex\b",
-    re.IGNORECASE | re.MULTILINE,
-)
 _MATH_FONT_FRAGMENTS = ("STIX", "CMMI", "CMSY", "CMEX", "Symbol", "MathJax", "NimbusRomNo9L")
 
 
@@ -178,7 +182,13 @@ def _is_toc_like(text: str) -> bool:
     return sum(1 for l in lines[:80] if _TOC_ENTRY_RE.match(l)) >= 4
 
 
-def _find_chapter(text: str) -> Optional[tuple[int, str]]:
+def _find_chapter(text: str, current_chapter_num: int = 0) -> Optional[tuple[int, str]]:
+    """Find a chapter heading in page text.
+
+    Validates that the new chapter number is a reasonable advance from the
+    current chapter — prevents TOC page entries (e.g. '12 Introduction …')
+    from hijacking the chapter counter.
+    """
     for pat in _CHAPTER_PATTERNS:
         for m in pat.finditer(text):
             try:
@@ -187,18 +197,18 @@ def _find_chapter(text: str) -> Optional[tuple[int, str]]:
                 continue
             if not (1 <= num <= 50):
                 continue
+            # Chapter must advance monotonically; allow same chapter (sub-match)
+            # but reject jumps of more than 3 when we already have a chapter.
+            if current_chapter_num > 0 and num < current_chapter_num:
+                continue
+            if current_chapter_num > 0 and num > current_chapter_num + 3:
+                continue
             title = re.sub(r"\s*\.{2,}\s*\d+\s*$", "", m.group(2).strip()).strip()
             title = re.sub(r"\s+\d{1,4}\s*$", "", title).strip()
             if len(title) < 4 or _FRONT_MATTER_RE.match(re.sub(r"\s+", " ", title)):
                 continue
             return num, title
     return None
-
-
-def _is_skip_block(text: str) -> bool:
-    if not text.strip():
-        return True
-    return False
 
 
 def _teaching_density(text: str) -> float:
@@ -271,33 +281,39 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
     except Exception:
         pass
 
-    # Image OCR
+    # Raster image detection — track presence even if OCR produces no text
+    has_raster_images = False
     image_texts: list[str] = []
     ocr_disabled = False
-    if ocr_active and _OCR_AVAILABLE and _PIL_AVAILABLE:
-        try:
-            for img_ref in page.get_images(full=True):
-                xref = img_ref[0]
-                try:
-                    info = doc.extract_image(xref)
-                    img_bytes = info.get("image", b"")
-                    if not img_bytes:
-                        continue
-                    pil = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+    try:
+        raster_refs = page.get_images(full=True)
+        for img_ref in raster_refs:
+            try:
+                info = doc.extract_image(img_ref[0])
+                img_bytes = info.get("image", b"")
+                if not img_bytes:
+                    continue
+                if _PIL_AVAILABLE:
+                    pil = PILImage.open(io.BytesIO(img_bytes))
                     if pil.width < 80 or pil.height < 80:
                         continue
-                    t = pytesseract.image_to_string(pil, timeout=15).strip()
-                    if t:
-                        image_texts.append(t)
-                except pytesseract.TesseractNotFoundError:
-                    ocr_disabled = True
-                    break
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                has_raster_images = True  # meaningful image found
+                if ocr_active and _OCR_AVAILABLE and _PIL_AVAILABLE:
+                    try:
+                        pil = pil.convert("RGB")
+                        t = pytesseract.image_to_string(pil, timeout=15).strip()
+                        if t:
+                            image_texts.append(t)
+                    except pytesseract.TesseractNotFoundError:
+                        ocr_disabled = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-    # Math fonts
+    # Math fonts — collect spans and record which page has math
     math_spans: list[str] = []
     has_math_font = False
     text_block_rects: list[tuple] = []
@@ -320,7 +336,7 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
     except Exception:
         pass
 
-    # Formula lines fallback
+    # Fallback: pull formula-looking lines from the text layer
     if has_math_font and not math_spans:
         fl = re.compile(
             r"[=÷×±√∑∫µσ²]|\b\d+\s*/\s*\d+\b|\b[A-Za-z]\s*=\s*[\d(]|"
@@ -355,7 +371,7 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
                 )
                 if text_overlap / shape_area < 0.30:
                     graphic_area += shape_area
-            has_vector = (graphic_area / page_area) > 0.05
+            has_vector = (graphic_area / page_area) > 0.03  # lowered from 0.05
     except Exception:
         pass
 
@@ -363,6 +379,7 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
         "text": text,
         "table_texts": table_texts,
         "image_texts": image_texts,
+        "has_raster_images": has_raster_images,
         "math_spans": math_spans,
         "has_math_font": has_math_font,
         "has_vector": has_vector,
@@ -370,7 +387,7 @@ def _extract_page(page, doc, ocr_active: bool) -> dict:
     }
 
 
-# ── Gemini Vision ──────────────────────────────────────────────────────────────
+# ── Gemini Vision (chart/image descriptions) ───────────────────────────────────
 
 async def _describe_with_gemini(image_bytes: bytes, context: str) -> str:
     if not GEMINI_API_KEY:
@@ -380,75 +397,38 @@ async def _describe_with_gemini(image_bytes: bytes, context: str) -> str:
         "You are an expert at reading statistical charts and graphs in a business statistics textbook. "
         "Describe exactly what this chart or graph shows: the type of visualisation, "
         "axis labels, key values/ranges, data trends, and what statistical concept it demonstrates. "
-        "Be specific and quantitative. If no meaningful chart is visible, respond: NO_CHART"
+        "Be specific and quantitative. If no meaningful chart or image is visible, respond: NO_CHART"
     )
-    if OPENAI_API_KEY:
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"Context: {context}\n\n{prompt}"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
-                    ]
-                }
-            ],
-            "max_tokens": 400
-        }
-        for attempt in range(4):
-            try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                        json=payload,
-                    )
-                if resp.status_code in {429, 500, 503} and attempt < 3:
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-                resp.raise_for_status()
-                text = resp.json()["choices"][0]["message"]["content"].strip()
-                return "" if text == "NO_CHART" else text
-            except Exception as exc:
-                log.debug(f"OpenAI vision failed on attempt {attempt+1}: {exc}")
-                if attempt < 3:
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-                return ""
-        return ""
-    else:
-        payload = {
-            "contents": [{"parts": [
-                {"text": f"Context: {context}\n\n{prompt}"},
-                {"inline_data": {"mime_type": "image/png", "data": b64}},
-            ]}],
-            "generationConfig": {
-                "maxOutputTokens": 400,
-                "thinkingConfig": {"thinkingBudget": 0},
-            },
-        }
-        for attempt in range(4):
-            try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(
-                        f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
-                        params={"key": GEMINI_API_KEY},
-                        json=payload,
-                    )
-                if resp.status_code in {429, 500, 503} and attempt < 3:
-                    await asyncio.sleep(4 * (attempt + 1))
-                    continue
-                resp.raise_for_status()
-                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                return "" if text == "NO_CHART" else text
-            except Exception as exc:
-                log.debug(f"Gemini vision failed on attempt {attempt+1}: {exc}")
-                if attempt < 3:
-                    await asyncio.sleep(4 * (attempt + 1))
-                    continue
-                return ""
-        return ""
+    payload = {
+        "contents": [{"parts": [
+            {"text": f"Context: {context}\n\n{prompt}"},
+            {"inline_data": {"mime_type": "image/png", "data": b64}},
+        ]}],
+        "generationConfig": {
+            "maxOutputTokens": 500,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
+                    params={"key": GEMINI_API_KEY},
+                    json=payload,
+                )
+            if resp.status_code in {429, 500, 503} and attempt < 3:
+                await asyncio.sleep(4 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return "" if text == "NO_CHART" else text
+        except Exception as exc:
+            log.debug(f"Gemini vision failed on attempt {attempt+1}: {exc}")
+            if attempt < 3:
+                await asyncio.sleep(4 * (attempt + 1))
+            continue
+    return ""
 
 
 async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
@@ -482,7 +462,7 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
                 log.debug(f"Page {page_num} vision error: {exc}")
                 return chunk_idx, ""
             finally:
-                await asyncio.sleep(2)  # Base delay between vision API calls
+                await asyncio.sleep(2)
 
     tasks = []
     for ci, chunk in graph_chunks:
@@ -501,6 +481,135 @@ async def _add_graph_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None
     log.info(f"Chart descriptions: {described}/{total_pages} pages described")
 
 
+# ── Groq Vision (math formula extraction) ─────────────────────────────────────
+
+_MATH_PROMPT = (
+    "You are an expert at reading mathematical formulas from statistics textbooks. "
+    "Extract ALL mathematical formulas, equations, and statistical expressions visible "
+    "on this page. Write each formula in proper LaTeX notation. Focus on:\n"
+    "- Statistical formulas: mean, variance, standard deviation, z-score, t-statistic\n"
+    "- Probability formulas and distribution functions (normal, binomial, Poisson)\n"
+    "- Regression and correlation equations\n"
+    "- Hypothesis testing formulas (chi-square, ANOVA, p-value calculations)\n"
+    "- Any other mathematical equations present\n\n"
+    "Format: one LaTeX formula per line, e.g. $\\bar{x} = \\frac{\\sum x_i}{n}$\n"
+    "Do NOT include explanatory text — only the LaTeX formulas.\n"
+    "If no mathematical formulas are present on this page, respond exactly: NO_MATH"
+)
+
+
+async def _extract_math_with_groq(image_bytes: bytes, context: str) -> str:
+    """Extract LaTeX math formulas from a rendered page image via Groq Vision (free tier)."""
+    if not GROQ_API_KEY:
+        return ""
+    b64 = base64.b64encode(image_bytes).decode()
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Page context: {context}\n\n{_MATH_PROMPT}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            }
+        ],
+        "max_tokens": 1000,
+        "temperature": 0.1,
+    }
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    f"{GROQ_BASE}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            if resp.status_code == 429:
+                wait = 10 * (attempt + 1)
+                log.debug(f"Groq rate-limited — waiting {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            if resp.status_code in {500, 503} and attempt < 3:
+                await asyncio.sleep(3 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            if text == "NO_MATH" or not text:
+                return ""
+            return text
+        except Exception as exc:
+            log.debug(f"Groq math extraction failed on attempt {attempt+1}: {exc}")
+            if attempt < 3:
+                await asyncio.sleep(3 * (attempt + 1))
+    return ""
+
+
+async def _add_math_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
+    """
+    For each chunk with math-font pages, render those pages and extract accurate
+    LaTeX formulas via Groq Vision. Updates chunk.math_text in-place.
+    """
+    if not GROQ_API_KEY:
+        log.warning("GROQ_API_KEY not set — math formula extraction skipped")
+        return
+
+    math_chunks = [(i, c) for i, c in enumerate(chunks) if c.math_page_nums]
+    if not math_chunks:
+        log.info("No math-font pages found — skipping math extraction")
+        return
+
+    total_pages = sum(len(c.math_page_nums) for _, c in math_chunks)
+    log.info(f"Extracting math formulas from {total_pages} pages via Groq ({GROQ_MODEL})…")
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    # Groq free tier: keep concurrency at 1 to avoid rate limits
+    semaphore = asyncio.Semaphore(1)
+
+    async def _do_page(chunk_idx: int, page_num: int, context: str) -> tuple[int, str]:
+        async with semaphore:
+            try:
+                page = doc[page_num - 1]
+                mat = fitz.Matrix(2.0, 2.0)  # 2× zoom for clearer formula rendering
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_bytes = pix.tobytes("png")
+                result = await _extract_math_with_groq(img_bytes, context)
+                if result:
+                    log.info(f"  Math p.{page_num}: {result[:100]}…")
+                return chunk_idx, result
+            except Exception as exc:
+                log.debug(f"Page {page_num} Groq math failed: {exc}")
+                return chunk_idx, ""
+            finally:
+                await asyncio.sleep(2.0)  # respect Groq free tier rate limits
+
+    tasks = []
+    for ci, chunk in math_chunks:
+        ctx = f"{chunk.chapter_title} — {chunk.section_title} (pp.{chunk.page_start}–{chunk.page_end})"
+        for pn in chunk.math_page_nums:
+            tasks.append(_do_page(ci, pn, ctx))
+
+    results = await asyncio.gather(*tasks)
+
+    for ci, math_text in results:
+        if math_text:
+            existing = chunks[ci].math_text
+            if existing:
+                existing_lines = set(existing.splitlines())
+                new_lines = [l for l in math_text.splitlines() if l not in existing_lines]
+                if new_lines:
+                    chunks[ci].math_text = existing + "\n" + "\n".join(new_lines)
+            else:
+                chunks[ci].math_text = math_text
+
+    doc.close()
+    described = sum(1 for _, m in results if m)
+    log.info(f"Groq math: {described}/{len(tasks)} pages yielded formulas")
+
+
 # ── PDF → Chunks ───────────────────────────────────────────────────────────────
 
 def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
@@ -516,6 +625,8 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
     buf_math: list[str] = []
     buf_has_math = False
     buf_graph_pages: list[int] = []
+    buf_math_pages: list[int] = []
+    buf_has_raster = False
     buf_page_start = 1
     ocr_active = _OCR_AVAILABLE
 
@@ -523,13 +634,19 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
     pages = doc.pages(0, min(MAX_PAGES, doc.page_count))
 
     def _flush(page_end: int):
-        nonlocal buf_lines, buf_imgs, buf_tables, buf_math, buf_has_math, buf_graph_pages, buf_page_start
+        nonlocal buf_lines, buf_imgs, buf_tables, buf_math, buf_has_math
+        nonlocal buf_graph_pages, buf_math_pages, buf_has_raster, buf_page_start
         text = "\n".join(buf_lines).strip()
-        if len(text) < MIN_CHUNK_CHARS or _is_skip_block(text):
-            buf_lines, buf_imgs, buf_tables, buf_math, buf_graph_pages = [], [], [], [], []
+        if len(text) < MIN_CHUNK_CHARS:
+            buf_lines, buf_imgs, buf_tables, buf_math = [], [], [], []
+            buf_graph_pages, buf_math_pages = [], []
             buf_has_math = False
+            buf_has_raster = False
             return
         math_text = " ".join(dict.fromkeys(buf_math))[:500]
+        # A chunk has images if: Gemini described a chart, OCR found text in raster
+        # images, OR we detected raster/vector images (even without a description yet).
+        chunk_has_images = bool(buf_imgs) or bool(buf_graph_pages) or buf_has_raster
         for sub in _split_chunks(text, MAX_CHUNK_CHARS):
             if len(sub) < MIN_CHUNK_CHARS:
                 continue
@@ -544,13 +661,16 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
                 image_texts=list(buf_imgs),
                 table_texts=list(buf_tables),
                 math_text=math_text,
-                has_images=bool(buf_imgs),
+                has_images=chunk_has_images,
                 has_tables=bool(buf_tables),
                 has_math_font=buf_has_math,
                 graph_page_nums=list(buf_graph_pages),
+                math_page_nums=list(buf_math_pages),
             ))
-        buf_lines, buf_imgs, buf_tables, buf_math, buf_graph_pages = [], [], [], [], []
+        buf_lines, buf_imgs, buf_tables, buf_math = [], [], [], []
+        buf_graph_pages, buf_math_pages = [], []
         buf_has_math = False
+        buf_has_raster = False
 
     log.info(f"Parsing {min(MAX_PAGES, doc.page_count)} pages…")
     for page in pages:
@@ -572,7 +692,10 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
             page.clean_contents()
             continue
 
-        ch_match = None if _is_toc_like(raw) else _find_chapter(raw)
+        # Chapter detection: disabled in front matter, and validates monotone advance.
+        ch_match = None
+        if pn > FRONT_MATTER_PAGES and not _is_toc_like(raw):
+            ch_match = _find_chapter(raw, current_chapter_num=ch_num)
         if ch_match:
             _flush(pn - 1)
             buf_page_start = pn
@@ -590,6 +713,10 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
         buf_tables.extend(data["table_texts"])
         buf_math.extend(data["math_spans"])
         buf_has_math = buf_has_math or data["has_math_font"]
+        if data["has_math_font"]:
+            buf_math_pages.append(pn)
+        if data["has_raster_images"]:
+            buf_has_raster = True
         if data["has_vector"]:
             buf_graph_pages.append(pn)
 
@@ -607,7 +734,8 @@ def parse_pdf(pdf_bytes: bytes) -> list[Chunk]:
         f"{sum(1 for c in chunks if c.has_images)} with images, "
         f"{sum(1 for c in chunks if c.has_tables)} with tables, "
         f"{sum(1 for c in chunks if c.has_math_font)} with math fonts, "
-        f"{sum(1 for c in chunks if c.graph_page_nums)} with vector graphics"
+        f"{sum(1 for c in chunks if c.graph_page_nums)} with vector graphics, "
+        f"{sum(1 for c in chunks if c.math_page_nums)} with math pages"
     )
     return chunks
 
@@ -646,7 +774,6 @@ def _mongo_insert_chunks(chunks: list[Chunk], embeddings: list[list[float]]) -> 
     db = client[MONGODB_DB]
     col = db["pdf_chunks"]
 
-    # Remove existing chunks for this book
     existing = col.count_documents({"book_id": BOOK_ID})
     if existing:
         log.info(f"Removing {existing} existing chunks for {BOOK_ID}…")
@@ -673,6 +800,8 @@ def _mongo_insert_chunks(chunks: list[Chunk], embeddings: list[list[float]]) -> 
             "has_example": chunk.has_example,
             "teaching_density": chunk.teaching_density,
             "key_terms": chunk.key_terms,
+            "graph_page_nums": chunk.graph_page_nums,
+            "math_page_nums": chunk.math_page_nums,
             "embedding": emb,
             "created_at": datetime.now(timezone.utc),
         })
@@ -687,7 +816,6 @@ def _mongo_insert_chunks(chunks: list[Chunk], embeddings: list[list[float]]) -> 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 async def main():
-    # Determine PDF path
     if len(sys.argv) > 1:
         pdf_path = Path(sys.argv[1])
     else:
@@ -699,25 +827,30 @@ async def main():
     log.info(f"Book: {pdf_path.name} ({pdf_path.stat().st_size // 1024 // 1024} MB)")
     log.info(f"MongoDB: {MONGODB_URL}/{MONGODB_DB}")
     log.info(f"Embeddings: Gemini {GEMINI_EMBED_MODEL} (768-dim)")
-    log.info(f"Gemini Vision: {'ENABLED' if GEMINI_API_KEY else 'DISABLED (no GEMINI_API_KEY)'}")
+    log.info(f"Gemini Vision (charts): {'ENABLED' if GEMINI_API_KEY else 'DISABLED'}")
+    log.info(f"Groq Vision (math formulas): {'ENABLED — ' + GROQ_MODEL if GROQ_API_KEY else 'DISABLED — set GROQ_API_KEY in .env'}")
 
     pdf_bytes = pdf_path.read_bytes()
 
     # ── Step 1: Parse PDF ─────────────────────────────────────────────────────
-    log.info("Step 1/4: Parsing PDF (text + tables + math + graph detection)…")
+    log.info("Step 1/5: Parsing PDF (text + tables + math detection + image detection)…")
     chunks = parse_pdf(pdf_bytes)
     if not chunks:
         sys.exit("No usable chunks extracted from PDF.")
 
-    # ── Step 2: Gemini Vision for chart pages ─────────────────────────────────
-    log.info("Step 2/4: Describing charts/graphs via Gemini Vision…")
+    # ── Step 2: Gemini Vision for chart/graph pages ───────────────────────────
+    log.info("Step 2/5: Describing charts/graphs via Gemini Vision…")
     await _add_graph_descriptions(chunks, pdf_bytes)
 
-    # ── Step 3: Embeddings via Gemini ─────────────────────────────────────────
+    # ── Step 3: DeepSeek math formula extraction ──────────────────────────────
+    log.info("Step 3/5: Extracting math formulas via DeepSeek API…")
+    await _add_math_descriptions(chunks, pdf_bytes)
+
+    # ── Step 4: Embeddings via Gemini ─────────────────────────────────────────
     if GEMINI_API_KEY:
-        log.info(f"Step 3/4: Generating embeddings via Gemini {GEMINI_EMBED_MODEL}…")
+        log.info(f"Step 4/5: Generating embeddings via Gemini {GEMINI_EMBED_MODEL}…")
     else:
-        log.warning("Step 3/4: GEMINI_API_KEY not set — skipping embeddings")
+        log.warning("Step 4/5: GEMINI_API_KEY not set — skipping embeddings")
 
     embeddings: list[list[float]] = []
     for i, chunk in enumerate(chunks):
@@ -731,7 +864,7 @@ async def main():
                 chunk.text[:1500],
                 ("Tables:\n" + "\n".join(chunk.table_texts)[:1200]) if chunk.table_texts else "",
                 ("Images and charts:\n" + "\n".join(chunk.image_texts)[:1200]) if chunk.image_texts else "",
-                (f"Formula snippets:\n{chunk.math_text[:800]}") if chunk.math_text else "",
+                (f"Math formulas:\n{chunk.math_text[:800]}") if chunk.math_text else "",
             ] if part)
             emb = await _embed(embed_text)
             embeddings.append(emb)
@@ -739,8 +872,8 @@ async def main():
             log.warning(f"Chunk {i} embed failed: {exc}")
             embeddings.append([])
 
-    # ── Step 4: MongoDB ───────────────────────────────────────────────────────
-    log.info("Step 4/4: Inserting into MongoDB…")
+    # ── Step 5: MongoDB ───────────────────────────────────────────────────────
+    log.info("Step 5/5: Inserting into MongoDB…")
     inserted = _mongo_insert_chunks(chunks, embeddings)
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -750,7 +883,7 @@ async def main():
     log.info(f"Chapters found: {len(chapters)} ({min(chapters) if chapters else '?'}–{max(chapters) if chapters else '?'})")
     log.info(f"  With chart/image descriptions: {sum(1 for c in chunks if c.has_images)}")
     log.info(f"  With tables: {sum(1 for c in chunks if c.has_tables)}")
-    log.info(f"  With math/formulae: {sum(1 for c in chunks if c.has_formula)}")
+    log.info(f"  With math formulas (DeepSeek): {sum(1 for c in chunks if c.math_text)}")
     log.info(f"  With embeddings: {sum(1 for e in embeddings if e)}")
     log.info("=" * 60)
 

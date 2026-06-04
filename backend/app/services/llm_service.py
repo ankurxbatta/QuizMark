@@ -1,14 +1,15 @@
 """
 llm_service.py  —  Unified LLM adapter.
 
-All AI work is routed through Gemini. AnthropicClient and OpenAIClient
-are available as optional overrides via ONLINE_LLM_PROVIDER config.
+Provider split (all free tiers):
+  Gemini  → embeddings (768-dim, matches MongoDB index) + chart/image vision
+  Groq    → question generation  (llama-3.3-70b-versatile — great at long structured output)
+  Mistral → answer marking       (mistral-small-latest — precise instruction-following for rubrics)
 
 Public singletons:
-  slm_service        → GeminiClient (embeddings + fast scoring)
-  llm_service        → GeminiClient (generation fallback)
-  online_service     → GeminiClient / AnthropicClient / OpenAIClient (marking)
-  generation_service → GeminiClient / AnthropicClient / OpenAIClient (question generation)
+  slm_service        → GeminiClient  (embeddings + vision)
+  generation_service → GroqClient    (question generation)
+  online_service     → MistralClient (answer marking)
 
 All share the same interface:  .generate(prompt) → str
                                 .embed(text)      → list[float]
@@ -138,6 +139,101 @@ class GeminiClient:
         return ""
 
 
+class GroqClient:
+    """
+    Calls the Groq Chat Completions API (OpenAI-compatible).
+    Used for question generation and answer marking — free tier.
+    """
+
+    def __init__(self, model: str | None = None, max_tokens: int | None = None):
+        self.model = model or settings.GROQ_GENERATION_MODEL
+        self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
+        self._base = settings.GROQ_BASE_URL
+
+    async def generate(self, prompt: str) -> str:
+        if not settings.GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY is not set.")
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": self.max_tokens,
+            "temperature": settings.LLM_TEMPERATURE,
+        }
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    f"{self._base}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            if resp.status_code == 429 and attempt < 4:
+                # Groq returns retry-after on rate limit
+                await _sleep_before_retry(resp, attempt)
+                continue
+            if resp.status_code in {500, 502, 503, 504} and attempt < 4:
+                await asyncio.sleep(5.0 * (attempt + 1))
+                continue
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return resp.json()["choices"][0]["message"]["content"]
+
+    async def embed(self, text: str) -> list[float]:
+        # Groq doesn't provide embeddings — delegate to Gemini
+        return await slm_service.embed(text)
+
+
+class MistralClient:
+    """
+    Calls the Mistral AI Chat API (OpenAI-compatible).
+    Used for answer marking — precise instruction-following suits rubric scoring.
+    """
+
+    def __init__(self, model: str | None = None, max_tokens: int | None = None):
+        self.model = model or settings.MISTRAL_MARKING_MODEL
+        self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
+        self._base = settings.MISTRAL_BASE_URL
+
+    async def generate(self, prompt: str) -> str:
+        if not settings.MISTRAL_API_KEY:
+            raise RuntimeError("MISTRAL_API_KEY is not set.")
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": self.max_tokens,
+            "temperature": settings.LLM_TEMPERATURE,
+        }
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(
+                    f"{self._base}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.MISTRAL_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            if resp.status_code == 429 and attempt < 4:
+                await _sleep_before_retry(resp, attempt)
+                continue
+            if resp.status_code in {500, 502, 503, 504} and attempt < 4:
+                await asyncio.sleep(5.0 * (attempt + 1))
+                continue
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return resp.json()["choices"][0]["message"]["content"]
+
+    async def embed(self, text: str) -> list[float]:
+        # Mistral embeddings exist but we use Gemini for consistency with MongoDB index
+        return await slm_service.embed(text)
+
+
 class AnthropicClient:
     """Calls the Anthropic Messages API (Claude). Used when ANTHROPIC_API_KEY is set."""
 
@@ -202,30 +298,40 @@ class OpenAIClient:
             return resp.json()["data"][0]["embedding"]
 
 
-# ── Module-level singletons ─────────────────────────────────────────────────────
-# All AI work goes through Gemini.
+# ── Module-level singletons ────────────────────────────────────────────────────
+#
+# Gemini  → embeddings + chart vision  (slm_service / describe_image)
+# Groq    → question generation + marking  (generation_service / online_service)
 
-# Tier-1: "SLM" — now Gemini flash (better accuracy, no local compute)
+# Gemini client — used ONLY for embeddings and vision, never for text generation
 slm_service = GeminiClient(
-    model=settings.GENERATION_LLM_MODEL,
+    model="gemini-2.5-flash",
     max_tokens=256,
 )
 
-# Tier-3 offline fallback — same Gemini client
-llm_service = GeminiClient(
-    model=settings.GENERATION_LLM_MODEL,
-    max_tokens=settings.LLM_MAX_TOKENS,
-)
+# Legacy alias kept for any callers that import llm_service directly
+llm_service = slm_service
 
 
 def _build_online_client():
+    """Answer marking client — Mistral by default, falls back through Groq → Gemini."""
     if not settings.ONLINE_LLM_ENABLED:
         return None
+    if settings.ONLINE_LLM_PROVIDER == "mistral" and settings.MISTRAL_API_KEY:
+        return MistralClient(
+            model=settings.MISTRAL_MARKING_MODEL,
+            max_tokens=settings.LLM_MAX_TOKENS,
+        )
+    if settings.ONLINE_LLM_PROVIDER == "groq" and settings.GROQ_API_KEY:
+        return GroqClient(
+            model=settings.GROQ_GENERATION_MODEL,
+            max_tokens=settings.LLM_MAX_TOKENS,
+        )
     if settings.ONLINE_LLM_PROVIDER == "anthropic" and settings.ANTHROPIC_API_KEY:
         return AnthropicClient(model=settings.ONLINE_LLM_MODEL)
     if settings.ONLINE_LLM_PROVIDER == "openai" and settings.OPENAI_API_KEY:
         return OpenAIClient(model=settings.ONLINE_LLM_MODEL)
-    if settings.ONLINE_LLM_PROVIDER == "gemini" and settings.GEMINI_API_KEY:
+    if settings.GEMINI_API_KEY:
         return GeminiClient(model=settings.ONLINE_LLM_MODEL)
     return None
 
@@ -234,6 +340,12 @@ online_service = _build_online_client()
 
 
 def _build_generation_client():
+    """Question generation client — Groq by default, falls back to Gemini."""
+    if settings.GENERATION_LLM_PROVIDER == "groq" and settings.GROQ_API_KEY:
+        return GroqClient(
+            model=settings.GROQ_GENERATION_MODEL,
+            max_tokens=settings.GENERATION_MAX_TOKENS,
+        )
     if settings.GENERATION_LLM_PROVIDER == "anthropic" and settings.ANTHROPIC_API_KEY:
         return AnthropicClient(
             model=settings.GENERATION_LLM_MODEL,
@@ -241,13 +353,13 @@ def _build_generation_client():
         )
     if settings.GENERATION_LLM_PROVIDER == "openai" and settings.OPENAI_API_KEY:
         return OpenAIClient(model=settings.GENERATION_LLM_MODEL)
-    if settings.GENERATION_LLM_PROVIDER == "gemini" and settings.GEMINI_API_KEY:
+    # Fallback: Gemini
+    if settings.GEMINI_API_KEY:
         return GeminiClient(
             model=settings.GENERATION_LLM_MODEL,
             max_tokens=settings.GENERATION_MAX_TOKENS,
         )
-    # Final fallback: use llm_service (Gemini)
-    return llm_service
+    return slm_service
 
 
 generation_service = _build_generation_client()
