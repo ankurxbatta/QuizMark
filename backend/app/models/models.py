@@ -46,12 +46,23 @@ class IngestJobStatus(str, enum.Enum):
 #                       override_mark, override_feedback, override_reason,
 #                       is_flagged, is_marked, submitted_at, marked_at}
 #
-# ingest_jobs:         {_id, filename, total_pages, question_type,
-#                       count_per_chapter, status, chapters_done,
-#                       questions_created, total_chapters, current_chapter,
-#                       current_chapter_title, progress_message,
-#                       last_heartbeat_at, error_message, started_at,
-#                       completed_at, created_at}
+# ingest_jobs:         {_id, filename, book_hash, total_pages, pages_done,
+#                       progress_percent, question_type, count_per_chapter,
+#                       status, chapters_done, questions_created,
+#                       total_chapters, current_chapter, current_chapter_title,
+#                       progress_message, last_heartbeat_at, error_message,
+#                       started_at, completed_at, created_at}
+#
+# ingest_checkpoints:  {_id (book_hash), book_id, job_id, total_pages,
+#                       next_page, pages_done, chunks_stored, ocr_active,
+#                       status ("in_progress" | "complete"),
+#                       state {chapter_num, chapter_title, section_title,
+#                              topic, buffer_lines[], buffer_image_texts[],
+#                              buffer_table_texts[], buffer_math_spans[],
+#                              buffer_has_math_font, buffer_graph_pages[],
+#                              buffer_figure_rects[], buffer_math_rects[],
+#                              buffer_page_start},
+#                       created_at, updated_at}
 #
 # audit_logs:          {_id, event_type, actor_id, submission_id, detail,
 #                       timestamp}

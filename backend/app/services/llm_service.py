@@ -100,7 +100,53 @@ class GeminiClient:
                 raise RuntimeError(_redact_url_secrets(str(exc))) from exc
             return resp.json()["embedding"]["values"]
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """
+        Batched 768-dim embeddings via :batchEmbedContents — one HTTP round-trip
+        for many texts. Falls back to sequential .embed() if the batch endpoint
+        rejects the request, so callers always get a vector per input (or [] for
+        a hard failure on that item).
+        """
+        if not texts:
+            return []
+        if not settings.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is not set.")
 
+        model_path = f"models/{settings.GEMINI_EMBEDDING_MODEL}"
+        endpoint = f"{self._base}/{model_path}:batchEmbedContents"
+        requests = [
+            {
+                "model": model_path,
+                "content": {"parts": [{"text": (t or "")[:2048]}]},
+                "taskType": "SEMANTIC_SIMILARITY",
+                "outputDimensionality": 768,
+            }
+            for t in texts
+        ]
+        payload = {"requests": requests}
+        for attempt in range(5):
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    endpoint, params={"key": settings.GEMINI_API_KEY}, json=payload
+                )
+            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+                await _sleep_before_retry(resp, attempt)
+                continue
+            if resp.status_code >= 400:
+                # Batch endpoint refused — fall back to sequential single calls
+                logging.getLogger(__name__).warning(
+                    f"batchEmbedContents failed ({resp.status_code}); falling back to sequential embed"
+                )
+                out: list[list[float]] = []
+                for t in texts:
+                    try:
+                        out.append(await self.embed(t))
+                    except Exception:
+                        out.append([])
+                return out
+            data = resp.json()
+            return [item.get("values", []) for item in data.get("embeddings", [])]
+        return []
 
     async def describe_image(self, image_bytes: bytes, context: str = "") -> str:
         """Describe a chart/graph image using Gemini Vision."""
@@ -232,6 +278,9 @@ class GroqClient:
         # Groq doesn't provide embeddings — delegate to Gemini
         return await slm_service.embed(text)
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return await slm_service.embed_batch(texts)
+
 
 class MistralClient:
     """
@@ -279,6 +328,9 @@ class MistralClient:
         # Mistral embeddings exist but we use Gemini for consistency with MongoDB index
         return await slm_service.embed(text)
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return await slm_service.embed_batch(texts)
+
 
 class AnthropicClient:
     """Calls the Anthropic Messages API (Claude). Used when ANTHROPIC_API_KEY is set."""
@@ -309,6 +361,9 @@ class AnthropicClient:
 
     async def embed(self, text: str) -> list[float]:
         return await slm_service.embed(text)
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return await slm_service.embed_batch(texts)
 
 
 class OpenAIClient:
@@ -342,6 +397,10 @@ class OpenAIClient:
             )
             resp.raise_for_status()
             return resp.json()["data"][0]["embedding"]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        # Delegate to Gemini for consistency with the 768-dim MongoDB index
+        return await slm_service.embed_batch(texts)
 
 
 # ── Module-level singletons ────────────────────────────────────────────────────

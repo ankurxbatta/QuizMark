@@ -1,3 +1,4 @@
+import hashlib
 import re
 import uuid
 from datetime import datetime, timezone
@@ -181,7 +182,13 @@ async def ingest_book_to_library(
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    """Upload a PDF and store it in the Library (pdf_chunks). No questions generated yet."""
+    """
+    Upload a PDF for resumable, page-by-page ingestion into the Library.
+    Re-uploading the same content resumes from the last checkpointed page;
+    if the book is already fully ingested, this is a no-op.
+    """
+    from app.services.mongo_vector_store import get_checkpoint, save_checkpoint
+
     raw_bytes = await file.read()
     filename = (file.filename or "upload.pdf")
     if len(raw_bytes) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
@@ -189,16 +196,73 @@ async def ingest_book_to_library(
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(415, "Only PDF files are supported.")
 
+    book_hash = hashlib.sha256(raw_bytes).hexdigest()[:16]
     info = get_pdf_info(raw_bytes)
-    now = datetime.now(timezone.utc)
-    job_id = str(uuid.uuid4())
-    # Use filename (sans extension) as the book_id for a readable Library entry
     book_id = filename.rsplit(".", 1)[0]
+    now = datetime.now(timezone.utc)
+
+    checkpoint = await get_checkpoint(book_hash)
+
+    # Fallback: checkpoint missing but partial chunks for this hash still exist.
+    # Could happen if Mongo dropped the checkpoint, an earlier worker crashed
+    # before its first window completed, or someone deleted the checkpoint
+    # without clearing chunks. Reconstruct a stub so the user gets resume.
+    if not checkpoint:
+        last_chunk = await db["pdf_chunks"].find(
+            {"book_hash": book_hash}, {"page_end": 1}
+        ).sort("page_end", -1).limit(1).to_list(length=1)
+        if last_chunk:
+            resumed_page = int(last_chunk[0].get("page_end", 0))
+            await save_checkpoint(book_hash, {
+                "book_id": book_id, "filename": filename,
+                "job_id": str(uuid.uuid4()),
+                "total_pages": info.get("pages", 0),
+                "next_page": resumed_page, "pages_done": resumed_page,
+                "chunks_stored": await db["pdf_chunks"].count_documents({"book_hash": book_hash}),
+                "ocr_active": True,
+                "status": "in_progress",
+                "state": None,  # buffer state lost — accept the small gap, better than restarting
+            })
+            checkpoint = await get_checkpoint(book_hash)
+
+    if checkpoint and checkpoint.get("status") == "complete":
+        # Already fully ingested — return the existing job for visibility
+        existing_job_id = checkpoint.get("job_id")
+        job = await db["ingest_jobs"].find_one({"_id": existing_job_id}) if existing_job_id else None
+        return {
+            "job_id": existing_job_id or "",
+            "filename": filename,
+            "book_id": checkpoint.get("book_id", book_id),
+            "book_hash": book_hash,
+            "total_pages": checkpoint.get("total_pages", info.get("pages")),
+            "pages_done": checkpoint.get("total_pages", 0),
+            "progress_percent": 100,
+            "status": (job or {}).get("status", "done"),
+            "already_ingested": True,
+            "resumed": False,
+            "resumed_from_page": None,
+            "total_chapters": (job or {}).get("total_chapters", 0),
+            "chapters_done": (job or {}).get("chapters_done", 0),
+            "current_chapter": None,
+            "current_chapter_title": None,
+            "questions_created": (job or {}).get("questions_created", 0),
+            "progress_message": "Book is already fully ingested. Clear cache to re-ingest.",
+            "last_heartbeat_at": now.isoformat(),
+            "error": None,
+            "created_at": now.isoformat(),
+            "started_at": None,
+            "completed_at": (job or {}).get("completed_at").isoformat() if job and job.get("completed_at") else None,
+        }
+
+    resumed = bool(checkpoint and checkpoint.get("status") == "in_progress")
+    job_id = (checkpoint.get("job_id") if resumed else None) or str(uuid.uuid4())
+    pages_done = int((checkpoint or {}).get("pages_done", 0))
 
     job_doc = {
         "_id": job_id,
         "filename": filename,
         "book_id": book_id,
+        "book_hash": book_hash,
         "total_pages": info.get("pages", 0),
         "question_type": "none",
         "count_per_chapter": 0,
@@ -206,38 +270,100 @@ async def ingest_book_to_library(
         "chapters_done": 0,
         "questions_created": 0,
         "total_chapters": 0,
+        "pages_done": pages_done,
+        "progress_percent": int(100 * pages_done / max(info.get("pages") or 1, 1)),
         "current_chapter": None,
         "current_chapter_title": None,
-        "progress_message": "Queued for Library ingestion.",
+        "progress_message": (
+            f"Queued — resuming from page {pages_done + 1}." if resumed
+            else "Queued for Library ingestion."
+        ),
         "last_heartbeat_at": now,
         "error_message": None,
         "started_at": None,
         "completed_at": None,
         "created_at": now,
     }
-    await db["ingest_jobs"].insert_one(job_doc)
+    # If we're resuming an existing job_id, upsert; otherwise insert
+    await db["ingest_jobs"].update_one(
+        {"_id": job_id}, {"$set": job_doc}, upsert=True,
+    )
+
+    # Ensure a checkpoint stub exists with this job_id (so the worker can resume cleanly)
+    if not checkpoint:
+        await save_checkpoint(book_hash, {
+            "book_id": book_id, "filename": filename, "job_id": job_id,
+            "total_pages": info.get("pages", 0),
+            "next_page": 0, "pages_done": 0, "chunks_stored": 0,
+            "ocr_active": True, "status": "in_progress",
+            "state": None,
+        })
 
     pdf_b64 = base64.b64encode(raw_bytes).decode("utf-8")
-    ingest_book_only_task.delay(job_id, pdf_b64, book_id)
+    ingest_book_only_task.delay(job_id, pdf_b64, book_id, book_hash)
 
     return {
         "job_id": job_id,
         "filename": filename,
         "book_id": book_id,
+        "book_hash": book_hash,
         "total_pages": info.get("pages"),
+        "pages_done": pages_done,
+        "progress_percent": int(100 * pages_done / max(info.get("pages") or 1, 1)),
         "status": "queued",
+        "already_ingested": False,
+        "resumed": resumed,
+        "resumed_from_page": pages_done if resumed else None,
         "total_chapters": 0,
         "chapters_done": 0,
         "current_chapter": None,
         "current_chapter_title": None,
         "questions_created": 0,
-        "progress_message": "Queued for Library ingestion.",
+        "progress_message": job_doc["progress_message"],
         "last_heartbeat_at": now.isoformat(),
         "error": None,
         "created_at": now.isoformat(),
         "started_at": None,
         "completed_at": None,
     }
+
+
+# ── Library cache (in-progress / cached ingestions) ────────────────────────────
+
+@router.get("/books/cache")
+async def list_cached_books(
+    _: dict = Depends(require_instructor),
+):
+    """List incomplete ingestion checkpoints (the 'cached / resumable' tab)."""
+    from app.services.mongo_vector_store import list_incomplete_checkpoints
+    items = await list_incomplete_checkpoints(limit=100)
+    out = []
+    for ck in items:
+        out.append({
+            "book_hash": ck.get("_id"),
+            "book_id": ck.get("book_id", ""),
+            "filename": ck.get("filename", ""),
+            "job_id": ck.get("job_id", ""),
+            "total_pages": ck.get("total_pages", 0),
+            "pages_done": ck.get("pages_done", 0),
+            "chunks_stored": ck.get("chunks_stored", 0),
+            "progress_percent": int(100 * ck.get("pages_done", 0) / max(ck.get("total_pages") or 1, 1)),
+            "status": ck.get("status", "in_progress"),
+            "updated_at": ck.get("updated_at").isoformat() if ck.get("updated_at") else None,
+        })
+    return {"cached": out}
+
+
+@router.delete("/books/{book_hash}/cache", status_code=204)
+async def clear_book_cache(
+    book_hash: str,
+    _: dict = Depends(require_instructor),
+):
+    """Delete the checkpoint AND any partial chunks for this book hash. Generated questions are kept."""
+    from app.services.mongo_vector_store import delete_checkpoint, delete_book_chunks
+    await delete_checkpoint(book_hash)
+    await delete_book_chunks(book_hash=book_hash)
+    return
 
 
 # ── List ingested books ────────────────────────────────────────────────────────
@@ -453,7 +579,10 @@ def _job_out(job: dict) -> dict:
     return {
         "job_id": job["_id"],
         "filename": job.get("filename", ""),
+        "book_hash": job.get("book_hash"),
         "total_pages": job.get("total_pages", 0),
+        "pages_done": job.get("pages_done", 0),
+        "progress_percent": job.get("progress_percent", 0),
         "status": job["status"],
         "total_chapters": job.get("total_chapters", 0),
         "chapters_done": job.get("chapters_done", 0),
@@ -498,7 +627,10 @@ async def get_job_status(
     return {
         "job_id": job["_id"],
         "filename": job["filename"],
+        "book_hash": job.get("book_hash"),
         "total_pages": job.get("total_pages", 0),
+        "pages_done": job.get("pages_done", 0),
+        "progress_percent": job.get("progress_percent", 0),
         "status": job["status"],
         "total_chapters": job.get("total_chapters", 0),
         "chapters_done": job.get("chapters_done", 0),
@@ -532,38 +664,44 @@ async def stream_job_status(
         last_status = None
         last_msg = None
         last_done = -1
-        
+        last_pages = -1
+
         # Stream for up to 1 hour
         for _ in range(3600):
             job = await db["ingest_jobs"].find_one({"_id": job_id})
             if not job:
                 yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
                 break
-                
+
             status = job.get("status")
             msg = job.get("progress_message")
             done = job.get("chapters_done", 0)
-            
-            # Send update if something changed
-            if status != last_status or msg != last_msg or done != last_done:
+            pages_done = job.get("pages_done", 0)
+
+            if (status != last_status or msg != last_msg
+                    or done != last_done or pages_done != last_pages):
                 payload = {
                     "job_id": job["_id"],
                     "status": status,
                     "total_chapters": job.get("total_chapters", 0),
                     "chapters_done": done,
+                    "total_pages": job.get("total_pages", 0),
+                    "pages_done": pages_done,
+                    "progress_percent": job.get("progress_percent", 0),
                     "progress_message": msg,
                     "questions_created": job.get("questions_created", 0),
-                    "error": job.get("error_message")
+                    "error": job.get("error_message"),
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
-                
+
                 last_status = status
                 last_msg = msg
                 last_done = done
-                
+                last_pages = pages_done
+
             if status in [IngestJobStatus.done.value, IngestJobStatus.failed.value]:
                 break
-                
+
             await asyncio.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

@@ -5,9 +5,22 @@ import api from "@/lib/api";
 import {
   BookOpen, Database, Layers, Table2, FlaskConical,
   ImageIcon, Loader2, RefreshCw, CalendarDays, ChevronRight,
+  Trash2, Hourglass,
 } from "lucide-react";
 
 interface BookChapter { num: number; title: string }
+
+interface CachedBook {
+  book_hash: string;
+  book_id: string;
+  filename: string;
+  total_pages: number;
+  pages_done: number;
+  progress_percent: number;
+  chunks_stored: number;
+  status: string;
+  updated_at: string | null;
+}
 
 interface Book {
   book_id: string;
@@ -86,19 +99,43 @@ function BookCard({ book }: { book: Book }) {
 
 export default function LibraryPage() {
   const [books, setBooks]     = useState<Book[]>([]);
+  const [cached, setCached]   = useState<CachedBook[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState("");
+  const [clearing, setClearing] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
     setError("");
     try {
-      const { data } = await api.get("/questions/books");
-      setBooks(data.books || []);
+      const [booksRes, cacheRes] = await Promise.all([
+        api.get("/questions/books"),
+        api.get("/questions/books/cache").catch(() => ({ data: { cached: [] } })),
+      ]);
+      setBooks(booksRes.data.books || []);
+      setCached(cacheRes.data.cached || []);
     } catch {
       setError("Failed to load books. Make sure the backend is running.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const clearCache = async (book_hash: string) => {
+    if (!confirm(
+      "Clear this cached ingestion?\n\n" +
+      "• Deletes the resume checkpoint AND all partial chunks for this PDF.\n" +
+      "• The next upload of this same PDF will start from page 1.\n\n" +
+      "If you just want to hide this card, leave it — re-uploading this PDF later will pick up where it stopped."
+    )) return;
+    setClearing(book_hash);
+    try {
+      await api.delete(`/questions/books/${encodeURIComponent(book_hash)}/cache`);
+      setCached(prev => prev.filter(c => c.book_hash !== book_hash));
+    } catch {
+      alert("Failed to clear cache.");
+    } finally {
+      setClearing(null);
     }
   };
 
@@ -123,7 +160,7 @@ export default function LibraryPage() {
         </button>
       </header>
 
-      <main className="max-w-5xl mx-auto px-8 py-10">
+      <main className="max-w-5xl mx-auto px-8 py-10 space-y-8">
         {loading ? (
           <div className="flex items-center justify-center py-24 text-gray-400">
             <Loader2 size={24} className="animate-spin mr-3" /> Loading books…
@@ -132,20 +169,64 @@ export default function LibraryPage() {
           <div className="bg-red-50 border border-red-200 rounded-xl px-6 py-5 text-red-700 text-sm">
             {error}
           </div>
-        ) : books.length === 0 ? (
-          <div className="text-center py-24 space-y-3">
-            <BookOpen size={48} className="text-gray-300 mx-auto" />
-            <p className="text-gray-500 font-medium">No books in the library yet</p>
-            <p className="text-sm text-gray-400">
-              Use <strong>Add Book</strong> in the sidebar to upload a PDF textbook.
-            </p>
-          </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {books.map((book) => (
-              <BookCard key={book.book_id} book={book} />
-            ))}
-          </div>
+          <>
+            {/* Cached (in-progress) ingestions */}
+            {cached.length > 0 && (
+              <section className="space-y-3">
+                <h2 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                  <Hourglass size={14} className="text-amber-500" />
+                  Cached ingestions — re-upload the PDF to resume
+                </h2>
+                <div className="space-y-2">
+                  {cached.map((c) => (
+                    <div key={c.book_hash} className="bg-amber-50/50 border border-amber-200 rounded-xl p-4 flex items-center gap-4">
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-800 truncate">{c.filename || c.book_id}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {c.pages_done} / {c.total_pages} pages read · {c.chunks_stored} chunks stored
+                        </p>
+                        <div className="w-full bg-amber-100 rounded-full h-1.5 mt-2">
+                          <div
+                            className="bg-amber-500 h-1.5 rounded-full transition-all"
+                            style={{ width: `${Math.min(c.progress_percent, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => clearCache(c.book_hash)}
+                        disabled={clearing === c.book_hash}
+                        className="flex items-center gap-1.5 text-xs text-red-600 hover:text-red-800 border border-red-200 hover:bg-red-50 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors"
+                        title="Clear cache and start from page 1 next time"
+                      >
+                        {clearing === c.book_hash
+                          ? <Loader2 size={12} className="animate-spin" />
+                          : <Trash2 size={12} />}
+                        Clear cache
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* Books grid */}
+            {books.length === 0 ? (
+              <div className="text-center py-24 space-y-3">
+                <BookOpen size={48} className="text-gray-300 mx-auto" />
+                <p className="text-gray-500 font-medium">No books in the library yet</p>
+                <p className="text-sm text-gray-400">
+                  Use <strong>Add Book</strong> in the sidebar to upload a PDF textbook.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {books.map((book) => (
+                  <BookCard key={book.book_id} book={book} />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </main>
     </div>

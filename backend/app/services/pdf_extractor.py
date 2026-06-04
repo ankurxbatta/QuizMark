@@ -40,6 +40,7 @@ from app.services.pdf_service import (
     _split_into_sub_chunks,
     _FORMULA_RE,
     _EXAMPLE_RE,
+    _SECTION_RE,
 )
 
 # Font name fragments that indicate a math/symbol font.
@@ -276,9 +277,9 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
             m.x0 += 10; m.y0 += 10; m.x1 -= 10; m.y1 -= 10
             m.intersect(page.rect)
             # Filter out tiny icons and extreme aspect ratios (lines, borders)
-            if m.width > 80 and m.height > 80:
+            if m.width > 40 and m.height > 40:
                 aspect = m.width / m.height
-                if 0.15 < aspect < 6.0:
+                if 0.1 < aspect < 10.0:
                     page_figure_rects.append({"page_num": page.number + 1, "rect": list(m)})
 
         page_area = page.rect.width * page.rect.height
@@ -302,165 +303,238 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
     }
 
 
-# ── Main public API ────────────────────────────────────────────────────────────
+# ── Resumable accumulator ──────────────────────────────────────────────────────
 
-def extract_enhanced_chunks(
-    file_bytes: bytes,
-    max_pages: int = 700,
-    min_chunk_chars: int = 300,
-    max_chunk_chars: int = 3000,
-) -> list[EnhancedChunk]:
+class ChunkAccumulator:
     """
-    Parse a PDF into EnhancedChunk objects using pymupdf.
+    Serialisable state machine that turns a sequence of pages into EnhancedChunks.
 
-    Raises RuntimeError if pymupdf is not installed (caller falls back to
-    the pdfplumber-based parser in pdf_service.py).
+    Drives chapter/section detection, accumulates a rolling buffer, and flushes
+    EnhancedChunks at section boundaries or when the buffer exceeds max_chunk_chars.
+    The full internal state is JSON-serialisable via `serialize()`, so an ingest
+    can checkpoint between page windows and resume from a stored dict.
     """
-    if not _PYMUPDF_AVAILABLE:
-        raise RuntimeError("PyMuPDF (fitz) is not installed")
 
-    chunks: list[EnhancedChunk] = []
-
-    # ── State ──────────────────────────────────────────────────────────────────
-    current_chapter_num = 0
-    current_chapter_title = "Unknown"
-    current_section_title = "Introduction"
-    current_topic = "General"
-
-    buffer_lines: list[str] = []
-    buffer_image_texts: list[str] = []
-    buffer_table_texts: list[str] = []
-    buffer_math_spans: list[str] = []
-    buffer_has_math_font: bool = False
-    buffer_graph_pages: list[int] = []
-    buffer_figure_rects: list[dict] = []
-    buffer_math_rects: list[dict] = []
-    buffer_page_start = 1
-
-    ocr_active = _OCR_AVAILABLE
-
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages = doc.pages(0, min(max_pages, doc.page_count))
-
-    # Lazy import of section regex (defined in pdf_service)
-    import re
-    _SECTION_RE = re.compile(
-        r"^(\d{1,2}\.\d{1,2})\s+([A-Z][^\n]{5,80})$",
-        re.MULTILINE,
+    _STATE_KEYS = (
+        "current_chapter_num", "current_chapter_title", "current_section_title",
+        "current_topic",
+        "buffer_lines", "buffer_image_texts", "buffer_table_texts",
+        "buffer_math_spans", "buffer_has_math_font", "buffer_graph_pages",
+        "buffer_figure_rects", "buffer_math_rects", "buffer_page_start",
     )
 
-    def _flush(page_end: int):
-        nonlocal buffer_lines, buffer_image_texts, buffer_table_texts, buffer_math_spans, buffer_has_math_font, buffer_graph_pages, buffer_figure_rects, buffer_math_rects, buffer_page_start
+    def __init__(
+        self,
+        min_chunk_chars: int = 300,
+        max_chunk_chars: int = 3000,
+        state: dict | None = None,
+    ):
+        self.min_chunk_chars = min_chunk_chars
+        self.max_chunk_chars = max_chunk_chars
+        if state:
+            self._load_state(state)
+        else:
+            self.current_chapter_num = 0
+            self.current_chapter_title = "Unknown"
+            self.current_section_title = "Introduction"
+            self.current_topic = "General"
+            self.buffer_lines: list[str] = []
+            self.buffer_image_texts: list[str] = []
+            self.buffer_table_texts: list[str] = []
+            self.buffer_math_spans: list[str] = []
+            self.buffer_has_math_font: bool = False
+            self.buffer_graph_pages: list[int] = []
+            self.buffer_figure_rects: list[dict] = []
+            self.buffer_math_rects: list[dict] = []
+            self.buffer_page_start: int = 1
 
-        text = "\n".join(buffer_lines).strip()
-        if len(text) < min_chunk_chars or _is_skip_block(text):
-            buffer_lines = []
-            buffer_image_texts = []
-            buffer_table_texts = []
-            buffer_math_spans = []
-            buffer_has_math_font = False
-            buffer_graph_pages = []
-            buffer_figure_rects = []
-            buffer_math_rects = []
-            return
+    def _load_state(self, state: dict) -> None:
+        for k in self._STATE_KEYS:
+            if k in state:
+                setattr(self, k, state[k])
+        # Re-default anything missing (forward-compatible)
+        self.current_chapter_num = getattr(self, "current_chapter_num", 0)
+        self.current_chapter_title = getattr(self, "current_chapter_title", "Unknown")
+        self.current_section_title = getattr(self, "current_section_title", "Introduction")
+        self.current_topic = getattr(self, "current_topic", "General")
+        self.buffer_lines = list(getattr(self, "buffer_lines", []))
+        self.buffer_image_texts = list(getattr(self, "buffer_image_texts", []))
+        self.buffer_table_texts = list(getattr(self, "buffer_table_texts", []))
+        self.buffer_math_spans = list(getattr(self, "buffer_math_spans", []))
+        self.buffer_has_math_font = bool(getattr(self, "buffer_has_math_font", False))
+        self.buffer_graph_pages = list(getattr(self, "buffer_graph_pages", []))
+        self.buffer_figure_rects = list(getattr(self, "buffer_figure_rects", []))
+        self.buffer_math_rects = list(getattr(self, "buffer_math_rects", []))
+        self.buffer_page_start = int(getattr(self, "buffer_page_start", 1))
 
-        sub_chunks = _split_into_sub_chunks(text, max_chunk_chars)
-        math_text = " ".join(dict.fromkeys(buffer_math_spans))[:500]  # deduplicate + cap
+    def serialize(self) -> dict:
+        return {k: getattr(self, k) for k in self._STATE_KEYS}
 
-        for sub in sub_chunks:
-            if len(sub) < min_chunk_chars:
+    def _flush(self, page_end: int) -> list[EnhancedChunk]:
+        """Emit chunks for whatever is in the buffer; reset the buffer."""
+        out: list[EnhancedChunk] = []
+        text = "\n".join(self.buffer_lines).strip()
+        if len(text) < self.min_chunk_chars or _is_skip_block(text):
+            self._reset_buffer()
+            return out
+
+        math_text = " ".join(dict.fromkeys(self.buffer_math_spans))[:500]
+        for sub in _split_into_sub_chunks(text, self.max_chunk_chars):
+            if len(sub) < self.min_chunk_chars:
                 continue
-            chunks.append(EnhancedChunk(
-                chapter_num=current_chapter_num,
-                chapter_title=current_chapter_title,
-                section_title=current_section_title,
-                topic_tag=current_topic,
+            out.append(EnhancedChunk(
+                chapter_num=self.current_chapter_num,
+                chapter_title=self.current_chapter_title,
+                section_title=self.current_section_title,
+                topic_tag=self.current_topic,
                 text=sub.strip(),
-                page_start=buffer_page_start,
+                page_start=self.buffer_page_start,
                 page_end=page_end,
-                has_formula=bool(_FORMULA_RE.search(sub)) or bool(buffer_math_spans),
+                has_formula=bool(_FORMULA_RE.search(sub)) or bool(self.buffer_math_spans),
                 has_example=bool(_EXAMPLE_RE.search(sub)),
                 teaching_density=_teaching_density(sub),
                 key_terms=_extract_key_terms(sub),
-                # Enhanced fields
-                image_texts=list(buffer_image_texts),
-                table_texts=list(buffer_table_texts),
+                image_texts=list(self.buffer_image_texts),
+                table_texts=list(self.buffer_table_texts),
                 math_text=math_text,
-                has_images=bool(buffer_image_texts),
-                has_tables=bool(buffer_table_texts),
-                has_math_font=buffer_has_math_font,
-                graph_page_nums=list(buffer_graph_pages),
-                figure_rects=list(buffer_figure_rects),
-                math_rects=list(buffer_math_rects),
+                has_images=bool(self.buffer_image_texts),
+                has_tables=bool(self.buffer_table_texts),
+                has_math_font=self.buffer_has_math_font,
+                graph_page_nums=list(self.buffer_graph_pages),
+                figure_rects=list(self.buffer_figure_rects),
+                math_rects=list(self.buffer_math_rects),
             ))
+        self._reset_buffer()
+        return out
 
-        buffer_lines = []
-        buffer_image_texts = []
-        buffer_table_texts = []
-        buffer_math_spans = []
-        buffer_has_math_font = False
-        buffer_graph_pages = []
-        buffer_figure_rects = []
-        buffer_math_rects = []
+    def _reset_buffer(self) -> None:
+        self.buffer_lines = []
+        self.buffer_image_texts = []
+        self.buffer_table_texts = []
+        self.buffer_math_spans = []
+        self.buffer_has_math_font = False
+        self.buffer_graph_pages = []
+        self.buffer_figure_rects = []
+        self.buffer_math_rects = []
 
-    for page in pages:
+    def feed_page(self, page, doc, ocr_active: bool) -> tuple[list[EnhancedChunk], bool]:
+        """
+        Process a single fitz page. Returns (chunks_flushed_on_this_page, ocr_active_after).
+        `ocr_active_after` is False if this page hit a Tesseract-not-found condition.
+        """
         page_num = page.number + 1  # 1-based
+        out: list[EnhancedChunk] = []
 
         try:
             page_data = _extract_page_data(page, doc, ocr_active)
         except Exception as exc:
             logger.warning(f"Page {page_num} extraction failed: {exc}")
-            page.clean_contents()
-            continue
+            try:
+                page.clean_contents()
+            except Exception:
+                pass
+            return out, ocr_active
 
         if page_data.get("_ocr_disabled"):
             ocr_active = False
 
         raw_text = page_data["text"]
         if not raw_text.strip():
-            page.clean_contents()
-            continue
+            try:
+                page.clean_contents()
+            except Exception:
+                pass
+            return out, ocr_active
 
-        # Detect chapter start (skip TOC pages)
         ch_match = None if _is_toc_like_page(raw_text) else _find_chapter_match(raw_text)
         if ch_match:
-            _flush(page_num - 1)
-            buffer_page_start = page_num
-            current_chapter_num, current_chapter_title = ch_match
-            current_topic = _resolve_topic(current_chapter_title)
-            current_section_title = "Introduction"
+            out.extend(self._flush(page_num - 1))
+            self.buffer_page_start = page_num
+            self.current_chapter_num, self.current_chapter_title = ch_match
+            self.current_topic = _resolve_topic(self.current_chapter_title)
+            self.current_section_title = "Introduction"
 
-        # Detect section changes
-        sec_matches = list(_SECTION_RE.finditer(raw_text))
-        if sec_matches:
-            for sec_m in sec_matches:
-                _flush(page_num - 1)
-                buffer_page_start = page_num
-                current_section_title = sec_m.group(2).strip()
+        for sec_m in _SECTION_RE.finditer(raw_text):
+            out.extend(self._flush(page_num - 1))
+            self.buffer_page_start = page_num
+            self.current_section_title = sec_m.group(2).strip()
 
-        # Accumulate
-        buffer_lines.extend(raw_text.splitlines())
-        buffer_image_texts.extend(page_data["image_texts"])
-        buffer_table_texts.extend(page_data["table_texts"])
-        buffer_math_spans.extend(page_data["math_spans"])
-        buffer_has_math_font = buffer_has_math_font or page_data.get("has_math_font", False)
+        self.buffer_lines.extend(raw_text.splitlines())
+        self.buffer_image_texts.extend(page_data["image_texts"])
+        self.buffer_table_texts.extend(page_data["table_texts"])
+        self.buffer_math_spans.extend(page_data["math_spans"])
+        self.buffer_has_math_font = self.buffer_has_math_font or page_data.get("has_math_font", False)
         if page_data.get("has_vector_graphics"):
-            buffer_graph_pages.append(page_num)
+            self.buffer_graph_pages.append(page_num)
         if page_data.get("figure_rects"):
-            buffer_figure_rects.extend(page_data["figure_rects"])
+            self.buffer_figure_rects.extend(page_data["figure_rects"])
         if page_data.get("math_rects"):
-            buffer_math_rects.extend(page_data["math_rects"])
+            self.buffer_math_rects.extend(page_data["math_rects"])
 
-        # Flush if buffer is large
-        total_chars = sum(len(l) for l in buffer_lines)
-        if total_chars >= max_chunk_chars:
-            _flush(page_num)
-            buffer_page_start = page_num + 1
+        if sum(len(l) for l in self.buffer_lines) >= self.max_chunk_chars:
+            out.extend(self._flush(page_num))
+            self.buffer_page_start = page_num + 1
 
-        page.clean_contents()
+        try:
+            page.clean_contents()
+        except Exception:
+            pass
+        return out, ocr_active
 
-    # Final flush
-    _flush(max_pages)
+    def finalize(self, last_page: int) -> list[EnhancedChunk]:
+        """Final flush — call once after the last page has been fed."""
+        return self._flush(last_page)
+
+
+def process_page_window(
+    doc,
+    start_page: int,
+    end_page: int,
+    accumulator: "ChunkAccumulator",
+    ocr_active: bool,
+) -> tuple[list[EnhancedChunk], bool]:
+    """
+    Feed pages [start_page, end_page) (0-based, exclusive end) into the accumulator.
+    Returns (flushed_chunks_in_this_window, ocr_active_after).
+    """
+    out: list[EnhancedChunk] = []
+    end_page = min(end_page, doc.page_count)
+    for page in doc.pages(start_page, end_page):
+        page_chunks, ocr_active = accumulator.feed_page(page, doc, ocr_active)
+        out.extend(page_chunks)
+    return out, ocr_active
+
+
+# ── Main public API ────────────────────────────────────────────────────────────
+
+def extract_enhanced_chunks(
+    file_bytes: bytes,
+    max_pages: int | None = None,
+    concurrency: int = 1,
+    min_chunk_chars: int = 300,
+    max_chunk_chars: int = 3000,
+) -> list[EnhancedChunk]:
+    """
+    Parse a PDF into EnhancedChunk objects using pymupdf (one-shot, synchronous).
+
+    For resumable, windowed processing, build a ChunkAccumulator yourself and
+    drive it with process_page_window() — that's what the Celery ingest task does.
+    """
+    if not _PYMUPDF_AVAILABLE:
+        raise RuntimeError("PyMuPDF (fitz) is not installed")
+
+    accumulator = ChunkAccumulator(
+        min_chunk_chars=min_chunk_chars,
+        max_chunk_chars=max_chunk_chars,
+    )
+    chunks: list[EnhancedChunk] = []
+    ocr_active = _OCR_AVAILABLE
+
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    last_page = min(max_pages or doc.page_count, doc.page_count)
+    window_chunks, _ = process_page_window(doc, 0, last_page, accumulator, ocr_active)
+    chunks.extend(window_chunks)
+    chunks.extend(accumulator.finalize(last_page))
     doc.close()
 
     logger.info(
@@ -470,13 +544,15 @@ def extract_enhanced_chunks(
         f"{sum(1 for c in chunks if c.has_math_font)} with math fonts, "
         f"{sum(1 for c in chunks if c.graph_page_nums)} with vector graphics"
     )
+
     return chunks
 
 
 async def describe_graph_chunks(
     chunks: list,
     pdf_bytes: bytes,
-    concurrency: int = 1,
+    concurrency: int = 3,
+    job_id: str | None = None,
 ) -> None:
     """
     For each chunk that has figure_rects, render those specific rects and call
@@ -506,9 +582,8 @@ async def describe_graph_chunks(
     try:
         if getattr(_settings, "MONGODB_ENABLED", False):
             from app.services.mongo_vector_store import _get_collection as _get_mongo
-            _cache_collection = await _get_mongo()
-            # Use a sibling collection for descriptions
-            _cache_collection = _cache_collection.database["page_description_cache"]
+            _cache_db = (await _get_mongo("page_description_cache")).database
+            _cache_collection = _cache_db["page_description_cache"]
     except Exception:
         pass  # cache unavailable — just call API every time
 
@@ -574,10 +649,17 @@ async def describe_graph_chunks(
 
     logger.info(f"describe_graph_chunks: sending {len(chunk_fig_map)} figure snips to Gemini Vision")
 
-    descriptions = await _asyncio.gather(
-        *[_describe_fig(fig, ctx) for (_, fig, ctx) in chunk_fig_map],
-        return_exceptions=True,
-    )
+    descriptions = []
+    total = len(chunk_fig_map)
+    for i in range(0, total, concurrency):
+        batch = chunk_fig_map[i:i+concurrency]
+        batch_results = await _asyncio.gather(
+            *[_describe_fig(fig, ctx) for (_, fig, ctx) in batch],
+            return_exceptions=True,
+        )
+        descriptions.extend(batch_results)
+        if (i // concurrency) % 5 == 0:
+            logger.info(f"describe_graph_chunks: {min(i + len(batch), total)}/{total} figures described")
 
     for (chunk_idx, _, _), desc in zip(chunk_fig_map, descriptions):
         if isinstance(desc, str) and desc:
@@ -593,7 +675,8 @@ async def describe_graph_chunks(
 async def transcribe_math_chunks(
     chunks: list,
     pdf_bytes: bytes,
-    concurrency: int = 1,
+    concurrency: int = 3,
+    job_id: str | None = None,
 ) -> None:
     """
     For each chunk that has math_rects, render those specific rects and call
@@ -652,10 +735,17 @@ async def transcribe_math_chunks(
 
     logger.info(f"transcribe_math_chunks: sending {len(chunk_math_map)} math snips to Gemini Vision")
 
-    results = await _asyncio.gather(
-        *[_transcribe_math(m) for (_, m) in chunk_math_map],
-        return_exceptions=True,
-    )
+    results = []
+    total = len(chunk_math_map)
+    for i in range(0, total, concurrency):
+        batch = chunk_math_map[i:i+concurrency]
+        batch_results = await _asyncio.gather(
+            *[_transcribe_math(m) for (_, m) in batch],
+            return_exceptions=True,
+        )
+        results.extend(batch_results)
+        if (i // concurrency) % 5 == 0:
+            logger.info(f"transcribe_math_chunks: {min(i + len(batch), total)}/{total} formulas transcribed")
 
     for (chunk_idx, _), latex in zip(chunk_math_map, results):
         if isinstance(latex, str) and latex:

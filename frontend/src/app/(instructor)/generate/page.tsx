@@ -10,12 +10,18 @@ import {
 interface JobStatus {
   job_id: string;
   filename?: string;
+  book_hash?: string;
   status: "queued" | "processing" | "done" | "failed";
   total_chapters: number;
   chapters_done: number;
   total_pages: number;
+  pages_done?: number;
   current_chapter_title: string | null;
   progress_message: string | null;
+  progress_percent?: number;
+  resumed?: boolean;
+  resumed_from_page?: number | null;
+  already_ingested?: boolean;
   error_message?: string | null;
   error?: string | null;
 }
@@ -84,10 +90,14 @@ export default function GeneratePage() {
             // Update local storage
             setJobs(prev => {
               const activeIds = prev.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
-              if (activeIds.length > 0) {
-                localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
+              if (activeIds.length > 0) localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
+              else localStorage.removeItem("active_ingest_jobs");
+              
+              const allIds = prev.map(x => x.job_id);
+              if (allIds.length > 0) {
+                localStorage.setItem("known_ingest_jobs", JSON.stringify(allIds));
               } else {
-                localStorage.removeItem("active_ingest_jobs");
+                localStorage.removeItem("known_ingest_jobs");
               }
               return prev;
             });
@@ -109,9 +119,10 @@ export default function GeneratePage() {
     };
   }, [jobs.length]); // Re-run when job array length changes (new job added)
 
-  // Recover active jobs on page load
+  // Recover known jobs on page load
   useEffect(() => {
-    const saved = localStorage.getItem("active_ingest_jobs");
+    // Try to load from known_ingest_jobs first (our new key), fallback to active_ingest_jobs for legacy
+    const saved = localStorage.getItem("known_ingest_jobs") || localStorage.getItem("active_ingest_jobs");
     if (saved) {
       try {
         const ids = JSON.parse(saved);
@@ -149,7 +160,10 @@ export default function GeneratePage() {
       setJobs(prev => {
         const newJobs = [data, ...prev];
         const activeIds = newJobs.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
-        localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
+        if (activeIds.length > 0) localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
+        
+        const allIds = newJobs.map(x => x.job_id);
+        localStorage.setItem("known_ingest_jobs", JSON.stringify(allIds));
         return newJobs;
       });
       reset();
@@ -162,9 +176,23 @@ export default function GeneratePage() {
 
   const getJobPct = (job: JobStatus) => {
     if (job.status === "done") return 100;
+    if (job.total_pages > 0 && (job.pages_done ?? 0) > 0) {
+      return Math.min(((job.pages_done ?? 0) / job.total_pages) * 100, 99);
+    }
+    if (job.progress_percent !== undefined && job.progress_percent > 0) return job.progress_percent;
     if (job.total_chapters > 0) return Math.min((job.chapters_done / job.total_chapters) * 100, 90);
-    if (job.total_pages > 0) return 15;
+    if (job.total_pages > 0) return 5;
     return 5;
+  };
+
+  const getJobLabel = (job: JobStatus) => {
+    if (job.total_pages > 0) {
+      return `Read ${job.pages_done ?? 0} / ${job.total_pages} pages`;
+    }
+    if (job.total_chapters > 0) {
+      return `Chapters stored: ${job.chapters_done} / ${job.total_chapters}`;
+    }
+    return "Parsing PDF…";
   };
 
   return (
@@ -293,27 +321,57 @@ export default function GeneratePage() {
                       <p className="text-xs text-gray-400">{job.filename || job.job_id}</p>
                     </div>
                   </div>
-                  {job.status === "done" && (
+                  <div className="flex items-center gap-3">
+                    {job.status === "done" && (
+                      <button
+                        onClick={() => router.push("/library")}
+                        className="text-sm font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-4 py-2 rounded-lg"
+                      >
+                        View Library <ArrowRight size={16} className="inline ml-1" />
+                      </button>
+                    )}
                     <button
-                      onClick={() => router.push("/library")}
-                      className="text-indigo-600 hover:text-indigo-700 text-sm font-medium flex items-center gap-1"
+                      onClick={() => {
+                        setJobs(prev => {
+                          const newJobs = prev.filter(j => j.job_id !== job.job_id);
+                          
+                          const activeIds = newJobs.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
+                          if (activeIds.length > 0) localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
+                          else localStorage.removeItem("active_ingest_jobs");
+                          
+                          const allIds = newJobs.map(x => x.job_id);
+                          if (allIds.length > 0) localStorage.setItem("known_ingest_jobs", JSON.stringify(allIds));
+                          else localStorage.removeItem("known_ingest_jobs");
+                          
+                          return newJobs;
+                        });
+                      }}
+                      className="text-gray-400 hover:text-red-500 font-bold px-2 py-1"
+                      title="Dismiss"
                     >
-                      Library <ArrowRight size={14} />
+                      ×
                     </button>
-                  )}
+                  </div>
                 </div>
+
+                {/* Already-ingested banner */}
+                {job.already_ingested && (
+                  <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
+                    This book is already in your library. Clear its cache to re-ingest from page 1.
+                  </p>
+                )}
+
+                {/* Resumed banner */}
+                {job.resumed && job.resumed_from_page != null && job.resumed_from_page > 0 && (
+                  <p className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-2 rounded-lg">
+                    Resuming from page {job.resumed_from_page + 1}.
+                  </p>
+                )}
 
                 {/* Body */}
                 {(job.status === "processing" || job.status === "queued") && (
                   <>
-                    <ProgressBar
-                      pct={getJobPct(job)}
-                      label={
-                        job.total_chapters > 0
-                          ? `Chapters stored: ${job.chapters_done} / ${job.total_chapters}`
-                          : "Parsing PDF…"
-                      }
-                    />
+                    <ProgressBar pct={getJobPct(job)} label={getJobLabel(job)} />
                     {job.progress_message && (
                       <p className="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
                         {job.progress_message}
@@ -329,7 +387,12 @@ export default function GeneratePage() {
 
                 {job.status === "done" && (
                   <p className="text-sm text-green-600 bg-green-50 px-3 py-2 rounded-lg inline-block mt-2">
-                    {job.total_chapters} chapters stored · {job.progress_message?.match(/\d+ chunks/)?.[0] || "chunks stored"}
+                    {job.total_pages > 0
+                      ? `${job.total_pages} pages stored`
+                      : `${job.total_chapters} chapters stored`}
+                    {job.progress_message?.match(/\d+ chunks/) && (
+                      <> · {job.progress_message.match(/\d+ chunks/)?.[0]}</>
+                    )}
                   </p>
                 )}
 

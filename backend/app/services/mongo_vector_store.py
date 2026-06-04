@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 _mongo_client: Any = None
 _mongo_db: Any = None
 
-CHUNKS_COLLECTION     = "pdf_chunks"
-QUESTIONS_COLLECTION  = "questions"
-CHUNKS_INDEX_NAME     = "pdf_chunks_vector_index"
-QUESTIONS_INDEX_NAME  = "questions_vector_index"
-EMBEDDING_DIMENSIONS  = 768
+CHUNKS_COLLECTION       = "pdf_chunks"
+QUESTIONS_COLLECTION    = "questions"
+CHECKPOINTS_COLLECTION  = "ingest_checkpoints"
+CHUNKS_INDEX_NAME       = "pdf_chunks_vector_index"
+QUESTIONS_INDEX_NAME    = "questions_vector_index"
+EMBEDDING_DIMENSIONS    = 768
 
 
 # ── Connection ─────────────────────────────────────────────────────────────────
@@ -91,36 +92,68 @@ async def ensure_vector_index() -> None:
 
 # ── PDF chunk store ────────────────────────────────────────────────────────────
 
-async def store_chunk(chunk: Any, embedding: list[float], book_id: str) -> str:
+def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None) -> dict:
+    return {
+        "book_id": book_id,
+        "book_hash": book_hash,
+        "chapter_num": chunk.chapter_num,
+        "chapter_title": chunk.chapter_title,
+        "section_title": chunk.section_title,
+        "topic_tag": chunk.topic_tag,
+        "text": chunk.text,
+        "image_texts": getattr(chunk, "image_texts", []),
+        "table_texts": getattr(chunk, "table_texts", []),
+        "math_text": getattr(chunk, "math_text", ""),
+        "page_start": chunk.page_start,
+        "page_end": chunk.page_end,
+        "has_images": getattr(chunk, "has_images", False),
+        "has_tables": getattr(chunk, "has_tables", False),
+        "has_math": getattr(chunk, "has_math_font", chunk.has_formula),
+        "has_formula": chunk.has_formula,
+        "has_example": chunk.has_example,
+        "teaching_density": chunk.teaching_density,
+        "key_terms": chunk.key_terms,
+        "embedding": embedding,
+        "created_at": datetime.now(timezone.utc),
+    }
+
+
+async def store_chunk(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None = None) -> str:
     try:
         col = await _get_collection(CHUNKS_COLLECTION)
-        doc = {
-            "book_id": book_id,
-            "chapter_num": chunk.chapter_num,
-            "chapter_title": chunk.chapter_title,
-            "section_title": chunk.section_title,
-            "topic_tag": chunk.topic_tag,
-            "text": chunk.text,
-            "image_texts": getattr(chunk, "image_texts", []),
-            "table_texts": getattr(chunk, "table_texts", []),
-            "math_text": getattr(chunk, "math_text", ""),
-            "page_start": chunk.page_start,
-            "page_end": chunk.page_end,
-            "has_images": getattr(chunk, "has_images", False),
-            "has_tables": getattr(chunk, "has_tables", False),
-            "has_math": getattr(chunk, "has_math_font", chunk.has_formula),
-            "has_formula": chunk.has_formula,
-            "has_example": chunk.has_example,
-            "teaching_density": chunk.teaching_density,
-            "key_terms": chunk.key_terms,
-            "embedding": embedding,
-            "created_at": datetime.now(timezone.utc),
-        }
-        result = await col.insert_one(doc)
+        result = await col.insert_one(_chunk_to_doc(chunk, embedding, book_id, book_hash))
         return str(result.inserted_id)
     except Exception as exc:
         logger.warning(f"store_chunk failed (non-fatal): {exc}")
         return ""
+
+
+async def store_chunks_bulk(
+    chunks: list,
+    embeddings: list[list[float]],
+    book_id: str,
+    book_hash: str | None = None,
+) -> int:
+    """
+    Bulk-insert a window of chunks. Skips chunks with an empty embedding (so a
+    single embed failure doesn't poison the whole window). Returns inserted count.
+    """
+    if not chunks:
+        return 0
+    docs = [
+        _chunk_to_doc(chunks[i], embeddings[i], book_id, book_hash)
+        for i in range(min(len(chunks), len(embeddings)))
+        if embeddings[i]
+    ]
+    if not docs:
+        return 0
+    try:
+        col = await _get_collection(CHUNKS_COLLECTION)
+        result = await col.insert_many(docs, ordered=False)
+        return len(result.inserted_ids)
+    except Exception as exc:
+        logger.warning(f"store_chunks_bulk failed (non-fatal): {exc}")
+        return 0
 
 
 async def vector_search(
@@ -153,10 +186,18 @@ async def vector_search(
         return []
 
 
-async def delete_book_chunks(book_id: str) -> int:
+async def delete_book_chunks(book_id: str | None = None, book_hash: str | None = None) -> int:
+    """Delete chunks by book_id, book_hash, or both. Returns deleted_count."""
+    if not book_id and not book_hash:
+        return 0
+    filt: dict = {}
+    if book_id:
+        filt["book_id"] = book_id
+    if book_hash:
+        filt["book_hash"] = book_hash
     try:
         col = await _get_collection(CHUNKS_COLLECTION)
-        result = await col.delete_many({"book_id": book_id})
+        result = await col.delete_many(filt)
         return result.deleted_count
     except Exception as exc:
         logger.warning(f"delete_book_chunks failed (non-fatal): {exc}")
@@ -190,6 +231,58 @@ async def get_chunk_stats(book_id: str | None = None) -> dict:
     except Exception as exc:
         logger.warning(f"get_chunk_stats failed: {exc}")
         return {}
+
+
+# ── Ingest checkpoints (resumable page-by-page ingestion) ──────────────────────
+
+async def get_checkpoint(book_hash: str) -> dict | None:
+    """Return the checkpoint document for a book_hash, or None."""
+    try:
+        col = await _get_collection(CHECKPOINTS_COLLECTION)
+        return await col.find_one({"_id": book_hash})
+    except Exception as exc:
+        logger.warning(f"get_checkpoint failed: {exc}")
+        return None
+
+
+async def save_checkpoint(book_hash: str, fields: dict) -> None:
+    """Upsert a checkpoint. `fields` is merged via $set; updated_at is stamped here."""
+    try:
+        col = await _get_collection(CHECKPOINTS_COLLECTION)
+        payload = dict(fields)
+        payload["updated_at"] = datetime.now(timezone.utc)
+        payload.setdefault("created_at", payload["updated_at"])
+        await col.update_one(
+            {"_id": book_hash},
+            {"$set": payload, "$setOnInsert": {"_id": book_hash}},
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning(f"save_checkpoint failed: {exc}")
+
+
+async def delete_checkpoint(book_hash: str) -> int:
+    try:
+        col = await _get_collection(CHECKPOINTS_COLLECTION)
+        result = await col.delete_one({"_id": book_hash})
+        return result.deleted_count
+    except Exception as exc:
+        logger.warning(f"delete_checkpoint failed: {exc}")
+        return 0
+
+
+async def list_incomplete_checkpoints(limit: int = 100) -> list[dict]:
+    """List in-progress (non-complete) checkpoints, newest-updated first."""
+    try:
+        col = await _get_collection(CHECKPOINTS_COLLECTION)
+        cursor = col.find(
+            {"status": {"$ne": "complete"}},
+            projection={"state": 0},  # state is heavy; omit from list view
+        ).sort("updated_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
+    except Exception as exc:
+        logger.warning(f"list_incomplete_checkpoints failed: {exc}")
+        return []
 
 
 # ── Question vector search ─────────────────────────────────────────────────────

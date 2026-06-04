@@ -88,6 +88,14 @@ class Settings(BaseSettings):
     ENABLE_VISION_EXTRACTION: bool = True  # Enable Gemini Vision for figures and math
     EMBEDDING_BATCH_SIZE: int = 100         # Texts per batch embed API call
 
+    # ── Resumable page-by-page ingestion ──────────────────────────────────────
+    INGEST_PAGE_WINDOW: int = 6             # Pages processed + checkpointed per window
+    INGEST_TIME_BUDGET_SECONDS: int = 1500  # Re-queue task after this long (< Celery soft limit)
+
+    # ── Question generation throughput ────────────────────────────────────────
+    GEN_CHAPTER_CONCURRENCY: int = 3        # Chapters generated in parallel per job
+    DEDUP_SIMILARITY_THRESHOLD: float = 0.92  # Cosine ≥ this ⇒ near-duplicate question dropped
+
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50
     BACKUP_RETENTION_DAYS: int = 30

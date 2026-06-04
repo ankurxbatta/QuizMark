@@ -34,6 +34,7 @@ from typing import Optional
 from app.services.question_generator import (
     DbChunk,
     deep_retrieve_for_generation,
+    extract_chapter_concepts,
     generate_questions_from_chunks,
     generate_targeted_bloom_questions,
     _validate_questions,
@@ -163,12 +164,28 @@ async def orchestrate_question_bank(
     existing_questions = list(existing_questions or [])
     print(f"[ORCH] Starting 3-round orchestration for '{chapter_topic}' | target={count}")
 
+    # ── Round 0: "Read the chapter carefully" → extract key concepts ──────────
+    seed_raw = await deep_retrieve_for_generation(
+        topic=chapter_topic, book_id=book_id, k=6,
+    )
+    seed_chunks = [DbChunk(doc) for doc in seed_raw]
+    chapter_concepts: list[str] = await extract_chapter_concepts(
+        chapter_topic, seed_chunks, n=8,
+    )
+    if chapter_concepts:
+        print(f"[ORCH] Round 0 — concepts: {chapter_concepts}")
+
     # ── Round 1: Broad DeepSearch retrieval + initial generation ──────────────
     r1_target = max(int(count * 0.75), count)  # slight overgenerate to allow trimming
     print(f"[ORCH] Round 1 — broad retrieval, target={r1_target}")
 
+    # Concept-augmented topic gives retrieval extra signal
+    enriched_topic = chapter_topic
+    if chapter_concepts:
+        enriched_topic = f"{chapter_topic} | concepts: {', '.join(chapter_concepts)}"
+
     raw_chunks_r1 = await deep_retrieve_for_generation(
-        topic=chapter_topic,
+        topic=enriched_topic,
         book_id=book_id,
         k=max(r1_target * 2, 12),
     )
@@ -225,6 +242,31 @@ async def orchestrate_question_bank(
         seen_texts.extend(q["question_text"] for q in gap_questions)
 
     print(f"[ORCH] After Round 2 — {len(questions)} total questions")
+
+    # ── Round 2b: Concept coverage gap-fill ───────────────────────────────────
+    if chapter_concepts:
+        joined_qs = " || ".join(q.get("question_text", "").lower() for q in questions)
+        uncovered = [c for c in chapter_concepts if c.lower() not in joined_qs]
+        if uncovered:
+            print(f"[ORCH] Round 2b — {len(uncovered)} uncovered concepts: {uncovered}")
+            for concept in uncovered[:5]:  # cap so we don't explode the run
+                focused = f"{concept} {chapter_topic}"
+                raw_cc = await deep_retrieve_for_generation(
+                    topic=focused, book_id=book_id, k=6,
+                )
+                cc_chunks = [DbChunk(doc) for doc in raw_cc]
+                if not cc_chunks:
+                    continue
+                cc_qs = await generate_targeted_bloom_questions(
+                    chunks=cc_chunks,
+                    question_type=question_type,
+                    count=1,
+                    bloom_level="L3",  # default — apply/analyse most uncovered concepts
+                    existing_questions=seen_texts,
+                )
+                if cc_qs:
+                    questions.extend(cc_qs)
+                    seen_texts.extend(q["question_text"] for q in cc_qs)
 
     # ── Round 3: Dedup + balance + top-up if still short ─────────────────────
     questions = _dedup_by_prefix(questions)

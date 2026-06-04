@@ -104,6 +104,10 @@ async def ensure_mongo_indexes():
         await db["submissions"].create_index("is_marked")
         await db["audit_logs"].create_index("timestamp")
         await db["ingest_jobs"].create_index("created_at")
+        await db["pdf_chunks"].create_index("book_hash")
+        await db["pdf_chunks"].create_index("book_id")
+        await db["ingest_checkpoints"].create_index("updated_at")
+        await db["ingest_checkpoints"].create_index("status")
         print("[STARTUP] MongoDB indexes ready.")
     except Exception as exc:
         print(f"[STARTUP] MongoDB index setup failed (non-fatal): {exc}")

@@ -89,6 +89,53 @@ async def _generate_retrieval_queries(topic: str, n: int = 4) -> list[str]:
     return [topic]
 
 
+_CONCEPT_EXTRACTION_PROMPT = """\
+You are reading a chapter of a statistics textbook to plan exam coverage.
+
+Chapter topic: {topic}
+
+Source excerpts:
+{excerpts}
+
+Identify the chapter's KEY LEARNING CONCEPTS that an exam should cover. Focus on:
+  - Named definitions, theorems, and formulas
+  - Conditions / assumptions for applying a method
+  - Procedures or worked-example patterns
+  - Common pitfalls or comparisons between related ideas
+
+Output ONLY a JSON array of short concept labels (3–8 words each), max {n}. Example:
+["finite population correction factor", "conditions for normal approximation", "interpreting p-values"]
+"""
+
+
+async def extract_chapter_concepts(
+    topic: str,
+    chunks: list,
+    n: int = 8,
+) -> list[str]:
+    """
+    'Read the chapter carefully' pass: extract the key learning concepts from a
+    set of textbook chunks so downstream retrieval / gap-fill can target them.
+    """
+    if not chunks:
+        return []
+    excerpts = "\n\n".join(
+        c.to_prompt_block()[:1200] for c in chunks[:6]
+    )
+    prompt = _CONCEPT_EXTRACTION_PROMPT.format(topic=topic, excerpts=excerpts, n=n)
+    try:
+        raw = await generation_service.generate(prompt)
+        raw = re.sub(r"```(?:json)?", "", raw).strip()
+        match = re.search(r"\[.*?\]", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group())
+            concepts = [str(c).strip() for c in parsed if c and str(c).strip()]
+            return concepts[:n]
+    except Exception:
+        pass
+    return []
+
+
 async def deep_retrieve_for_generation(
     topic: str,
     book_id: Optional[str] = None,

@@ -30,6 +30,9 @@ interface Job {
   status: "queued" | "processing" | "done" | "failed";
   total_chapters: number;
   chapters_done: number;
+  total_pages?: number;
+  pages_done?: number;
+  progress_percent?: number;
   current_chapter_title: string | null;
   questions_created: number;
   progress_message: string | null;
@@ -82,9 +85,21 @@ function Stat({ icon: Icon, value, label, colour }: {
 }
 
 function JobCard({ job, onDismiss }: { job: Job; onDismiss: (id: string) => void }) {
-  const pct = job.status === "done" ? 100
-    : job.total_chapters > 0 ? Math.min((job.chapters_done / job.total_chapters) * 100, 95)
-    : 5;
+  const pct =
+    job.status === "done"
+      ? 100
+      : (job.total_pages && job.total_pages > 0 && (job.pages_done ?? 0) > 0)
+        ? Math.min(((job.pages_done ?? 0) / job.total_pages) * 100, 99)
+        : (job.progress_percent && job.progress_percent > 0)
+          ? job.progress_percent
+          : (job.total_chapters > 0
+              ? Math.min((job.chapters_done / job.total_chapters) * 100, 95)
+              : 5);
+  const progressLabel = (job.total_pages && job.total_pages > 0)
+    ? `Read ${job.pages_done ?? 0} / ${job.total_pages} pages`
+    : (job.total_chapters > 0
+        ? `Chapters: ${job.chapters_done} / ${job.total_chapters}`
+        : "Starting…");
 
   return (
     <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
@@ -120,12 +135,7 @@ function JobCard({ job, onDismiss }: { job: Job; onDismiss: (id: string) => void
 
       {(job.status === "queued" || job.status === "processing") && (
         <>
-          <ProgressBar
-            pct={pct}
-            label={job.total_chapters > 0
-              ? `Chapters: ${job.chapters_done} / ${job.total_chapters}`
-              : "Starting…"}
-          />
+          <ProgressBar pct={pct} label={progressLabel} />
           {job.progress_message && (
             <p className="text-xs text-gray-500 truncate">{job.progress_message}</p>
           )}
