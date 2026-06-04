@@ -91,8 +91,7 @@ async def _run_deepsearch(
     chunks = await deep_retrieve_for_generation(
         topic=chapter_topic,
         book_id=book_id,
-        top_k=top_k,
-        bloom_focus=bloom_level,
+        k=top_k,
     )
 
     # Serialise to plain dicts (Celery result backend stores JSON)

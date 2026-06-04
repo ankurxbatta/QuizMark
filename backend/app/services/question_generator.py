@@ -540,46 +540,6 @@ def _select_chunks(
 #  Core generation logic
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _slm_extract_concepts(chunk: TextChunk, count: int) -> list[str]:
-    """Stage A: use online LLM to extract concept skeletons from one chunk."""
-    prompt = _SLM_CONCEPT_PROMPT.format(
-        chunk_text=chunk.text[:2500],
-        count=count,
-    )
-    try:
-        raw = await generation_service.generate(prompt)
-        lines = []
-        for line in raw.strip().splitlines():
-            line = line.strip()
-            if "|" in line:
-                parts = line.split("|", 1)
-                if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                    lines.append(f"- {parts[0].strip()} | {parts[1].strip()}")
-        return lines
-    except Exception:
-        return []
-
-
-async def _llm_enrich_chunk(
-    chunk: TextChunk,
-    skeletons: list[str],
-    question_type: str,
-) -> list[dict]:
-    """Stage B: use online LLM to build full questions from skeletons + chunk context."""
-    if not skeletons:
-        return []
-
-    prompt = _LLM_ENRICH_PROMPT.format(
-        chunk_text=chunk.to_prompt_block(),
-        skeletons="\n".join(skeletons),
-        qtype=question_type,
-    )
-    try:
-        raw = await generation_service.generate(prompt)
-        return _parse_json_array(raw)
-    except Exception:
-        return []
-
 
 _DIFFICULTY_INSTRUCTION = {
     "easy":   "DIFFICULTY REQUIREMENT: ALL questions must be EASY (Bloom's L1–L2) — recall of a single definition, term, or fact directly stated in the source. No calculation or multi-step reasoning.",

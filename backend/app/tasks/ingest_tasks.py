@@ -621,7 +621,7 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         logger.info("Vision extraction disabled. Skipping chart descriptions.")
 
     # ── Step 3: Embed chunks → MongoDB vector store (sequential) ──────────────
-    stored, mongo_errors = await _embed_and_store_sequential(chunks, job_id, db, job_id)
+    stored, mongo_errors = await _embed_and_store_sequential(chunks, book_id, db, job_id)
     if mongo_errors:
         await _update_job(db, job_id,
             progress_message=f"Parsed {len(chunks)} chunks. MongoDB: {mongo_errors} storage errors (non-fatal)."

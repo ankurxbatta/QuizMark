@@ -152,14 +152,22 @@ class ApiKeyManager:
                 return result
             except Exception as exc:
                 msg = str(exc)
-                code = getattr(getattr(exc, "response", None), "status_code", 0)
+                resp = getattr(exc, "response", None)
+                code = getattr(resp, "status_code", 0)
+                # Include response body in quota check — httpx str(exc) only has status
+                # code + reason, not body, so quota keywords would never match without this
+                body = ""
+                try:
+                    body = resp.text if resp is not None else ""
+                except Exception:
+                    pass
+                check_text = f"{msg} {body}"
                 if "429" in msg or code == 429:
-                    if _is_quota_exhaustion(429, msg):
-                        health.record_quota_exhausted(msg)
+                    if _is_quota_exhaustion(429, check_text):
+                        health.record_quota_exhausted(check_text[:200])
                     else:
-                        # Try to extract retry-after
                         import re
-                        m = re.search(r"retry.after[\"']?\s*[:=]\s*([\d.]+)", msg, re.IGNORECASE)
+                        m = re.search(r"retry.after[\"']?\s*[:=]\s*([\d.]+)", check_text, re.IGNORECASE)
                         delay = float(m.group(1)) if m else 0
                         health.record_rate_limit(delay)
                 elif code in {402, 403} and _is_quota_exhaustion(code, msg):

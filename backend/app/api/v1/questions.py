@@ -353,31 +353,6 @@ async def ingest_book_to_library(
     }
 
 
-# ── Library cache (in-progress / cached ingestions) ────────────────────────────
-
-@router.get("/books/cache")
-async def list_cached_books(
-    _: dict = Depends(require_instructor),
-):
-    """List incomplete ingestion checkpoints (the 'cached / resumable' tab)."""
-    from app.services.mongo_vector_store import list_incomplete_checkpoints
-    items = await list_incomplete_checkpoints(limit=100)
-    out = []
-    for ck in items:
-        out.append({
-            "book_hash": ck.get("_id"),
-            "book_id": ck.get("book_id", ""),
-            "filename": ck.get("filename", ""),
-            "job_id": ck.get("job_id", ""),
-            "total_pages": ck.get("total_pages", 0),
-            "pages_done": ck.get("pages_done", 0),
-            "chunks_stored": ck.get("chunks_stored", 0),
-            "progress_percent": int(100 * ck.get("pages_done", 0) / max(ck.get("total_pages") or 1, 1)),
-            "status": ck.get("status", "in_progress"),
-            "updated_at": ck.get("updated_at").isoformat() if ck.get("updated_at") else None,
-        })
-    return {"cached": out}
-
 
 @router.delete("/books/{book_hash}/cache", status_code=204)
 async def clear_book_cache(
