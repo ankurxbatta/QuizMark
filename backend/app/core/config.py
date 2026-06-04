@@ -86,9 +86,6 @@ class Settings(BaseSettings):
     PDF_MIN_CHUNK_CHARS: int = 300
     PDF_MAX_CHUNK_CHARS: int = 3000
 
-    # ── DeepSearch (web augmentation) ────────────────────────────────────────
-    TAVILY_API_KEY: Optional[str] = None
-
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50
     BACKUP_RETENTION_DAYS: int = 30

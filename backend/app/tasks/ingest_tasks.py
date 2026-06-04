@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.models.models import IngestJobStatus
 from app.services.pdf_service import parse_pdf_into_chunks
-from app.services.question_generator import generate_questions_from_chunks
+from app.services.question_generator import generate_questions_from_chunks, deep_retrieve_for_generation
 from app.services.llm_service import llm_service
 
 _ALLOWED_QTYPES = {"mcq", "true_false", "short_answer"}
@@ -381,9 +381,18 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         }},
     )
 
-    # Load all chunks from MongoDB for this book
-    raw_docs = await db["pdf_chunks"].find({"book_id": book_id}).to_list(length=10000)
-    if not raw_docs:
+    # Discover chapters via a lightweight distinct query (no full chunk load)
+    pipeline = [
+        {"$match": {"book_id": book_id}},
+        {"$group": {
+            "_id": "$chapter_num",
+            "chapter_title": {"$first": "$chapter_title"},
+            "topic_tag": {"$first": "$topic_tag"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    chapter_meta = await db["pdf_chunks"].aggregate(pipeline).to_list(length=200)
+    if not chapter_meta:
         await _update_job(db, job_id,
             status=IngestJobStatus.failed.value,
             error_message=f"No chunks found for book_id '{book_id}'.",
@@ -392,7 +401,19 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         )
         return
 
-    # Reconstruct lightweight chunk objects compatible with generate_questions_from_chunks
+    # Filter to requested chapter numbers if provided
+    selected_chapters = [
+        m for m in chapter_meta
+        if not chapter_nums or m["_id"] in chapter_nums
+    ]
+
+    diff_label = f" [{difficulty}]" if difficulty != "all" else ""
+    await _update_job(db, job_id,
+        total_chapters=len(selected_chapters),
+        progress_message=f"Found {len(selected_chapters)} chapters in '{book_id}'. Using DeepSearch retrieval{diff_label}.",
+    )
+
+    # Reconstruct lightweight chunk objects from raw MongoDB docs
     class _DbChunk:
         def __init__(self, doc):
             self.chapter_num = doc.get("chapter_num", 0)
@@ -440,24 +461,6 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
                 parts.extend(self.image_texts)
             return "\n".join(parts)
 
-    chunks = [_DbChunk(doc) for doc in raw_docs]
-
-    # Group by chapter, filtering to requested chapters if provided
-    chapters_map: dict[int, list] = defaultdict(list)
-    for chunk in chunks:
-        chapters_map[chunk.chapter_num].append(chunk)
-
-    # chapter_nums param comes from the task args (not the local var) — use a different name
-    selected_chapter_nums = sorted(
-        (n for n in chapters_map.keys() if not chapter_nums or n in chapter_nums)
-    )
-
-    diff_label = f" [{difficulty}]" if difficulty != "all" else ""
-    await _update_job(db, job_id,
-        total_chapters=len(selected_chapter_nums),
-        progress_message=f"Loaded {len(chunks)} chunks. Generating from {len(selected_chapter_nums)} chapters{diff_label}.",
-    )
-
     # Seed uniqueness context from existing questions in the DB
     existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)
     existing_q_texts: list[str] = [d.get("question_text", "") for d in existing_q_docs if d.get("question_text")]
@@ -465,20 +468,37 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
     total_created = 0
     chapter_failures: list[str] = []
 
-    for idx, ch_num in enumerate(selected_chapter_nums, start=1):
-        ch_chunks = chapters_map[ch_num]
-        if not ch_chunks:
-            await _update_job(db, job_id, chapters_done=idx, progress_message=f"Skipped chapter {ch_num}.")
-            continue
-
-        chapter_title = ch_chunks[0].chapter_title
-        topic_tag = ch_chunks[0].topic_tag
+    for idx, meta in enumerate(selected_chapters, start=1):
+        ch_num = meta["_id"]
+        chapter_title = meta.get("chapter_title", f"Chapter {ch_num}")
+        topic_tag = meta.get("topic_tag", chapter_title)
         chapter_label = f"Chapter {ch_num}: {chapter_title}"
 
         await _update_job(db, job_id,
             current_chapter=ch_num,
             current_chapter_title=chapter_title,
-            progress_message=f"Generating from {chapter_label} ({idx}/{len(selected_chapter_nums)}).",
+            progress_message=f"DeepSearch retrieval for {chapter_label} ({idx}/{len(selected_chapters)})…",
+        )
+
+        # DeepSearch: generate exam-focused queries and retrieve the best chunks
+        try:
+            raw_docs = await deep_retrieve_for_generation(
+                topic=f"{chapter_title} {topic_tag}",
+                book_id=book_id,
+                k=max(count_per_chapter * 2, 12),
+            )
+            ch_chunks = [_DbChunk(doc) for doc in raw_docs]
+        except Exception as exc:
+            # Fallback: load raw chapter chunks without deep retrieval
+            raw_docs = await db["pdf_chunks"].find({"book_id": book_id, "chapter_num": ch_num}).to_list(length=200)
+            ch_chunks = [_DbChunk(doc) for doc in raw_docs]
+
+        if not ch_chunks:
+            await _update_job(db, job_id, chapters_done=idx, progress_message=f"Skipped {chapter_label} — no chunks retrieved.")
+            continue
+
+        await _update_job(db, job_id,
+            progress_message=f"Generating {count_per_chapter} questions from {len(ch_chunks)} retrieved chunks for {chapter_label}…",
         )
 
         try:

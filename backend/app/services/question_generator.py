@@ -2,7 +2,7 @@
 question_generator.py  —  Deep, chunk-aware question generation.
 
 Pipeline:
-  1. Receive a list of TextChunk objects from pdf_service.parse_pdf_into_chunks()
+  1. Receive a list of TextChunk objects (or use DeepSearch retrieval from MongoDB)
   2. Score and rank chunks by teaching value
   3. Group chunks by topic so questions are spread across all chapters
   4. For each topic group, generate questions with:
@@ -10,6 +10,15 @@ Pipeline:
        - 4-level uniqueness enforcement vs existing questions
   5. Post-process: validate JSON, deduplicate, assign final metadata
   6. Return sorted list of question dicts ready for DB insertion
+
+DeepSearch for generation (deep_retrieve_for_generation):
+  When generating from the Library, instead of loading all chunks and ranking
+  by a static heuristic, we:
+    1. Generate exam-focused retrieval queries for the chapter topic
+       (e.g. "key formulas in X", "conditions and assumptions for X", "worked examples X")
+    2. Embed all queries and search the MongoDB vector store in parallel
+    3. Deduplicate and return the highest-value chunks for generation
+  This targets exactly the content that makes good exam questions.
 
 Bloom's Taxonomy levels (inspired by Shiksha Copilot's question bank approach):
   L1 Remember  — Recall definitions, facts, formulas directly stated
@@ -31,7 +40,7 @@ import json
 import re
 from typing import Optional
 
-from app.services.llm_service import generation_service
+from app.services.llm_service import generation_service, slm_service
 from app.services.pdf_service import TextChunk
 
 
@@ -40,6 +49,86 @@ def _safe_exception_message(exc: Exception) -> str:
     message = re.sub(r"([?&]key=)[^&\s']+", r"\1***", message)
     message = re.sub(r"(Bearer\s+)[A-Za-z0-9._\-]+", r"\1***", message)
     return message
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DeepSearch retrieval for question generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RETRIEVAL_QUERY_PROMPT = """\
+You are designing retrieval queries to find the best textbook content for writing exam questions.
+
+Chapter/Topic: {topic}
+
+Generate {n} short, specific search queries that will surface the most TESTABLE content:
+  - Key definitions and formulas
+  - Conditions, assumptions, and when to apply methods
+  - Worked examples with numbers
+  - Common misconceptions or failure modes
+  - Comparisons between related concepts
+
+Output ONLY a JSON array of strings. Example:
+["formula for {topic}", "conditions when {topic} applies", "example calculation {topic}"]
+"""
+
+
+async def _generate_retrieval_queries(topic: str, n: int = 4) -> list[str]:
+    """Use LLM to generate exam-focused retrieval queries for a chapter topic."""
+    prompt = _RETRIEVAL_QUERY_PROMPT.format(topic=topic, n=n)
+    try:
+        raw = await generation_service.generate(prompt)
+        raw = re.sub(r"```(?:json)?", "", raw).strip()
+        match = re.search(r"\[.*?\]", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group())
+            queries = [str(q).strip() for q in parsed if q and str(q).strip()]
+            if queries:
+                return queries[:n]
+    except Exception:
+        pass
+    return [topic]
+
+
+async def deep_retrieve_for_generation(
+    topic: str,
+    book_id: Optional[str] = None,
+    k: int = 12,
+) -> list[dict]:
+    """
+    Multi-query vector search to find the best chunks for question generation.
+
+    Generates exam-focused sub-queries for the topic (formulas, conditions,
+    examples, comparisons), runs them in parallel against the MongoDB vector
+    store, deduplicates, and returns the highest-value chunks.
+
+    Args:
+        topic:    Chapter title or topic name.
+        book_id:  Restrict to a specific ingested book (or None for all books).
+        k:        Total distinct chunks to return.
+
+    Returns:
+        List of raw MongoDB chunk dicts ready for _DbChunk construction.
+    """
+    from app.services.mongo_vector_store import vector_search
+
+    queries = await _generate_retrieval_queries(topic, n=4)
+    k_per_query = max(3, k // len(queries))
+
+    embeddings = await asyncio.gather(*[slm_service.embed(q) for q in queries])
+    raw_batches = await asyncio.gather(
+        *[vector_search(emb, k=k_per_query, book_id=book_id) for emb in embeddings]
+    )
+
+    seen_ids: set[str] = set()
+    chunks: list[dict] = []
+    for batch in raw_batches:
+        for chunk in batch:
+            cid = chunk.get("_id", "")
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                chunks.append(chunk)
+
+    return chunks[:k]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
