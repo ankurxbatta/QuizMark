@@ -21,12 +21,12 @@ celery_app = Celery(
 #  Queue name     Worker container    Purpose
 #  ─────────────  ──────────────────  ────────────────────────────────────────
 #  ingest_tasks   worker-ingest       PDF parse, chunk accumulation, orchestration
-#  vision_tasks   worker-vision       Chart/image descriptions (Gemini / OpenAI)
-#  math_tasks     worker-math         Math formula extraction (Groq / OpenAI)
+#  vision_tasks   worker-vision       Chart/image descriptions (OpenAI → Anthropic)
+#  math_tasks     worker-math         Math formula extraction (OpenAI → Anthropic)
 #  clean_tasks    worker-clean        PDF noise removal, text normalisation
-#  embed_tasks    worker-embed        Embedding generation (Gemini / OpenAI)
-#  gen_tasks      worker-gen          Question generation (Groq / OpenAI)
-#  mark_tasks     worker-mark         Answer marking (Mistral / Groq / OpenAI)
+#  embed_tasks    worker-embed        Embedding generation (Gemini → OpenAI)
+#  gen_tasks      worker-gen          Question generation (OpenAI → Anthropic → Gemini)
+#  mark_tasks     worker-mark         Answer marking (OpenAI → Anthropic → Gemini)
 
 _default_exchange = Exchange("default", type="direct")
 

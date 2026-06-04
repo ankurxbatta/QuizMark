@@ -167,7 +167,7 @@ services:
     networks:
       - app-network
 
-  # ── Worker: Marking (answer marking via Mistral → Groq → OpenAI) ──────────────
+  # ── Worker: Marking (answer marking via OpenAI → Anthropic → Gemini) ────────────
   worker-mark:
     build:
       context: ./backend

@@ -779,8 +779,8 @@ async def _add_math_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
 
     results = await asyncio.gather(*tasks)
 
-    # Collect Groq LaTeX per chunk (may span multiple pages), then replace
-    # the text-layer math_text entirely — Groq Vision is the authoritative source.
+    # Collect LaTeX per chunk (may span multiple pages), then replace
+    # the text-layer math_text entirely — vision extraction is the authoritative source.
     chunk_latex: dict[int, list[str]] = {}
     for ci, math_text in results:
         if math_text:
@@ -793,7 +793,7 @@ async def _add_math_descriptions(chunks: list[Chunk], pdf_bytes: bytes) -> None:
 
     doc.close()
     described = sum(1 for _, m in results if m)
-    log.info(f"Groq math: {described}/{len(tasks)} pages yielded formulas")
+    log.info(f"Math extraction: {described}/{len(tasks)} pages yielded formulas")
 
 
 # ── PDF → Chunks ───────────────────────────────────────────────────────────────

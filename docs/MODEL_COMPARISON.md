@@ -57,16 +57,3 @@ Both models reliably follow the rubric structure and produce consistent scores w
 |---|---|---|---|
 | `gpt-4o-mini` (vision) | OpenAI | ★★★★☆ | Reliably extracts LaTeX from rendered page images. |
 | `claude-haiku-4-5-20251001` (vision) | Anthropic | ★★★★☆ | Good LaTeX output on complex formulas. |
-| Groq (retired) | Groq | ★★☆☆☆ | Removed — free tier rate-limited to ~1 page/8 min on vision tasks. |
-
----
-
-## Why Groq and Mistral Were Removed
-
-**Groq** was originally used for question generation and math extraction (free tier). In practice:
-- Vision model (`llama-4-scout-17b-16e-instruct`) on the free tier allowed ~1 request per 8 minutes in practice, making 349-page math extraction take 7+ hours
-- Rate limits were unpredictable and silently caused long delays with no error logging
-
-**Mistral** was used for marking. Replaced by OpenAI gpt-4o-mini which is similarly priced, faster, and more consistent on structured rubric output.
-
-Both were replaced with paid OpenAI + Anthropic which provide predictable rate limits (500 RPM), reliable quality, and automatic fallback.

@@ -687,10 +687,17 @@ async def transcribe_math_chunks(
     from app.core.config import settings as _settings
 
     try:
-        from app.services.llm_service import GroqClient
-        vision_client = GroqClient()
+        from app.services.llm_service import OpenAIClient, AnthropicClient
+        from app.core.config import settings as _cfg
+        if _cfg.OPENAI_API_KEY:
+            vision_client = OpenAIClient()
+        elif _cfg.ANTHROPIC_API_KEY:
+            vision_client = AnthropicClient()
+        else:
+            logger.warning("transcribe_math_chunks: no vision provider available (set OPENAI_API_KEY or ANTHROPIC_API_KEY)")
+            return
     except Exception as exc:
-        logger.warning(f"transcribe_math_chunks: could not initialise Groq client: {exc}")
+        logger.warning(f"transcribe_math_chunks: could not initialise vision client: {exc}")
         return
 
     if not _PYMUPDF_AVAILABLE:
@@ -715,8 +722,15 @@ async def transcribe_math_chunks(
                 if delay:
                     await _asyncio.sleep(delay)
                 
-                prompt = "Transcribe all mathematical formulas in this image into valid LaTeX format. Do not describe the image, just output the LaTeX. Surround inline math with $...$ and block math with $$...$$"
+                prompt = (
+                    "Transcribe every mathematical formula visible in this image into valid LaTeX. "
+                    "Output ONLY the LaTeX — no explanations, no prose. "
+                    "Surround inline math with $...$ and display math with $$...$$. "
+                    "If no formula is visible respond with exactly: NO_MATH"
+                )
                 latex = await vision_client.describe_image(img_bytes, context=prompt)
+                if latex == "NO_MATH":
+                    latex = ""
                 return latex
             except Exception as exc:
                 logger.debug(f"Math vision transcription failed for page {math_dict.get('page_num')}: {exc}")
