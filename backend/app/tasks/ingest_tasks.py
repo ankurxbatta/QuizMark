@@ -20,7 +20,8 @@ from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.models.models import IngestJobStatus
 from app.services.pdf_service import parse_pdf_into_chunks
-from app.services.question_generator import generate_questions_from_chunks, deep_retrieve_for_generation
+from app.services.question_generator import generate_questions_from_chunks, DbChunk
+from app.services.question_orchestrator import orchestrate_question_bank
 from app.services.llm_service import llm_service
 
 _ALLOWED_QTYPES = {"mcq", "true_false", "short_answer"}
@@ -254,8 +255,9 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         )
 
         try:
-            questions_data = await generate_questions_from_chunks(
-                ch_chunks,
+            questions_data = await orchestrate_question_bank(
+                chapter_topic=f"{chapter_title} {topic_tag}",
+                book_id=job_id,
                 question_type=question_type,
                 count=count_per_chapter,
                 existing_questions=existing_q_texts,
@@ -413,53 +415,7 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         progress_message=f"Found {len(selected_chapters)} chapters in '{book_id}'. Using DeepSearch retrieval{diff_label}.",
     )
 
-    # Reconstruct lightweight chunk objects from raw MongoDB docs
-    class _DbChunk:
-        def __init__(self, doc):
-            self.chapter_num = doc.get("chapter_num", 0)
-            self.chapter_title = doc.get("chapter_title", "Unknown")
-            self.section_title = doc.get("section_title", "")
-            self.topic_tag = doc.get("topic_tag", "")
-            self.text = doc.get("text", "")
-            self.page_start = doc.get("page_start", 0)
-            self.page_end = doc.get("page_end", 0)
-            self.has_formula = doc.get("has_formula", False)
-            self.has_example = doc.get("has_example", False)
-            self.teaching_density = doc.get("teaching_density", 0.0)
-            self.key_terms = doc.get("key_terms", [])
-            self.image_texts = doc.get("image_texts", [])
-            self.table_texts = doc.get("table_texts", [])
-            self.math_text = doc.get("math_text", "")
-
-        @property
-        def label(self):
-            return f"Ch{self.chapter_num} § {self.section_title}"
-
-        def to_prompt_block(self):
-            parts = [
-                f"[SOURCE: {self.label} | Topic: {self.topic_tag} | "
-                f"Pages {self.page_start}–{self.page_end}]",
-            ]
-            if self.has_formula:
-                parts.append("[Contains: mathematical formulas]")
-            if self.has_example:
-                parts.append("[Contains: worked examples]")
-            if self.table_texts:
-                parts.append("[Contains: extracted tables]")
-            if self.image_texts:
-                parts.append("[Contains: extracted image/chart text]")
-            parts.append("")
-            parts.append(self.text)
-            if self.table_texts:
-                parts.append("\n[EXTRACTED TABLES]")
-                parts.extend(self.table_texts)
-            if self.math_text:
-                parts.append("\n[FORMULA SNIPPETS]")
-                parts.append(self.math_text)
-            if self.image_texts:
-                parts.append("\n[IMAGE/CHART TEXT]")
-                parts.extend(self.image_texts)
-            return "\n".join(parts)
+    # DbChunk is imported from question_generator — no inline definition needed
 
     # Seed uniqueness context from existing questions in the DB
     existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)
@@ -477,40 +433,20 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         await _update_job(db, job_id,
             current_chapter=ch_num,
             current_chapter_title=chapter_title,
-            progress_message=f"DeepSearch retrieval for {chapter_label} ({idx}/{len(selected_chapters)})…",
+            progress_message=f"Orchestrating {chapter_label} ({idx}/{len(selected_chapters)}) — 3-round generation…",
         )
 
-        # DeepSearch: generate exam-focused queries and retrieve the best chunks
         try:
-            raw_docs = await deep_retrieve_for_generation(
-                topic=f"{chapter_title} {topic_tag}",
+            questions_data = await orchestrate_question_bank(
+                chapter_topic=f"{chapter_title} {topic_tag}",
                 book_id=book_id,
-                k=max(count_per_chapter * 2, 12),
-            )
-            ch_chunks = [_DbChunk(doc) for doc in raw_docs]
-        except Exception as exc:
-            # Fallback: load raw chapter chunks without deep retrieval
-            raw_docs = await db["pdf_chunks"].find({"book_id": book_id, "chapter_num": ch_num}).to_list(length=200)
-            ch_chunks = [_DbChunk(doc) for doc in raw_docs]
-
-        if not ch_chunks:
-            await _update_job(db, job_id, chapters_done=idx, progress_message=f"Skipped {chapter_label} — no chunks retrieved.")
-            continue
-
-        await _update_job(db, job_id,
-            progress_message=f"Generating {count_per_chapter} questions from {len(ch_chunks)} retrieved chunks for {chapter_label}…",
-        )
-
-        try:
-            questions_data = await generate_questions_from_chunks(
-                ch_chunks,
                 question_type=question_type,
                 count=count_per_chapter,
                 difficulty=difficulty,
                 existing_questions=existing_q_texts,
             )
         except Exception as exc:
-            msg = f"{chapter_label} generation failed: {str(exc)[:180]}"
+            msg = f"{chapter_label} orchestration failed: {str(exc)[:180]}"
             chapter_failures.append(msg)
             await _update_job(db, job_id, chapters_done=idx, progress_message=msg)
             continue

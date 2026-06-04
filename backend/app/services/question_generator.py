@@ -132,6 +132,191 @@ async def deep_retrieve_for_generation(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  DbChunk — lightweight TextChunk-compatible wrapper for MongoDB docs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DbChunk:
+    """Wraps a raw MongoDB pdf_chunks document as a TextChunk-compatible object."""
+
+    def __init__(self, doc: dict):
+        self.chapter_num = doc.get("chapter_num", 0)
+        self.chapter_title = doc.get("chapter_title", "Unknown")
+        self.section_title = doc.get("section_title", "")
+        self.topic_tag = doc.get("topic_tag", self.chapter_title)
+        self.text = doc.get("text", "")
+        self.page_start = doc.get("page_start", 0)
+        self.page_end = doc.get("page_end", 0)
+        self.has_formula = doc.get("has_formula", False)
+        self.has_example = doc.get("has_example", False)
+        self.teaching_density = doc.get("teaching_density", 0.5)
+        self.key_terms = doc.get("key_terms", [])
+        self.image_texts = doc.get("image_texts", [])
+        self.table_texts = doc.get("table_texts", [])
+        self.math_text = doc.get("math_text", "")
+
+    @property
+    def label(self) -> str:
+        return f"Ch{self.chapter_num} § {self.section_title}"
+
+    def to_prompt_block(self) -> str:
+        parts = [
+            f"[SOURCE: {self.label} | Topic: {self.topic_tag} | "
+            f"Pages {self.page_start}–{self.page_end}]",
+        ]
+        if self.has_formula:
+            parts.append("[Contains: mathematical formulas]")
+        if self.has_example:
+            parts.append("[Contains: worked examples]")
+        if self.table_texts:
+            parts.append("[Contains: extracted tables]")
+        if self.image_texts:
+            parts.append("[Contains: extracted image/chart text]")
+        parts.append("")
+        parts.append(self.text)
+        if self.table_texts:
+            parts.append("\n[EXTRACTED TABLES]")
+            parts.extend(self.table_texts)
+        if self.math_text:
+            parts.append("\n[FORMULA SNIPPETS]")
+            parts.append(self.math_text)
+        if self.image_texts:
+            parts.append("\n[IMAGE/CHART TEXT]")
+            parts.extend(self.image_texts)
+        return "\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Targeted Bloom's level generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps a Bloom's level to the exact instruction injected into the prompt
+_BLOOM_LEVEL_INSTRUCTIONS: dict[str, str] = {
+    "L1": (
+        "BLOOM'S L1 — REMEMBER ONLY: Every question must ask students to RECALL a specific "
+        "definition, label, symbol, formula name, or fact directly stated in the source. "
+        "No interpretation, no calculation, no comparison."
+    ),
+    "L2": (
+        "BLOOM'S L2 — UNDERSTAND ONLY: Every question must ask students to EXPLAIN, "
+        "SUMMARISE, or CLASSIFY a concept. Students should demonstrate they understand "
+        "what a term or result means — not just recall it, not yet apply it."
+    ),
+    "L3": (
+        "BLOOM'S L3 — APPLY ONLY: Every question must present a concrete numerical scenario "
+        "or dataset and ask students to USE a formula or method to solve it. "
+        "Pure recall or explanation is not sufficient — the answer requires computation or procedure."
+    ),
+    "L4": (
+        "BLOOM'S L4 — ANALYZE ONLY: Every question must ask students to COMPARE two methods, "
+        "IDENTIFY a violated assumption, BREAK DOWN a multi-part problem, or EXPLAIN WHY "
+        "a specific technique is appropriate or inappropriate for a given situation."
+    ),
+    "L5": (
+        "BLOOM'S L5 — EVALUATE ONLY: Every question must ask students to JUSTIFY a statistical "
+        "decision, CRITIQUE a flawed approach, ASSESS the validity of a conclusion, or "
+        "RECOMMEND a method with reasoned justification. Expect paragraph-length answers."
+    ),
+}
+
+_TARGETED_BLOOM_PROMPT = """\
+You are a statistics assessment author writing exam questions for a business statistics course.
+
+SOURCE CONTENT (base all questions strictly on this material):
+{content}
+
+COGNITIVE LEVEL REQUIREMENT:
+{bloom_instruction}
+
+bloom_level for ALL questions in your output: "{bloom_level}"
+
+Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive level requirement above.
+
+{uniqueness_block}
+
+━━━ SHORT ANSWER ━━━
+- Ask about a SPECIFIC concept, formula, condition, or scenario — not vague prompts.
+- Model answer: 2–5 precise sentences. Include formulas or numeric results where relevant.
+- Rubric: one criterion per mark. Format: "1 mark: <what student must state>."
+
+━━━ MCQ ━━━
+- Stem poses a clear question about a concept, condition, formula, or scenario.
+- Put stem and options together in question_text:
+  Stem text?
+  A. First option
+  B. Second option
+  C. Third option
+  D. Fourth option
+- Four substantive options; distractors reflect common misconceptions.
+- Model answer: correct letter + brief explanation.
+
+━━━ TRUE/FALSE ━━━
+- Test application or interpretation, NOT just a copied definition.
+- Model answer: "True" or "False" + 1–2 sentence justification.
+
+━━━ ALL TYPES ━━━
+- max_marks: L1=2, L2=2, L3=4, L4=6, L5=8
+- difficulty: easy (L1–L2) | medium (L3–L4) | hard (L5)
+- topic_tag: chapter/concept area
+- bloom_level: MUST be "{bloom_level}" for every question
+
+Respond ONLY as a valid JSON array. Required keys per question:
+question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty, bloom_level
+MCQ elements may also include an optional options object with keys A, B, C, D.
+
+No preamble. No trailing text. Just the JSON array.
+"""
+
+
+async def generate_targeted_bloom_questions(
+    chunks: list,
+    question_type: str,
+    count: int,
+    bloom_level: str,
+    existing_questions: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    Generate `count` questions locked to a single Bloom's level.
+    Used by the orchestrator to fill gaps after Round 1.
+    """
+    if not chunks or count <= 0:
+        return []
+
+    bloom_instruction = _BLOOM_LEVEL_INSTRUCTIONS.get(bloom_level, "")
+    uniqueness_block = _build_uniqueness_block(existing_questions or [])
+
+    # Pick the best chunk (highest teaching density) as the focal context
+    best = max(chunks, key=_score_chunk)
+    content = best.to_prompt_block()
+
+    prompt = _TARGETED_BLOOM_PROMPT.format(
+        content=content,
+        bloom_instruction=bloom_instruction,
+        bloom_level=bloom_level,
+        count=count,
+        qtype=question_type,
+        uniqueness_block=uniqueness_block,
+    )
+    try:
+        raw = await generation_service.generate(prompt)
+        questions = _parse_json_array(raw)
+    except Exception as e:
+        print(f"[GEN] targeted bloom {bloom_level} failed: {_safe_exception_message(e)}")
+        questions = []
+
+    # Force correct bloom_level and metadata
+    for q in questions:
+        q["bloom_level"] = bloom_level
+        diff = {"L1": "easy", "L2": "easy", "L3": "medium", "L4": "medium", "L5": "hard"}
+        q["difficulty"] = diff.get(bloom_level, "medium")
+        if not q.get("topic_tag"):
+            q["topic_tag"] = best.topic_tag
+        q["_source_chunk"] = best.label
+        q["_page_range"] = f"{best.page_start}-{best.page_end}"
+
+    return _validate_questions(questions, question_type)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Bloom's Taxonomy distribution (Shiksha-inspired)
 # ─────────────────────────────────────────────────────────────────────────────
 
