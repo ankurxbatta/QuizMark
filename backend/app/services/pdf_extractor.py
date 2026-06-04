@@ -275,8 +275,11 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
         for m in merged_rects:
             m.x0 += 10; m.y0 += 10; m.x1 -= 10; m.y1 -= 10
             m.intersect(page.rect)
-            if m.width > 30 and m.height > 30:
-                page_figure_rects.append({"page_num": page.number + 1, "rect": list(m)})
+            # Filter out tiny icons and extreme aspect ratios (lines, borders)
+            if m.width > 80 and m.height > 80:
+                aspect = m.width / m.height
+                if 0.15 < aspect < 6.0:
+                    page_figure_rects.append({"page_num": page.number + 1, "rect": list(m)})
 
         page_area = page.rect.width * page.rect.height
         if page_area > 0:
