@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+node_modules/
+.next/
+*.log
+data/uploads/
