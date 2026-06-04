@@ -1,56 +1,212 @@
-# System design notes
+# Architecture
 
-Just some notes on how I designed the overall architecture and why I made certain decisions.
+## Overview
 
----
+QuizMark is a containerised web application built on FastAPI + Next.js. All heavy processing is done by specialised Celery workers, not the API server. The API server only validates requests and hands tasks to Redis queues.
 
-## Why I split it into services the way I did
-
-The backend has three main service files that handle the generation work:
-
-**`pdf_service.py`** — only responsible for reading PDFs and turning them into chunks. It doesn't know anything about LLMs or questions. I kept it separate because PDF parsing is fiddly enough on its own and I wanted to be able to test it independently.
-
-**`question_generator.py`** — handles chunk selection, ranking, prompting, and output validation. It calls the LLM service but doesn't care which provider is being used.
-
-**`llm_service.py`** — all four provider clients (Anthropic, OpenAI, Gemini, Ollama) live here. They all implement the same `.generate()` interface so swapping providers is just a config change.
-
-This separation made it easier to debug things — if generation is broken I can tell quickly whether it's a PDF parsing problem, a prompt problem, or an API problem.
-
----
-
-## Why chunk-based rather than full-document
-
-My first attempt just fed the whole PDF text into one prompt and asked for 20 questions. It kind of worked but had two big problems:
-
-1. For a 600-page textbook you obviously can't fit it all in a context window
-2. Even for shorter documents, all the questions ended up coming from the same section because that's where the most obvious content was
-
-The chunk approach fixes both — you parse the whole document first, score each chunk, then spread questions across chapters using round-robin selection. The questions end up much more evenly distributed and the LLM gets focused context rather than a wall of text.
+```
+Browser → Next.js (3000) → FastAPI (8000) → Redis broker
+                                                  │
+                           ┌──────────────────────┼──────────────────────┐
+                           │                      │                      │
+                     worker-ingest         worker-gen            worker-mark
+                     worker-vision         worker-deepsearch     worker-clean
+                     worker-math           worker-embed
+                           │                      │                      │
+                           └──────────────────────┼──────────────────────┘
+                                                  │
+                                              MongoDB
+                                   (data store + 768-dim vector index)
+```
 
 ---
 
-## The fallback chain
+## Container Map
 
-I spent a while getting the fallback logic right. The flow is:
-
-1. Try the configured online LLM provider
-2. If that fails or returns bad JSON, try the deterministic fallback generator
-3. The fallback builds basic questions directly from the text without an LLM
-
-The deterministic fallback is not great quality but it means generation never completely fails and returns zero questions. It's mostly there so the async ingest jobs don't silently fail on problematic chapters.
+| Container | Port | Role |
+|---|---|---|
+| `frontend` | 3000 | Next.js UI (instructor + student) |
+| `backend` | 8000 | FastAPI REST API |
+| `mongodb` | 27017 | Primary data store + vector search |
+| `broker` (Redis) | 6379 | Celery task queue |
+| `mongo-express` | 8081 | Database browser UI |
+| `flower` | 5555 | Celery worker monitor |
+| `worker-ingest` | — | PDF parsing, resumable ingestion |
+| `worker-vision` | — | Chart/image descriptions |
+| `worker-math` | — | LaTeX formula extraction |
+| `worker-clean` | — | PDF noise removal |
+| `worker-embed` | — | Vector embeddings |
+| `worker-deepsearch` | — | Multi-query RAG retrieval |
+| `worker-gen` | — | Question generation |
+| `worker-mark` | — | Answer marking |
 
 ---
 
-## Database choices
+## Worker Queues and Concurrency
 
-I used PostgreSQL mainly because it has the `pgvector` extension which lets you store and query embedding vectors. I'm storing an embedding for each question computed from the question text + model answer. Right now this is mostly forward-looking — the embeddings aren't used for generation itself, but they'd be useful for things like detecting duplicate questions across runs or doing semantic search over the question bank.
+Each worker subscribes to exactly one Redis queue. They all share the same Docker image — only the startup command differs.
 
-Alembic handles migrations. The main schema additions relevant to generation are `source_page_range` and `source_chunk` on the questions table, which give traceability back to where in the PDF a question came from.
+| Worker | Queue | Concurrency | Notes |
+|---|---|---|---|
+| worker-ingest | ingest_tasks | 2 | Memory-heavy (full PDF in RAM) |
+| worker-vision | vision_tasks | 1 | Rate-limited by vision API |
+| worker-math | math_tasks | 2 | OpenAI → Anthropic fallback |
+| worker-clean | clean_tasks | 4 | CPU-only, no API calls |
+| worker-embed | embed_tasks | 3 | Gemini → OpenAI fallback |
+| worker-deepsearch | deepsearch_tasks | 3 | Parallel vector searches |
+| worker-gen | gen_tasks | 2 | Longest-running tasks |
+| worker-mark | mark_tasks | 4 | High throughput for submissions |
 
 ---
 
-## Async jobs
+## Ingestion Pipeline
 
-The async ingest uses Celery with Redis as the broker. I added this when I tested with a 631-page textbook and the synchronous endpoint was timing out. The async endpoint returns a job ID immediately and a Celery worker processes chapters in the background. The frontend polls the job status endpoint every few seconds to show progress.
+```
+PDF Upload (up to 25 MB, 700 pages)
+        │
+        ▼
+    backend          — hash PDF, create ingest job in MongoDB
+        │
+        │  ingest_book_resumable_task → ingest_tasks queue
+        ▼
+  worker-ingest      — processes 6 pages at a time:
 
-It's a bit over-engineered for a project of this size but I wanted to understand how task queues work in practice.
+    ┌─ Parse pages (PyMuPDF) ─────────────── sync
+    │    text · tables · math fonts · vector graphics detected
+    │
+    ├─ Vision API calls ──────────────────── asyncio.gather (max 5 concurrent)
+    │    chart pages → OpenAI gpt-4o-mini → natural-language description
+    │    fallback: Anthropic claude-haiku
+    │
+    ├─ Math API calls ────────────────────── asyncio.gather (max 5 concurrent)
+    │    math-font pages → OpenAI gpt-4o-mini → LaTeX formula extraction
+    │    fallback: Anthropic claude-haiku
+    │
+    ├─ Text cleaning ─────────────────────── sync, in-process
+    │    ligatures · mojibake · boilerplate · page-number noise stripped
+    │
+    ├─ Batch embeddings ──────────────────── 1 API call for all chunks
+    │    Gemini gemini-embedding-001 (768-dim) → OpenAI fallback (same 768-dim)
+    │
+    ├─ MongoDB bulk insert
+    │
+    └─ Checkpoint saved (next_page + accumulator state)
+         │
+         └─▶ next 6 pages ... repeat until complete
+
+Re-uploading the same PDF resumes from the last checkpoint automatically.
+```
+
+---
+
+## Question Generation Pipeline
+
+```
+Instructor requests generation
+        │
+        ▼
+    backend  →  generate_from_book_task  →  gen_tasks queue
+        │
+        ▼
+  worker-gen    — fetches chapter list from MongoDB
+
+  Up to 5 chapters run in parallel (asyncio.Semaphore):
+
+    Round 0:  extract_chapter_concepts
+              LLM decomposes topic into key concepts + retrieval sub-queries
+
+    Round 1:  deep_retrieve (4 parallel MongoDB vector searches)
+              → surfaces most testable chunks by teaching density
+              → generates ~70% of target count across Bloom's levels
+                 L1 recall · L2 understand · L3 apply · L4 analyse · L5 evaluate
+
+    Round 2:  Bloom's coverage audit
+              → for each under-represented level: targeted retrieval + generation
+
+    Round 3:  dedup + validate
+              → drops near-duplicates (cosine similarity ≥ 0.92)
+              → enforces Bloom's distribution
+
+  Cross-chapter dedup → bulk insert into MongoDB questions collection
+```
+
+---
+
+## Marking Pipeline
+
+```
+Student submits answer
+        │
+        ▼
+  worker-mark (concurrency=4)
+
+    SLM pre-scorer  — fast cosine similarity check
+        │
+        ├── HIGH confidence (≥ 0.85) → mark accepted, no LLM call
+        │
+        └── LOW / MID confidence
+                │
+                ├─ Multi-query RAG (3 parallel vector searches)
+                │    · textbook chunks (pdf_chunks)
+                │    · similar Q&A pairs (questions)
+                │
+                └─ LLM marking
+                     Input: question + rubric + model answer + context
+                     Provider: OpenAI gpt-4o-mini → Anthropic claude-haiku
+                     Output: mark + written feedback → saved to MongoDB
+```
+
+---
+
+## AI Provider Fallback Chains
+
+`api_key_manager` tracks quota health per provider. On 429 or quota exhaustion, the provider enters cooldown (60s rate-limit / 1hr quota) and the next provider is used automatically.
+
+| Capability | Chain |
+|---|---|
+| Embeddings (768-dim) | Gemini `gemini-embedding-001` → OpenAI `text-embedding-3-small` |
+| Vision / charts | OpenAI `gpt-4o-mini` → Anthropic `claude-haiku` |
+| Math extraction | OpenAI `gpt-4o-mini` → Anthropic `claude-haiku` |
+| Question generation | OpenAI `gpt-4o-mini` → Anthropic `claude-haiku` → Gemini |
+| Answer marking | OpenAI `gpt-4o-mini` → Anthropic `claude-haiku` → Gemini |
+
+Both OpenAI and Anthropic produce 768-dim embeddings via `dimensions=768`, keeping the MongoDB vector index compatible across all providers.
+
+---
+
+## MongoDB Collections
+
+| Collection | Purpose |
+|---|---|
+| `users` | Instructor and student accounts |
+| `pdf_chunks` | Textbook content with 768-dim embeddings |
+| `questions` | Generated question bank |
+| `submissions` | Student answers and marking results |
+| `ingest_jobs` | Job progress and status |
+| `ingest_checkpoints` | Resumable ingestion state (keyed by PDF SHA-256 hash) |
+| `audit_logs` | Login and action history |
+
+The vector index on `pdf_chunks.embedding` uses cosine similarity (768 dimensions).
+
+---
+
+## Text Cleaning Pipeline
+
+`text_cleaner.py` normalises each chunk before embedding:
+
+1. Mojibake repair (UTF-8 bytes misread as Latin-1)
+2. Ligature expansion (ﬁ→fi, ﬂ→fl, ﬀ→ff, ﬃ→ffi, ﬄ→ffl)
+3. Smart quote and dash normalisation
+4. Zero-width / control character removal
+5. NFC Unicode normalisation
+6. Soft-hyphen line-break joining
+7. OpenStax boilerplate removal
+8. Page number / chapter header noise removal
+9. Duplicate line deduplication
+10. Whitespace collapse
+
+Trigger a full re-clean on demand:
+```bash
+curl -X POST http://localhost:8000/api/v1/admin/clean/all \
+  -H "Authorization: Bearer <token>"
+```

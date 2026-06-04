@@ -1,114 +1,149 @@
-# How the question generation pipeline works
+# Question Generation Pipeline
 
-This is my notes on how the PDF-to-questions pipeline actually works under the hood, mostly so I remember what I built and can explain it.
-
----
-
-## The basic flow
-
-```
-Upload PDF
-    ↓
-Parse into chunks (pdf_service.py)
-    ↓
-Score and select the best chunks (question_generator.py)
-    ↓
-Call the LLM for each chunk (question_generator.py)
-    ↓
-Validate and deduplicate output
-    ↓
-Save to database with embeddings
-```
+This document explains how the system goes from a raw PDF to a diverse, high-quality question bank.
 
 ---
 
-## Step 1 — Parsing the PDF into chunks
+## Step 1 — Book Ingestion
 
-The main challenge with textbooks is that they have a lot of content you don't want to generate questions from — exercises, glossary sections, practice tests, table of contents, copyright pages, etc. The parser in `pdf_service.py` tries to handle this.
+Before questions can be generated, the PDF must be ingested. Ingestion extracts and stores all teachable content in MongoDB with vector embeddings.
 
-It uses `pdfplumber` to extract text page by page (with `pypdf` as fallback if pdfplumber fails). As it reads through the PDF it's tracking which chapter and section it's in.
+**What gets extracted per page:**
+- Full text (PyMuPDF markdown extraction)
+- Tables (structured markdown rows)
+- Math fonts detected (STIX, CMMI, Symbol, MathJax) → pages sent for LaTeX extraction
+- Vector graphics detected → pages sent for chart description
+- Raster images detected → flagged
 
-**Chapter detection** uses a set of regex patterns because textbooks don't all format headings the same way:
-
-- `Chapter 1 Sampling and Data`
-- `Chapter 1: Sampling and Data`  
-- `CHAPTER 1 SAMPLING AND DATA`
-- `1 Sampling and Data` (no "Chapter" keyword)
-- `1. Sampling and Data`
-
-Section headings like `1.2 Measures of Spread` are also detected to give more granular chunk labels.
-
-**Content filtering** — each accumulated block of text gets checked before it becomes a chunk:
-- Blocks are scored for "teaching signals" — things like definitions, theorems, formulas, worked examples, mentions of statistical terms
-- Blocks that look like exercises (lots of numbered items like `12. Calculate the mean...`) get discarded
-- Blocks matching things like "Practice Test", "Chapter Review", "Homework", table of contents markers, etc. get skipped
-
-Each chunk that makes it through becomes a `TextChunk` object with metadata: chapter number, chapter title, section title, topic tag, page range, whether it has formulas, whether it has worked examples, a teaching density score, and extracted key terms.
-
----
-
-## Step 2 — Ranking and selecting chunks
-
-Not all chunks are equally useful for generating questions. A dense theoretical section with formulas and worked examples will produce better questions than a brief introductory paragraph.
-
-Each chunk gets a score from 0–1:
-
+**Per chunk stored in MongoDB:**
 ```
-score = teaching_density × 0.5
-      + 0.2 if it has formulas
-      + 0.2 if it has worked examples  
-      + 0.1 if it has more than 2 key terms
+text            — cleaned chapter/section text
+math_text       — LaTeX formulas extracted by OpenAI vision
+image_texts     — natural-language chart descriptions from OpenAI vision
+table_texts     — extracted table rows
+embedding       — 768-dim vector (Gemini or OpenAI)
+chapter_num     — detected chapter number
+chapter_title   — detected chapter title
+section_title   — detected section heading
+has_formula     — boolean
+has_example     — boolean
+teaching_density— fraction of lines containing teaching signals
+key_terms       — extracted statistical/domain terms
 ```
 
-Chunks below 0.15 are thrown out. The rest are grouped by topic (chapter) and selected using a round-robin so the final set covers multiple chapters rather than just the highest-scoring one.
-
-If the instructor filtered to a specific chapter, only chunks from that chapter are used.
+Ingestion is **resumable** — re-uploading the same PDF continues from the last saved checkpoint.
 
 ---
 
-## Step 3 — LLM generation
+## Step 2 — DeepSearch Retrieval
 
-Each selected chunk gets sent to the LLM with a prompt that includes the chunk text, source metadata, and instructions for what the output should look like.
+When generation is triggered, the system does not simply search for the chapter title. It decomposes the topic using the LLM and runs multiple parallel vector searches.
 
-The LLM is told to return a JSON array where each question has:
-- `question_text`
-- `question_type`
-- `model_answer`
-- `rubric` — one criterion per mark, e.g. "1 mark: states the formula. 1 mark: correct interpretation."
-- `max_marks` — 2 for basic recall up to 8 for multi-step problems
-- `topic_tag`
-- `difficulty` — easy, medium, or hard
+**Round 0 — Concept extraction:**
+```
+Input:  "Chapter 3: Probability Topics"
+LLM →   ["sample space", "conditional probability", "Bayes theorem",
+          "independence", "complement rule", "multiplication rule"]
+Output: enriched topic string + concept list
+```
 
-Up to 3 chunks are processed at the same time (concurrent requests) to speed things up without hammering the API.
+**Round 1 — Multi-query retrieval:**
+```
+4 sub-queries run in parallel against MongoDB vector search:
+  Query 1: chapter topic + "definition formula"
+  Query 2: chapter topic + "worked example calculation"
+  Query 3: chapter topic + "compare analyse"
+  Query 4: chapter topic + enriched concept terms
 
-**If the LLM fails or returns bad JSON**, there's a fallback that generates basic questions deterministically from the text — things like fill-in-the-blank from key terms or true/false from source sentences. These are pretty low quality (always `easy`, `max_marks=2`) but better than nothing.
+Results: deduplicated, ranked by teaching_density, top-K returned
+```
 
----
-
-## Step 4 — Validation and cleanup
-
-The raw LLM output goes through a validation pass:
-- Checks all required fields are present
-- Normalises field types (e.g. `max_marks` should be a float, `difficulty` should be one of three values)
-- Drops any questions with empty `question_text` or `model_answer`
-- Deduplicates by comparing the first 60 characters of each question text
-
-Then the list gets trimmed to the requested count.
+This is inspired by multi-query RAG patterns — a single embedding query misses content phrased differently than the chapter title.
 
 ---
 
-## Text file uploads
+## Step 3 — Multi-Round Generation
 
-For `.txt` uploads there's no chunking — the text goes straight into a single generation prompt. Works fine for short content but obviously doesn't have chapter detection or content filtering.
+**Round 1 — Broad generation (~70% of target count):**
+
+The LLM receives the retrieved chunks and generates questions across all Bloom's taxonomy levels:
+
+| Level | Code | Focus |
+|---|---|---|
+| Remember | L1 | Recall facts, definitions, formulas |
+| Understand | L2 | Explain, interpret, summarise |
+| Apply | L3 | Calculate, use formula in scenario |
+| Analyse | L4 | Compare methods, break down assumptions |
+| Evaluate | L5 | Critique, justify, assess |
+
+**Round 2 — Coverage gap fill:**
+
+After Round 1, the system audits the Bloom's distribution. For each under-represented level:
+1. Generate a level-specific retrieval query (e.g. for L3: "calculate apply formula worked example numerical")
+2. Run targeted vector search
+3. Generate more questions locked to that Bloom's level
+4. Use Round 1 output as uniqueness context (prevents duplicates)
+
+**Round 3 — Validation and dedup:**
+- Remove near-duplicate questions (embedding cosine similarity ≥ 0.92)
+- Enforce Bloom's distribution (trim over-represented levels)
+- If still below target: run a small top-up pass
+- Return final set capped at requested count
 
 ---
 
-## Async jobs for large textbooks
+## Step 4 — Cross-Chapter Deduplication
 
-For big PDFs the `/generate/async` endpoint kicks off a Celery background job (`ingest_tasks.py`) instead of blocking the HTTP request. The job runs the same pipeline chapter by chapter. You poll `/questions/jobs/{job_id}` to check how it's going — it tracks how many chapters are done and how many questions have been created so far.
+After all chapters complete in parallel, all generated questions are compared across chapters using embedding cosine similarity. Questions too similar to one from a different chapter are dropped.
+
+This catches cases like "What is the mean?" appearing in both Chapter 1 (descriptive statistics) and Chapter 6 (normal distribution).
 
 ---
 
-## Embeddings
+## Step 5 — Storage
 
-After each question is saved to the database, an embedding is generated from the question text + model answer using `nomic-embed-text` (running locally via Ollama). This gets stored in a `pgvector` column. I added this mostly for future use — the idea being you could search questions semantically or detect duplicates across different generation runs.
+Questions are bulk-inserted into MongoDB with:
+- Embedding (768-dim) for future dedup and semantic search
+- `source_page_range` — which pages the question came from
+- `bloom_level` — L1–L5 classification
+- `difficulty` — easy / medium / hard
+- `rubric` — per-mark grading criteria
+- `model_answer` — full correct answer
+
+---
+
+## Question Format
+
+Each generated question includes:
+
+```json
+{
+  "question_text": "A bag contains 4 red and 6 blue marbles. What is P(red)?",
+  "question_type": "short_answer",
+  "model_answer": "P(red) = 4/10 = 0.4",
+  "rubric": "1 mark: correct numerator/denominator setup. 1 mark: correct decimal.",
+  "max_marks": 2,
+  "difficulty": "easy",
+  "bloom_level": "L3",
+  "topic_tag": "Probability Topics",
+  "source_page_range": "pp. 87-89"
+}
+```
+
+---
+
+## AI Provider
+
+Generation uses **OpenAI `gpt-4o-mini`** as primary, falling back to **Anthropic `claude-haiku-4-5-20251001`** if OpenAI hits quota. The fallback is automatic — no configuration needed.
+
+Gemini is not used for generation (it is used for embeddings only).
+
+---
+
+## Parallelism
+
+- Up to **5 chapters generate in parallel** (controlled by `GEN_CHAPTER_CONCURRENCY`)
+- Within each chapter, retrieval sub-queries run in parallel (`asyncio.gather`)
+- Cross-chapter dedup runs after all chapters complete
+
+Increasing `GEN_CHAPTER_CONCURRENCY` speeds up generation but increases API usage. With paid OpenAI keys, 5 is safe. Reduce to 2-3 if you hit rate limits.

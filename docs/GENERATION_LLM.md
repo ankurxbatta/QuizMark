@@ -1,114 +1,74 @@
-# Choosing and setting up an LLM for generation
+# LLM Providers for Generation and Marking
 
-The system needs an LLM to actually generate the questions. By default it's set up to use an online provider — I've tested it with Claude, GPT-4o, and Gemini. There's also a local fallback using qwen2:0.5b through Ollama if you don't want to use an external API.
+## Current Provider Setup
+
+All LLM tasks (question generation, answer marking, vision, math extraction) use **paid cloud APIs**. There are no local models. The system automatically rotates between providers when one hits its quota.
+
+| Task | Primary | Fallback |
+|---|---|---|
+| Embeddings | Gemini `gemini-embedding-001` (free) | OpenAI `text-embedding-3-small` (paid) |
+| Vision / charts | OpenAI `gpt-4o-mini` | Anthropic `claude-haiku-4-5-20251001` |
+| Math extraction | OpenAI `gpt-4o-mini` | Anthropic `claude-haiku-4-5-20251001` |
+| Question generation | OpenAI `gpt-4o-mini` | Anthropic `claude-haiku-4-5-20251001` → Gemini |
+| Answer marking | OpenAI `gpt-4o-mini` | Anthropic `claude-haiku-4-5-20251001` → Gemini |
 
 ---
 
-## Quick setup
+## Why These Providers
 
-Open your `.env` file and set these four lines:
+**Gemini (embeddings)** — The MongoDB vector index is built on 768-dim Gemini embeddings. Keeping the same model for new embeddings ensures search results are consistent. OpenAI `text-embedding-3-small` with `dimensions=768` is used as fallback and produces the same dimension, so the index works with either.
 
-```env
-GENERATION_LLM_ENABLED=true
-GENERATION_LLM_PROVIDER=anthropic
-GENERATION_LLM_MODEL=claude-sonnet-4-20250514
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-```
+**OpenAI gpt-4o-mini (primary)** — Chosen for its balance of cost (~$0.15/1M input tokens), speed, and quality. Vision capability (chart descriptions, math extraction) is built-in. Rate limits are high enough for concurrent ingestion (500 RPM).
 
-Then restart:
+**Anthropic claude-haiku (fallback)** — Fast, cheap ($0.80/1M input), and reliable. Activates automatically when OpenAI hits a rate limit or daily quota. No configuration needed.
+
+---
+
+## API Key Rotation
+
+`api_key_manager.py` tracks the health of each provider. When a 429 or quota error is received:
+
+- **Rate limit (429)**: provider enters 60-second cooldown, next provider used
+- **Quota exhaustion**: provider enters 1-hour cooldown, next provider used
+- **Automatic recovery**: after cooldown expires, provider is tried again
+
+To manually reset cooldowns (e.g. after adding quota or new keys):
 ```bash
-docker compose restart backend worker
+curl -X POST http://localhost:8000/api/v1/admin/api-status/reset-cooldowns \
+  -H "Authorization: Bearer <token>"
 ```
 
 ---
 
-## Supported providers
+## Estimated Cost
 
-### Anthropic (Claude)
+For a 600-page statistics textbook (585 chunks, 275 chart pages, 345 math pages):
+
+| Step | Provider | Cost |
+|---|---|---|
+| Chart descriptions (275 pages) | OpenAI gpt-4o-mini vision | ~$0.20 |
+| Math extraction (345 pages) | OpenAI gpt-4o-mini vision | ~$0.10 |
+| Embeddings (585 chunks) | OpenAI text-embedding-3-small | ~$0.005 |
+| **Total ingestion** | | **~$0.31** |
+| Question generation (13 chapters × 10 questions) | OpenAI gpt-4o-mini | ~$0.05 |
+| Per student submission marking | OpenAI gpt-4o-mini | ~$0.002 |
+
+With $5 in OpenAI and $5 in Anthropic, you can ingest many books and mark thousands of submissions before needing to top up.
+
+---
+
+## Changing Models
+
+Update `.env` to use a different model:
 
 ```env
-GENERATION_LLM_PROVIDER=anthropic
-GENERATION_LLM_MODEL=claude-sonnet-4-20250514
-ANTHROPIC_API_KEY=sk-ant-...
+# Use GPT-4o instead of gpt-4o-mini for higher quality generation
+OPENAI_GENERATION_MODEL=gpt-4o
+GENERATION_LLM_MODEL=gpt-4o
+
+# Use Claude Sonnet instead of Haiku for better fallback quality
+ANTHROPIC_GENERATION_MODEL=claude-sonnet-4-6
+ANTHROPIC_MARKING_MODEL=claude-sonnet-4-6
 ```
 
-Get a key at https://console.anthropic.com/
-
-This gives the best quality questions in my testing — rubrics are more detailed and the model answers are generally more accurate. Slightly slower and more expensive than the others.
-
-### OpenAI (GPT)
-
-```env
-GENERATION_LLM_PROVIDER=openai
-GENERATION_LLM_MODEL=gpt-4o-mini
-OPENAI_API_KEY=sk-...
-```
-
-Get a key at https://platform.openai.com/api-keys
-
-Good quality, fast, and cheaper than Claude. `gpt-4o-mini` is what I'd recommend for most use — `gpt-4o` is better but costs more.
-
-### Google Gemini
-
-```env
-GENERATION_LLM_PROVIDER=gemini
-GENERATION_LLM_MODEL=gemini-2.5-flash
-GEMINI_API_KEY=...
-```
-
-Get a key at https://aistudio.google.com/app/apikeys
-
-The cheapest option by a long way. Quality is decent — probably fine for most question types. I'd use this if you're generating a lot of questions and cost matters.
-
----
-
-## Rough comparison
-
-| | Claude Sonnet | GPT-4o Mini | Gemini 2.5 Flash |
-|---|---|---|---|
-| Quality | Best | Good | Good |
-| Rubric detail | Best | Good | Decent |
-| Speed per chunk | ~5–8s | ~3–4s | ~2–4s |
-| Cost per 100 questions | ~$0.30–0.60 | ~$0.05–0.10 | ~$0.01–0.05 |
-
-Honestly if you're just testing or don't have a budget constraint, start with Claude. If you're going to generate thousands of questions regularly, Gemini makes more sense financially.
-
----
-
-## Local fallback (no internet required)
-
-Set `GENERATION_LLM_ENABLED=false` and the system falls back to running qwen2:0.5b locally through Ollama.
-
-```env
-GENERATION_LLM_ENABLED=false
-```
-
-You'll need to pull the model first:
-```bash
-docker compose exec llm ollama pull qwen2:0.5b
-```
-
-The quality is noticeably worse — local generation tends to produce shorter model answers, looser rubrics, and sometimes returns malformed JSON that the fallback parser has to rescue. It's also slower on CPU (10–30s per chunk). But it works without any API key and keeps everything local.
-
----
-
-## How it works internally
-
-In `llm_service.py`, a `generation_service` object is created at startup based on your `.env` settings. All four clients (Anthropic, OpenAI, Gemini, Ollama) have the same `.generate(prompt)` interface, so the rest of the code doesn't need to care which one is being used. You can swap providers just by changing `.env` and restarting.
-
----
-
-## Common problems
-
-**"ANTHROPIC_API_KEY is not set"** — add it to `.env` and run `docker compose restart backend worker`
-
-**"Model not found"** — double-check `GENERATION_LLM_MODEL`. Valid examples:
-- Claude: `claude-sonnet-4-20250514`
-- OpenAI: `gpt-4o-mini`, `gpt-4o`
-- Gemini: `gemini-2.5-flash`, `gemini-2.0-flash`
-
-**Rate limit errors** — you're sending too many requests. Try reducing `count` or using a provider with higher rate limits. The Gemini client has automatic retry with backoff built in.
-
-**Generation comes back empty** — usually means the LLM returned something that couldn't be parsed as JSON. Check `docker compose logs backend` to see the raw response.
-
-**Too slow with local qwen2:0.5b** — this is a CPU bottleneck. Either switch to an online provider or uncomment the GPU block in `docker-compose.yml` if you have an Nvidia GPU available.
+Then restart: `docker compose restart worker-gen worker-mark backend`

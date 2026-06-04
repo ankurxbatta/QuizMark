@@ -1,70 +1,72 @@
-# Local vs online LLM for generation
+# Model Comparison
 
-I went back and forth on this during the project. Here's what I found.
-
----
-
-## The main trade-off
-
-Online models (Claude, GPT, Gemini) produce noticeably better questions — more accurate model answers, better rubrics, more consistent JSON output. But they cost money and send your data to a third party.
-
-Local models via Ollama are free and keep everything on your own machine, but question quality is worse and it's slow on CPU.
-
-For this project I defaulted to online because the whole point is generating good questions, and the cost at the scale we're talking about (a few hundred questions) is minimal. But I built the local fallback in case someone needs to run it without internet access or has concerns about data privacy.
+Tested on `IntroductoryBusinessStatistics-OP.pdf` (631 pages, 13 chapters).
 
 ---
 
-## What I tested
+## Embedding Models
 
-I compared output from three providers against local qwen2:0.5b on the same set of chapters.
-
-**Short answer questions:**
-Online models gave cleaner, more precise answers. qwen2:0.5b tended to be either too brief or started rambling. The rubrics from online models were better structured — proper one-criterion-per-mark format rather than vague descriptions.
-
-**MCQ:**
-Online models were much better at writing plausible distractors. qwen2:0.5b often produced obviously wrong options that any student could eliminate immediately.
-
-**True/false:**
-Similar quality actually — this is a simpler task and phi3:mini handled it reasonably well.
-
-**JSON reliability:**
-This was the biggest practical difference. Online models almost always return clean JSON. phi3:mini would frequently include prose before or after the JSON array, or occasionally produce malformed JSON entirely. I built a fallback parser that strips markdown fences and rescues partial arrays, but it still fails sometimes and triggers the deterministic fallback.
-
----
-
-## Rough quality estimate
-
-Based on reviewing about 200 generated questions:
-
-| | phi3:mini (local) | Claude Sonnet | GPT-4o Mini | Gemini Flash |
+| Model | Dimensions | Provider | Cost | Notes |
 |---|---|---|---|---|
-| Questions needing significant edits | ~40–50% | ~5–10% | ~10–15% | ~15–20% |
-| JSON parse failures | ~10–15% | <1% | <1% | 1–2% |
+| `gemini-embedding-001` | 768 | Gemini (free) | Free quota | Primary. MongoDB index built on this. |
+| `text-embedding-3-small` | 768* | OpenAI (paid) | $0.02/1M tokens | Fallback. `dimensions=768` keeps index compatible. |
 
-These are rough — it varies a lot depending on the source material.
-
----
-
-## My recommendation
-
-If you have budget for API calls, use an online provider. At a few thousand questions per year the cost is probably under $20–50 depending on which provider. The reduction in editing time is worth it.
-
-If you need local-only (privacy, no internet, institutional policy), phi3:mini works but plan to review and edit more of the output. Using a larger local model like llama3 would probably help but I haven't tested it for generation specifically — only marking.
+*`text-embedding-3-small` natively produces 1536-dim but is configured with `dimensions=768` so both providers are interchangeable without rebuilding the MongoDB vector index.
 
 ---
 
-## Switching providers
+## Vision Models (Chart Descriptions)
 
-It's just an environment variable change, no code changes needed:
+| Model | Provider | Cost | Quality | Speed |
+|---|---|---|---|---|
+| `gpt-4o-mini` | OpenAI | $0.15/1M in · $0.60/1M out | ★★★★☆ | Fast |
+| `claude-haiku-4-5-20251001` | Anthropic | $0.80/1M in · $4/1M out | ★★★★☆ | Fast |
+| `gemini-2.5-flash` | Gemini | Free quota | ★★★☆☆ | Fast |
 
-```env
-# Switch to Gemini
-GENERATION_LLM_PROVIDER=gemini
-GENERATION_LLM_MODEL=gemini-2.5-flash
-GEMINI_API_KEY=your-key
+**gpt-4o-mini** is used as primary. It reliably identifies histograms, scatter plots, frequency tables, and describes axis labels and data trends accurately.
 
-# Switch to local
-GENERATION_LLM_ENABLED=false
-```
+---
 
-Then `docker compose restart backend worker`.
+## Generation Models
+
+| Model | Provider | Cost | Quality | Notes |
+|---|---|---|---|---|
+| `gpt-4o-mini` | OpenAI | $0.15/1M in · $0.60/1M out | ★★★★☆ | Primary. Good at JSON output and Bloom's taxonomy. |
+| `claude-haiku-4-5-20251001` | Anthropic | $0.80/1M in · $4/1M out | ★★★★☆ | Fallback. Reliable structured output. |
+| `gpt-4o` | OpenAI | $2.50/1M in · $10/1M out | ★★★★★ | Higher quality, 16× more expensive. Use for critical question banks. |
+| `claude-sonnet-4-6` | Anthropic | $3/1M in · $15/1M out | ★★★★★ | Higher quality fallback. |
+
+**gpt-4o-mini** produces diverse, pedagogically sound questions with correct Bloom's classification and usable rubrics in the vast majority of cases. The quality difference vs gpt-4o is small for straightforward textbook content.
+
+---
+
+## Marking Models
+
+| Model | Provider | Cost per submission | Notes |
+|---|---|---|---|
+| `gpt-4o-mini` | OpenAI | ~$0.002 | Primary. Good at rubric-following. |
+| `claude-haiku-4-5-20251001` | Anthropic | ~$0.002 | Fallback. Very precise instruction-following. |
+
+Both models reliably follow the rubric structure and produce consistent scores when given clear rubrics. The SLM pre-scorer skips the LLM entirely for high-confidence matches (~30-40% of submissions), reducing cost.
+
+---
+
+## Math Extraction
+
+| Model | Provider | Quality | Notes |
+|---|---|---|---|
+| `gpt-4o-mini` (vision) | OpenAI | ★★★★☆ | Reliably extracts LaTeX from rendered page images. |
+| `claude-haiku-4-5-20251001` (vision) | Anthropic | ★★★★☆ | Good LaTeX output on complex formulas. |
+| Groq (retired) | Groq | ★★☆☆☆ | Removed — free tier rate-limited to ~1 page/8 min on vision tasks. |
+
+---
+
+## Why Groq and Mistral Were Removed
+
+**Groq** was originally used for question generation and math extraction (free tier). In practice:
+- Vision model (`llama-4-scout-17b-16e-instruct`) on the free tier allowed ~1 request per 8 minutes in practice, making 349-page math extraction take 7+ hours
+- Rate limits were unpredictable and silently caused long delays with no error logging
+
+**Mistral** was used for marking. Replaced by OpenAI gpt-4o-mini which is similarly priced, faster, and more consistent on structured rubric output.
+
+Both were replaced with paid OpenAI + Anthropic which provide predictable rate limits (500 RPM), reliable quality, and automatic fallback.

@@ -1,239 +1,225 @@
-# API endpoints
+# API Reference
 
 Base URL: `http://localhost:8000/api/v1`
 
-You can also use the interactive Swagger docs at `http://localhost:8000/docs` which lets you test endpoints directly in the browser — probably easier than reading this.
+All protected endpoints require a Bearer token. Get one from `POST /auth/login`.
 
-All endpoints except `/auth/login` and `/health` need a JWT token in the header:
-```
-Authorization: Bearer <your_token>
-```
+Interactive docs with live testing: **http://localhost:8000/docs**
 
 ---
 
-## Login
+## Auth
 
-### POST /auth/login
-
+### `POST /auth/login`
 ```json
-{ "username": "admin", "password": "yourpassword" }
+{ "username": "admin", "password": "your-password" }
 ```
-
-Returns:
-```json
-{ "access_token": "eyJ...", "token_type": "bearer" }
-```
-
-Use the `access_token` value in the Authorization header for everything else.
-
-Errors: `401` wrong credentials, `403` account locked after 3 failed attempts (locked for 5 minutes)
+Returns `{ "access_token": "...", "token_type": "bearer" }`.
 
 ---
 
-## Generating questions
+## Books and Ingestion
 
-### POST /questions/chapters
+### `POST /questions/ingest-book`
+Upload a PDF for ingestion. Returns immediately with a `job_id`.
+- Form field: `file` (PDF, max 25 MB)
+- If the same PDF was uploaded before, returns `resumed: true` and continues from the last checkpoint
 
-Scans a PDF and returns the chapters it found. Useful before generating so you can filter to one chapter. Doesn't create anything in the database.
-
-Send as `multipart/form-data` with a `file` field (PDF only).
-
-Example response:
 ```json
 {
-  "chapters": [
-    { "num": 1, "title": "Sampling and Data" },
-    { "num": 2, "title": "Descriptive Statistics" }
-  ]
-}
-```
-
-If no chapters are found it returns `[{ "num": 0, "title": "Entire Document" }]`.
-
----
-
-### POST /questions/generate
-
-Main generation endpoint. Takes a file and some options, runs the pipeline, and saves the generated questions to the database.
-
-Send as `multipart/form-data`:
-
-| Field | Required | Description |
-|---|---|---|
-| `file` | yes | `.pdf` or `.txt`, max 25 MB |
-| `question_type` | yes | `short_answer`, `mcq`, or `true_false` |
-| `count` | yes | How many questions to generate, 1–50 |
-| `topic_filter` | no | Filter to a specific chapter (use a title from `/questions/chapters`) |
-
-Example response:
-```json
-{
-  "generated": 15,
-  "source_file": "stats_chapter3.pdf",
-  "source_pages": 48,
-  "chunks_processed": 6,
-  "topics_covered": ["Normal Distribution"],
-  "questions": [
-    {
-      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-      "question_text": "What does a z-score tell you about a data point?",
-      "question_type": "short_answer",
-      "model_answer": "A z-score tells you how many standard deviations a data point is from the mean. A positive z-score means the value is above the mean, negative means below.",
-      "rubric": "1 mark: mentions standard deviations from mean. 1 mark: explains direction (above/below).",
-      "max_marks": 2.0,
-      "topic_tag": "Normal Distribution",
-      "difficulty": "easy",
-      "source_page_range": "45-52",
-      "source_chunk": "Ch3 § Standard Normal",
-      "created_at": "2026-05-10T12:00:00Z"
-    }
-  ]
-}
-```
-
-Error responses:
-- `413` — file too big
-- `415` — wrong file type
-- `422` — PDF has no readable text (probably a scanned image)
-- `500` — LLM didn't return anything usable
-
----
-
-### POST /questions/generate/async
-
-Same as above but runs as a background job instead of waiting. Use this for full textbooks that would time out otherwise. Only accepts PDFs.
-
-Send as `multipart/form-data`:
-
-| Field | Required | Description |
-|---|---|---|
-| `file` | yes | `.pdf` only |
-| `question_type` | yes | `short_answer`, `mcq`, or `true_false` |
-| `count_per_chapter` | yes | Questions per chapter, 1–50 |
-
-Returns immediately with a job ID:
-```json
-{
-  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "filename": "bigstatisticsbook.pdf",
-  "total_pages": 631,
+  "job_id": "abc123",
   "status": "queued",
-  "total_chapters": 0,
-  "chapters_done": 0,
-  "current_chapter": null,
-  "current_chapter_title": null,
-  "questions_created": 0,
-  "progress_message": "Queued for worker pickup.",
-  "last_heartbeat_at": "2026-05-10T12:00:00Z",
-  "created_at": "2026-05-10T12:00:00Z"
+  "resumed": false
 }
 ```
 
-Then poll to check progress.
-
----
-
-### GET /questions/jobs/{job_id}
-
-Check how an async job is going.
-
+### `GET /questions/jobs/{job_id}`
+Poll ingestion job status.
 ```json
 {
-  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "filename": "bigstatisticsbook.pdf",
-  "total_pages": 631,
+  "job_id": "abc123",
   "status": "processing",
-  "total_chapters": 12,
-  "chapters_done": 4,
-  "current_chapter": 5,
-  "current_chapter_title": "Normal Distribution",
-  "questions_created": 83,
-  "progress_message": "Processing Chapter 5: Normal Distribution (5/12).",
-  "last_heartbeat_at": "2026-05-10T12:12:10Z",
-  "error": null,
-  "created_at": "2026-05-10T12:00:00Z",
-  "started_at": "2026-05-10T12:00:00Z",
-  "completed_at": null
+  "total_pages": 631,
+  "pages_done": 200,
+  "progress_percent": 31,
+  "progress_message": "Read 200/631 pages · 87 chunks stored",
+  "chunks_stored": 87
 }
 ```
+Status values: `queued` · `processing` · `done` · `failed`
 
-Status goes: `queued` → `processing` → `done` or `failed`.
+### `GET /questions/jobs/{job_id}/stream`
+Server-Sent Events stream for real-time job progress. Used by the frontend.
 
-- `progress_message` tells you what stage/chapter is currently running.
-- `last_heartbeat_at` is updated by the worker while processing.
-- A `done` job may still include an `error` value if some chapters failed but others succeeded.
-
----
-
-## Managing questions
-
-### GET /questions/
-
-Returns all questions. Filter with query params:
-- `?topic=Normal Distribution`
-- `?difficulty=easy` (or `medium` / `hard`)
-
-### GET /questions/count
-
-Just returns `{ "total": 42 }`.
-
-### GET /questions/topics
-
-Returns every topic with a count:
-```json
-[
-  { "topic": "Normal Distribution", "count": 12 },
-  { "topic": "Hypothesis Testing", "count": 9 }
-]
-```
-
-### GET /questions/{id}
-
-Get one question by its UUID.
-
-### POST /questions/
-
-Add a question manually if you want to write your own.
-
+### `GET /questions/books`
+List all ingested books with stats.
 ```json
 {
-  "question_text": "Explain the central limit theorem in your own words.",
-  "question_type": "short_answer",
-  "model_answer": "The central limit theorem states that the sampling distribution of the mean approaches a normal distribution as the sample size increases, regardless of the population distribution.",
-  "rubric": "2 marks: correct statement about sampling distribution of the mean. 1 mark: mentions sample size increasing. 1 mark: regardless of population shape.",
-  "max_marks": 4,
-  "topic_tag": "Sampling Distributions",
-  "difficulty": "medium"
+  "books": [{
+    "book_id": "IntroductoryBusinessStatistics-OP",
+    "display_name": "Introductory Business Statistics",
+    "total_chunks": 585,
+    "total_chapters": 13,
+    "with_tables": 191,
+    "with_math": 345,
+    "with_images": 384,
+    "chapters": [{ "num": 1, "title": "Sampling and Data" }, ...],
+    "ingested_at": "2026-06-04T20:53:53Z"
+  }]
 }
 ```
 
-### PUT /questions/{id}
+### `GET /questions/books/cache`
+List incomplete (resumable) ingestion checkpoints.
 
-Update a question. Same fields as POST. Also regenerates the embedding.
+### `GET /questions/books/{book_id}`
+Stats for a single book.
 
-### DELETE /questions/{id}
-
-Deletes the question. Returns `204`.
-
----
-
-## Health check
-
-### GET /health
-
-Returns `{ "status": "ok" }` if the server is up.
+### `DELETE /questions/books/{book_hash}/cache`
+Delete ingestion checkpoint + partial chunks. Next upload of the same PDF starts from page 1.
 
 ---
 
-## Error reference
+## Question Generation
 
-| Code | What it means |
+### `POST /questions/generate/from-book`
+Start question generation from an already-ingested book.
+```json
+{
+  "book_id": "IntroductoryBusinessStatistics-OP",
+  "question_type": "mcq",
+  "count_per_chapter": 5,
+  "difficulty": "all",
+  "chapter_nums": [1, 2, 3]
+}
+```
+- `question_type`: `mcq` · `short_answer` · `true_false`
+- `difficulty`: `easy` · `medium` · `hard` · `all`
+- `chapter_nums`: omit to generate for all chapters
+
+Returns a `job_id` to poll.
+
+### `GET /questions`
+List questions with optional filters.
+
+Query params: `topic_tag` · `difficulty` · `question_type` · `bloom_level` · `skip` · `limit`
+
+### `GET /questions/{question_id}`
+Single question detail.
+
+### `PUT /questions/{question_id}`
+Update a question (edit text, rubric, model answer, max_marks).
+
+### `DELETE /questions/{question_id}`
+Delete a question.
+
+---
+
+## Submissions and Marking
+
+### `POST /submissions`
+Submit a student answer.
+```json
+{
+  "question_id": "...",
+  "student_id": "...",
+  "answer_text": "The mean is the sum divided by the count."
+}
+```
+
+### `GET /submissions/{submission_id}`
+Get a submission with marking result.
+```json
+{
+  "submission_id": "...",
+  "answer_text": "...",
+  "auto_mark": 2.5,
+  "max_marks": 3,
+  "auto_feedback": "Good explanation of the mean. Missing the formal notation.",
+  "is_marked": true,
+  "is_flagged": false
+}
+```
+
+### `POST /marking/mark/{submission_id}`
+Trigger marking for a specific submission.
+
+### `GET /submissions`
+List submissions. Params: `student_id` · `question_id` · `is_marked` · `is_flagged`
+
+---
+
+## Analytics
+
+### `GET /analytics/overview`
+Summary stats: total questions, submissions, marked count, average score.
+
+### `GET /analytics/by-topic`
+Per-topic breakdown of question count and average student score.
+
+### `GET /analytics/by-student`
+Per-student performance summary.
+
+---
+
+## Admin
+
+All admin endpoints require instructor role.
+
+### `GET /admin/api-status`
+Live probe of all API providers + rotation stats.
+```json
+{
+  "live_probes": [
+    { "provider": "gemini_embed", "reachable": true, "status_code": 200 },
+    { "provider": "openai_embed", "reachable": true, "status_code": 200 },
+    { "provider": "openai_generation", "reachable": true, "model": "gpt-4o-mini" },
+    { "provider": "anthropic", "reachable": true, "model": "claude-haiku-4-5-20251001" }
+  ],
+  "rotation_stats": [...],
+  "config": {
+    "embedding_chain": ["gemini_embed (free, 768-dim)", "openai_embed (paid, 768-dim)"],
+    "vision_chain": ["openai_vision (gpt-4o-mini)", "anthropic_vision (claude-haiku)"],
+    ...
+  }
+}
+```
+
+### `POST /admin/api-status/reset-cooldowns`
+Reset all provider cooldowns (use after adding new API keys or resolving quota issues).
+
+### `POST /admin/clean/all`
+Trigger text cleaning on all stored chunks. Runs on `worker-clean`.
+
+### `POST /admin/clean/book/{book_id}`
+Trigger text cleaning for a specific book.
+
+### `GET /admin/clean/preview/{book_id}`
+Preview noisy chunks before cleaning. Returns the top 10 noisiest chunks with before/after comparison.
+
+---
+
+## Export
+
+### `GET /export/questions`
+Export questions as CSV or JSON.
+
+Params: `format` (`csv` · `json`) · `topic_tag` · `difficulty`
+
+### `GET /export/submissions`
+Export submissions and marking results.
+
+---
+
+## Error Responses
+
+| Code | Meaning |
 |---|---|
-| 400 | Something wrong with the request |
-| 401 | Not logged in / token expired |
-| 403 | Account locked |
-| 404 | That ID doesn't exist |
-| 413 | File too large |
-| 415 | Wrong file type |
-| 422 | Validation failed (check the error body for details) |
-| 500 | Something broke server-side — check `docker compose logs backend` |
+| `400` | Bad request (validation error) |
+| `401` | Missing or invalid token |
+| `403` | Insufficient role (student trying instructor endpoint) |
+| `404` | Resource not found |
+| `413` | PDF too large (over 25 MB) |
+| `422` | Unprocessable entity (FastAPI validation) |
+| `429` | Rate limited |
+| `500` | Server error (check worker logs) |
