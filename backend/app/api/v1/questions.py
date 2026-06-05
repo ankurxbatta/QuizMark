@@ -366,6 +366,20 @@ async def clear_book_cache(
     return
 
 
+@router.delete("/books/{book_id}/delete", status_code=204)
+async def delete_book(
+    book_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    _: dict = Depends(require_instructor),
+):
+    """Permanently remove a book: deletes all chunks, questions, and job record."""
+    from app.services.mongo_vector_store import delete_book_chunks
+    await delete_book_chunks(book_id=book_id)
+    await db["questions"].delete_many({"book_id": book_id})
+    await db["ingest_jobs"].delete_one({"_id": book_id})
+    return
+
+
 # ── List ingested books ────────────────────────────────────────────────────────
 
 @router.get("/books")

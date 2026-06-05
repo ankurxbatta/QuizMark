@@ -45,8 +45,9 @@ function Stat({ icon: Icon, value, label, colour }: {
   );
 }
 
-function BookCard({ book }: { book: Book }) {
+function BookCard({ book, onDelete }: { book: Book; onDelete: (bookId: string) => Promise<void> }) {
   const router = useRouter();
+  const [deleting, setDeleting] = useState(false);
 
   const ingested = book.ingested_at
     ? new Date(book.ingested_at).toLocaleDateString("en-GB", {
@@ -54,10 +55,24 @@ function BookCard({ book }: { book: Book }) {
       })
     : null;
 
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(
+      `Remove "${book.display_name}" from the library?\n\n` +
+      "This permanently deletes all chunks and questions for this book and cannot be undone."
+    )) return;
+    setDeleting(true);
+    try {
+      await onDelete(book.book_id);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
-    <button
+    <div
       onClick={() => router.push(`/library/${encodeURIComponent(book.book_id)}`)}
-      className="bg-white rounded-xl border shadow-sm p-6 text-left w-full hover:border-indigo-400 hover:shadow-md transition-all group"
+      className="bg-white rounded-xl border shadow-sm p-6 text-left w-full hover:border-indigo-400 hover:shadow-md transition-all group cursor-pointer"
     >
       <div className="flex items-start gap-3">
         <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center shrink-0 group-hover:bg-indigo-200 transition-colors">
@@ -68,7 +83,19 @@ function BookCard({ book }: { book: Book }) {
             <h3 className="font-semibold text-gray-900 leading-tight truncate">
               {book.display_name}
             </h3>
-            <ChevronRight size={16} className="text-gray-400 group-hover:text-indigo-500 shrink-0 transition-colors" />
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="p-1.5 rounded-lg text-gray-300 hover:text-red-500 hover:bg-red-50 disabled:opacity-50 transition-colors"
+                title="Remove book from library"
+              >
+                {deleting
+                  ? <Loader2 size={14} className="animate-spin" />
+                  : <Trash2 size={14} />}
+              </button>
+              <ChevronRight size={16} className="text-gray-400 group-hover:text-indigo-500 transition-colors" />
+            </div>
           </div>
           <p className="text-xs text-gray-400 mt-0.5 font-mono truncate">{book.book_id}</p>
           {ingested && (
@@ -93,7 +120,7 @@ function BookCard({ book }: { book: Book }) {
           {book.chapters.length > 4 && ` · +${book.chapters.length - 4} more`}
         </p>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -118,6 +145,15 @@ export default function LibraryPage() {
       setError("Failed to load books. Make sure the backend is running.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const deleteBook = async (book_id: string) => {
+    try {
+      await api.delete(`/questions/books/${encodeURIComponent(book_id)}/delete`);
+      setBooks(prev => prev.filter(b => b.book_id !== book_id));
+    } catch {
+      alert("Failed to remove book.");
     }
   };
 
@@ -222,7 +258,7 @@ export default function LibraryPage() {
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                 {books.map((book) => (
-                  <BookCard key={book.book_id} book={book} />
+                  <BookCard key={book.book_id} book={book} onDelete={deleteBook} />
                 ))}
               </div>
             )}
