@@ -105,6 +105,11 @@ def ingest_book_resumable_task(self, job_id: str, pdf_b64: str, book_id: str, bo
     Page-by-page resumable PDF ingestion. Auto-continues across the Celery time
     limit by re-.delay()ing the same task with the same (job_id, book_hash).
     """
+    # Reset the Motor client so it binds to the new event loop, not the previous
+    # task's closed loop (Motor caches the client as a module-level singleton).
+    import app.core.database as _db_module
+    _db_module._client = None
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -337,6 +342,9 @@ async def _process_window_chunks(
 
 @celery_app.task(bind=True, queue="ingest_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def ingest_pdf_task(self, job_id: str, pdf_b64: str, question_type: str, count_per_chapter: int):
+    import app.core.database as _db_module
+    _db_module._client = None
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -690,6 +698,9 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
 @celery_app.task(bind=True, queue="gen_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def generate_from_book_task(self, job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all"):
     """Generate questions from chunks already stored in MongoDB (no PDF re-upload needed)."""
+    import app.core.database as _db_module
+    _db_module._client = None
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
