@@ -36,12 +36,15 @@ Uniqueness enforcement (4-level, from Shiksha's question_bank_parts_gen):
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 import re
 from typing import Optional
 
 from app.services.llm_service import generation_service, slm_service
 from app.services.pdf_service import TextChunk
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_exception_message(exc: Exception) -> str:
@@ -347,7 +350,7 @@ async def generate_targeted_bloom_questions(
         raw = await generation_service.generate(prompt)
         questions = _parse_json_array(raw)
     except Exception as e:
-        print(f"[GEN] targeted bloom {bloom_level} failed: {_safe_exception_message(e)}")
+        logger.warning(f"[GEN] targeted bloom {bloom_level} failed: {_safe_exception_message(e)}")
         questions = []
 
     # Force correct bloom_level and metadata
@@ -583,11 +586,11 @@ async def _generate_from_chunk(
         raw = await generation_service.generate(prompt)
         questions = _parse_json_array(raw)
     except Exception as e:
-        print(f"[GEN] chunk generation failed: {_safe_exception_message(e)}")
+        logger.warning(f"[GEN] chunk generation failed: {_safe_exception_message(e)}")
         questions = []
 
     if not questions:
-        print("[GEN] using deterministic fallback questions for chunk")
+        logger.info("[GEN] using deterministic fallback questions for chunk")
         questions = _fallback_questions_from_text(
             chunk.text,
             question_type,
@@ -631,20 +634,20 @@ async def generate_questions_from_chunks(
     Spreads questions across topics unless topic_filter is set.
     difficulty: "easy" | "medium" | "hard" | "all" (LLM distributes across Bloom's)
     """
-    print(f"[GEN] generate_questions_from_chunks: {len(chunks)} chunks, qtype={question_type}, count={count}, difficulty={difficulty}")
+    logger.info(f"[GEN] generate_questions_from_chunks: {len(chunks)} chunks, qtype={question_type}, count={count}, difficulty={difficulty}")
 
     if not chunks:
-        print("[GEN] No chunks provided!")
+        logger.warning("[GEN] No chunks provided!")
         return []
 
     # How many chunks to process and questions per chunk
     num_chunks = min(max((count + 2) // 3, 1), len(chunks), 15)
     questions_per_chunk = max(2, (count // num_chunks) + 1)
 
-    print(f"[GEN] Processing {num_chunks} chunks, {questions_per_chunk} questions per chunk")
+    logger.info(f"[GEN] Processing {num_chunks} chunks, {questions_per_chunk} questions per chunk")
 
     selected = _select_chunks(chunks, num_chunks, topic_filter)
-    print(f"[GEN] Selected {len(selected)} chunks")
+    logger.info(f"[GEN] Selected {len(selected)} chunks")
 
     # Process chunks concurrently (up to 3 at a time)
     all_questions: list[dict] = []
@@ -664,7 +667,7 @@ async def generate_questions_from_chunks(
     for r in results:
         all_questions.extend(r)
 
-    print(f"[GEN] Generated {len(all_questions)} questions from all chunks")
+    logger.info(f"[GEN] Generated {len(all_questions)} questions from all chunks")
 
     # Deduplicate by question_text similarity (simple prefix check)
     seen: set[str] = set()
@@ -674,12 +677,12 @@ async def generate_questions_from_chunks(
         if key and key not in seen:
             seen.add(key)
             deduped.append(q)
-    
-    print(f"[GEN] After dedup: {len(deduped)} questions")
+
+    logger.info(f"[GEN] After dedup: {len(deduped)} questions")
 
     # Validate required fields
     valid = _validate_questions(deduped, question_type)
-    print(f"[GEN] After validation: {len(valid)} questions")
+    logger.info(f"[GEN] After validation: {len(valid)} questions")
 
     return valid[:count]
 
@@ -694,8 +697,8 @@ async def generate_questions(
     Direct generation from plain text with Bloom's Taxonomy distribution
     and uniqueness enforcement vs existing_questions.
     """
-    print(f"[GEN] Starting direct question generation with question_type={question_type}, count={count}")
-    print(f"[GEN] Content length: {len(content)} chars")
+    logger.info(f"[GEN] Starting direct question generation with question_type={question_type}, count={count}")
+    logger.info(f"[GEN] Content length: {len(content)} chars")
 
     blooms_guide = _BLOOMS_GUIDE.format(count=count)
     uniqueness_block = _build_uniqueness_block(existing_questions or [])
@@ -708,17 +711,17 @@ async def generate_questions(
         uniqueness_block=uniqueness_block,
     )
     try:
-        print("[GEN] Generating questions directly...")
+        logger.info("[GEN] Generating questions directly...")
         raw = await generation_service.generate(prompt)
-        print(f"[GEN] LLM response length: {len(raw)}")
+        logger.info(f"[GEN] LLM response length: {len(raw)}")
         all_questions = _parse_json_array(raw)
-        print(f"[GEN] Generated {len(all_questions)} questions")
+        logger.info(f"[GEN] Generated {len(all_questions)} questions")
     except Exception as e:
-        print(f"[GEN] Direct generation failed: {_safe_exception_message(e)}")
+        logger.warning(f"[GEN] Direct generation failed: {_safe_exception_message(e)}")
         all_questions = []
 
     if not all_questions:
-        print("[GEN] using deterministic fallback questions for text input")
+        logger.info("[GEN] using deterministic fallback questions for text input")
         all_questions = _fallback_questions_from_text(
             content,
             question_type,
@@ -727,7 +730,7 @@ async def generate_questions(
         )
 
     result = _validate_questions(all_questions, question_type)[:count]
-    print(f"[GEN] Valid after validation: {len(result)}")
+    logger.info(f"[GEN] Valid after validation: {len(result)}")
     return result
 
 

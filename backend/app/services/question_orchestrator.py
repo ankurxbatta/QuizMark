@@ -27,7 +27,7 @@ each round's output feeds directly into the next round as context.
 """
 from __future__ import annotations
 
-import asyncio
+import logging
 from collections import Counter
 from typing import Optional
 
@@ -37,8 +37,9 @@ from app.services.question_generator import (
     extract_chapter_concepts,
     generate_questions_from_chunks,
     generate_targeted_bloom_questions,
-    _validate_questions,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── Bloom's targets and retrieval focus ───────────────────────────────────────
@@ -74,7 +75,6 @@ def _audit_bloom_gaps(
     A level is flagged as a gap if it has fewer than 50% of its target share.
     Returns a list of gap dicts: {bloom_level, needed, retrieval_suffix}
     """
-    n = len(questions)
     level_counts: Counter = Counter(q.get("bloom_level", "L3") for q in questions)
     gaps: list[dict] = []
     for level, target_pct in _BLOOMS_TARGET_PCT.items():
@@ -162,7 +162,7 @@ async def orchestrate_question_bank(
         Validated list of question dicts, len <= count.
     """
     existing_questions = list(existing_questions or [])
-    print(f"[ORCH] Starting 3-round orchestration for '{chapter_topic}' | target={count}")
+    logger.info(f"[ORCH] Starting 3-round orchestration for '{chapter_topic}' | target={count}")
 
     # ── Round 0: "Read the chapter carefully" → extract key concepts ──────────
     seed_raw = await deep_retrieve_for_generation(
@@ -173,11 +173,11 @@ async def orchestrate_question_bank(
         chapter_topic, seed_chunks, n=8,
     )
     if chapter_concepts:
-        print(f"[ORCH] Round 0 — concepts: {chapter_concepts}")
+        logger.info(f"[ORCH] Round 0 — concepts: {chapter_concepts}")
 
     # ── Round 1: Broad DeepSearch retrieval + initial generation ──────────────
     r1_target = max(int(count * 0.75), count)  # slight overgenerate to allow trimming
-    print(f"[ORCH] Round 1 — broad retrieval, target={r1_target}")
+    logger.info(f"[ORCH] Round 1 — broad retrieval, target={r1_target}")
 
     # Concept-augmented topic gives retrieval extra signal
     enriched_topic = chapter_topic
@@ -192,7 +192,7 @@ async def orchestrate_question_bank(
     chunks_r1 = [DbChunk(doc) for doc in raw_chunks_r1]
 
     if not chunks_r1:
-        print("[ORCH] Round 1 — no chunks retrieved, returning empty")
+        logger.warning("[ORCH] Round 1 — no chunks retrieved, returning empty")
         return []
 
     questions: list[dict] = await generate_questions_from_chunks(
@@ -202,20 +202,20 @@ async def orchestrate_question_bank(
         difficulty=difficulty,
         existing_questions=existing_questions,
     )
-    print(f"[ORCH] Round 1 — generated {len(questions)} questions")
+    logger.info(f"[ORCH] Round 1 — generated {len(questions)} questions")
 
     # Accumulate uniqueness context
     seen_texts = list(existing_questions) + [q["question_text"] for q in questions]
 
     # ── Round 2: Coverage audit → gap-fill per missing Bloom's level ──────────
     gaps = _audit_bloom_gaps(questions, target_count=count)
-    print(f"[ORCH] Round 2 — {len(gaps)} Bloom's gaps: {[g['bloom_level'] for g in gaps]}")
+    logger.info(f"[ORCH] Round 2 — {len(gaps)} Bloom's gaps: {[g['bloom_level'] for g in gaps]}")
 
     # Process each gap sequentially so each gap's output feeds the next's context
     for gap in gaps:
         bloom_level = gap["bloom_level"]
         needed = gap["needed"]
-        print(f"[ORCH] Round 2 — filling {bloom_level} gap, need {needed} questions")
+        logger.info(f"[ORCH] Round 2 — filling {bloom_level} gap, need {needed} questions")
 
         # Level-specific retrieval query
         focused_topic = f"{gap['retrieval_suffix']} {chapter_topic}"
@@ -227,7 +227,7 @@ async def orchestrate_question_bank(
         chunks_r2 = [DbChunk(doc) for doc in raw_chunks_r2]
 
         if not chunks_r2:
-            print(f"[ORCH] Round 2 — no chunks for {bloom_level} gap, skipping")
+            logger.warning(f"[ORCH] Round 2 — no chunks for {bloom_level} gap, skipping")
             continue
 
         gap_questions = await generate_targeted_bloom_questions(
@@ -237,18 +237,18 @@ async def orchestrate_question_bank(
             bloom_level=bloom_level,
             existing_questions=seen_texts,
         )
-        print(f"[ORCH] Round 2 — {bloom_level} gap filled with {len(gap_questions)} questions")
+        logger.info(f"[ORCH] Round 2 — {bloom_level} gap filled with {len(gap_questions)} questions")
         questions.extend(gap_questions)
         seen_texts.extend(q["question_text"] for q in gap_questions)
 
-    print(f"[ORCH] After Round 2 — {len(questions)} total questions")
+    logger.info(f"[ORCH] After Round 2 — {len(questions)} total questions")
 
     # ── Round 2b: Concept coverage gap-fill ───────────────────────────────────
     if chapter_concepts:
         joined_qs = " || ".join(q.get("question_text", "").lower() for q in questions)
         uncovered = [c for c in chapter_concepts if c.lower() not in joined_qs]
         if uncovered:
-            print(f"[ORCH] Round 2b — {len(uncovered)} uncovered concepts: {uncovered}")
+            logger.info(f"[ORCH] Round 2b — {len(uncovered)} uncovered concepts: {uncovered}")
             for concept in uncovered[:5]:  # cap so we don't explode the run
                 focused = f"{concept} {chapter_topic}"
                 raw_cc = await deep_retrieve_for_generation(
@@ -271,12 +271,12 @@ async def orchestrate_question_bank(
     # ── Round 3: Dedup + balance + top-up if still short ─────────────────────
     questions = _dedup_by_prefix(questions)
     questions = _balance_bloom_distribution(questions, target_count=count)
-    print(f"[ORCH] After Round 3 dedup/balance — {len(questions)} questions")
+    logger.info(f"[ORCH] After Round 3 dedup/balance — {len(questions)} questions")
 
     # Top-up: if we're more than 20% below target, do one more small pass
     shortfall = count - len(questions)
     if shortfall > max(1, count * 0.2) and chunks_r1:
-        print(f"[ORCH] Round 3 top-up — generating {shortfall} more questions")
+        logger.info(f"[ORCH] Round 3 top-up — generating {shortfall} more questions")
         topup = await generate_questions_from_chunks(
             chunks_r1,
             question_type=question_type,
@@ -288,5 +288,5 @@ async def orchestrate_question_bank(
         questions = _dedup_by_prefix(questions)
 
     final = questions[:count]
-    print(f"[ORCH] Final — {len(final)} questions for '{chapter_topic}'")
+    logger.info(f"[ORCH] Final — {len(final)} questions for '{chapter_topic}'")
     return final

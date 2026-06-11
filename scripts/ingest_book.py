@@ -6,9 +6,9 @@ Usage:
     python3 scripts/ingest_book.py [path/to/book.pdf]
 
 Reads the PDF page-by-page, extracts text/tables/math/images, generates
-embeddings via Gemini, describes charts via Gemini Vision, extracts math
-formulas via DeepSeek Vision API, then stores everything directly in MongoDB
-(pdf_chunks collection).
+embeddings via Gemini, describes charts and transcribes math formulas via the
+vision fallback chain (OpenAI → Anthropic → Gemini), then stores everything
+directly in MongoDB (pdf_chunks collection).
 
 No local models required. Reads credentials from .env in the project root.
 """
