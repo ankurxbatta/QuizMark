@@ -26,7 +26,7 @@ Open **http://localhost:3000** and log in with `admin` + the password you chose.
 
 - **Upload any PDF textbook** — chapters, sections, tables, math formulas, and charts are extracted and embedded into MongoDB
 - **Generate questions** (MCQ, short answer, true/false) using multi-round DeepSearch RAG: the system retrieves the most testable chunks, generates questions across all Bloom's taxonomy levels, then deduplicates
-- **Auto-mark student answers** using RAG-backed LLM marking — student responses are checked against the source textbook, not just the model answer
+- **Auto-mark student answers** — MCQ and True/False are marked instantly against a structured answer key stored at generation time (no model call); short answers use RAG-backed LLM marking checked against the source textbook, with calculations re-verified rather than trusting the model answer blindly
 - **Resumable ingestion** — large PDFs (600+ pages) checkpoint every 6 pages; re-uploading the same PDF continues from where it stopped
 
 ---

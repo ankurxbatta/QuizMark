@@ -641,6 +641,7 @@ async def generate_from_upload(
             "max_marks": float(q_data.get("max_marks", 5)),
             "topic_tag": q_data.get("topic_tag", "General"),
             "difficulty": q_data.get("difficulty", "medium"),
+            "correct_answer": q_data.get("correct_answer"),
             "source_page_range": q_data.get("_page_range"),
             "source_chunk": q_data.get("_source_chunk"),
             "embedding": embedding,
@@ -921,6 +922,16 @@ async def get_question(
     return _q_out(doc)
 
 
+def _derive_correct_answer(question_type: str, question_text: str, model_answer: str) -> str | None:
+    """Structured answer key for objective questions (marking compares directly)."""
+    from app.services.rag_pipeline import _extract_mcq_correct, _extract_true_false
+    if question_type == "mcq":
+        return _extract_mcq_correct(question_text, model_answer)
+    if question_type == "true_false":
+        return _extract_true_false(model_answer)
+    return None
+
+
 @router.post("/", response_model=QuestionOut, status_code=201)
 async def create_question(
     payload: QuestionCreate,
@@ -928,9 +939,11 @@ async def create_question(
     _: dict = Depends(require_instructor),
 ):
     embedding = await llm_service.embed(f"{payload.question_text} {payload.model_answer}")
+    qtype = getattr(payload.question_type, "value", str(payload.question_type))
     doc = {
         "_id": str(uuid.uuid4()),
         **payload.model_dump(),
+        "correct_answer": _derive_correct_answer(qtype, payload.question_text, payload.model_answer),
         "embedding": embedding,
         "assigned_student_ids": [],
         "created_at": datetime.now(timezone.utc),
@@ -949,6 +962,8 @@ async def update_question(
     if not await db["questions"].find_one({"_id": question_id}):
         raise HTTPException(404, "Question not found")
     data = payload.model_dump()
+    qtype = getattr(payload.question_type, "value", str(payload.question_type))
+    data["correct_answer"] = _derive_correct_answer(qtype, payload.question_text, payload.model_answer)
     data["embedding"] = await llm_service.embed(f"{payload.question_text} {payload.model_answer}")
     await db["questions"].update_one({"_id": question_id}, {"$set": data})
     doc = await db["questions"].find_one({"_id": question_id}, {"embedding": 0})

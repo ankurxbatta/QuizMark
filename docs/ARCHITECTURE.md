@@ -107,7 +107,15 @@ and the same window is retried — no orphaned or duplicated chunks.
 
 Both ingestion paths (one-shot upload+generate and resumable book-only)
 run through the same chain.
+
+Each stage reports progress to the ingest job ("Pages 7–12: reading
+formulas and charts with vision AI…"), so the UI shows live pipeline
+activity even while a multi-minute window is in flight.
 ```
+
+After the final window, specialist index builds (math / figure / table) are
+enqueued. Their status and progress are stored in `index_build_jobs` and
+surfaced on the Library book card until they finish.
 
 ---
 
@@ -139,7 +147,18 @@ Instructor requests generation
               → drops near-duplicates (cosine similarity ≥ 0.92)
               → enforces Bloom's distribution
 
+    Round 4:  numeric answer verification (answer_verifier.py)
+              → model answers containing calculations are recomputed in a
+                dedicated step-by-step LLM pass; wrong values are rewritten
+                so the marker is never fed arithmetic errors
+
   Cross-chapter dedup → bulk insert into MongoDB questions collection
+
+  MCQ and True/False questions are stored with a structured `correct_answer`
+  key (the letter A–D, or "True"/"False") extracted at generation time.
+  If fewer questions than requested survive dedup/validation, the job's done
+  message reports "Created N of M requested questions" instead of failing
+  silently.
 ```
 
 ---
@@ -147,12 +166,18 @@ Instructor requests generation
 ## Marking Pipeline
 
 ```
-Student submits answer
+Student submits answer  (one submission per question — duplicates get 409)
         │
         ▼
   worker-mark (concurrency=4)
 
-    SLM pre-scorer  — fast cosine similarity check
+    MCQ / True-False  — deterministic, no model call
+        │   compared directly against the stored correct_answer key
+        │   (falls back to parsing the model answer for legacy questions;
+        │    if no key can be determined the submission is flagged for
+        │    instructor review instead of silently scoring 0)
+        ▼
+    SLM pre-scorer  — fast cosine similarity check (short answer only)
         │
         ├── HIGH confidence (≥ 0.85) → mark accepted, no LLM call
         │
@@ -166,6 +191,12 @@ Student submits answer
                      Input: question + rubric + model answer + context
                      Provider: OpenAI gpt-4o-mini → Anthropic claude-haiku
                      Output: mark + written feedback → saved to MongoDB
+
+                     The model answer is treated as a guide, not ground
+                     truth: the marker recomputes calculations itself and,
+                     when a mathematically correct student answer conflicts
+                     with the model answer, awards the marks and flags the
+                     question for instructor review.
 ```
 
 ---
@@ -192,13 +223,18 @@ Both OpenAI and Anthropic produce 768-dim embeddings via `dimensions=768`, keepi
 |---|---|
 | `users` | Instructor and student accounts |
 | `pdf_chunks` | Textbook content with 768-dim embeddings |
-| `questions` | Generated question bank |
-| `submissions` | Student answers and marking results |
+| `questions` | Generated question bank (incl. `correct_answer` key for MCQ/TF) |
+| `submissions` | Student answers and marking results (unique per student+question) |
 | `ingest_jobs` | Job progress and status |
 | `ingest_checkpoints` | Resumable ingestion state (keyed by PDF SHA-256 hash) |
+| `math_index` / `figure_index` / `table_index` | Specialist RAG indexes |
+| `index_build_jobs` | Specialist index build status + progress |
 | `audit_logs` | Login and action history |
 
-The vector index on `pdf_chunks.embedding` uses cosine similarity (768 dimensions).
+All vector indexes use cosine similarity (768 dimensions). Collections and
+their vector search indexes are created at backend startup **and** ensured
+again before the first chunk write in each worker process — so a fresh
+database works on the very first ingestion, with no backend restart needed.
 
 ---
 

@@ -1218,6 +1218,10 @@ def _normalise_mcq(q: dict, raw_question_text) -> None:
     else:
         q["model_answer"] = model_answer
 
+    # Structured answer key — marking compares this directly instead of
+    # re-parsing the model answer prose (no LLM call, no regex fragility).
+    q["correct_answer"] = correct_letter
+
     q["rubric"] = q.get("rubric") or "Full marks: selects the correct option."
 
 
@@ -1250,6 +1254,10 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
         q["question_type"] = qt
         if q["question_type"] == "mcq":
             _normalise_mcq(q, raw_question_text)
+        elif q["question_type"] == "true_false":
+            tf = re.search(r"\b(true|false)\b", q["model_answer"], re.IGNORECASE)
+            if tf:
+                q["correct_answer"] = tf.group(1).title()
         # Normalise max_marks
         try:
             q["max_marks"] = float(q["max_marks"])

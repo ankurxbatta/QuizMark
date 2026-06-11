@@ -259,20 +259,41 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
     # ── Fast path for objective questions ─────────────────────────────────────
     if question["question_type"] in {"mcq", "true_false"}:
         student_answer = submission["answer_text"].strip()
-        if question["question_type"] == "mcq":
-            correct = _extract_mcq_correct(question["question_text"], question["model_answer"])
-            is_correct = bool(correct and student_answer.lower() == correct.lower())
-        else:
-            correct = _extract_true_false(question["model_answer"])
-            is_correct = bool(correct and student_answer.lower() == correct.lower())
+        # Prefer the structured answer key stored at generation time; fall back
+        # to parsing the model answer prose for questions created before the key.
+        correct = question.get("correct_answer")
+        if not correct:
+            if question["question_type"] == "mcq":
+                correct = _extract_mcq_correct(question["question_text"], question["model_answer"])
+            else:
+                correct = _extract_true_false(question["model_answer"])
+
+        if not correct:
+            # No reliable key — flag for the instructor rather than silently
+            # giving 0 against an unparseable model answer.
+            slm = SLMResult(
+                keyword_coverage=0.0, semantic_similarity=0.0, slm_raw_score=0.0,
+                confidence=0.0, provisional_mark=0.0, route="LOW",
+            )
+            feedback = (
+                "Could not determine the answer key for this question automatically — "
+                "an instructor will review and mark this answer."
+            )
+            await _persist(db, submission_id, 0.0, feedback, True, slm)
+            return _result(0.0, feedback, True, slm)
+
+        is_correct = student_answer.lower().rstrip(".") == correct.lower().rstrip(".")
 
         mark = float(question["max_marks"] if is_correct else 0.0)
-        feedback = "Correct." if is_correct else "Incorrect."
+        feedback = (
+            "Correct." if is_correct
+            else f"Incorrect — the correct answer is {correct}."
+        )
         slm = SLMResult(
             keyword_coverage=1.0 if is_correct else 0.0,
             semantic_similarity=1.0 if is_correct else 0.0,
             slm_raw_score=1.0 if is_correct else 0.0,
-            confidence=1.0 if is_correct else 0.0,
+            confidence=1.0,
             provisional_mark=mark,
             route="HIGH",
         )

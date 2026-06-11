@@ -407,6 +407,7 @@ def _normalise_q(q_data: dict, question_type: str, topic_tag: str) -> dict | Non
         "topic_tag": q_data.get("topic_tag", topic_tag),
         "difficulty": difficulty,
         "bloom_level": q_data.get("bloom_level", "L3"),
+        "correct_answer": q_data.get("correct_answer"),
         "_page_range": q_data.get("_page_range", ""),
         "_source_chunk": q_data.get("_source_chunk", ""),
     }
@@ -569,6 +570,7 @@ async def _run_chapters_parallel(
                 "topic_tag": q["topic_tag"],
                 "difficulty": q["difficulty"],
                 "bloom_level": q.get("bloom_level", "L3"),
+                "correct_answer": q.get("correct_answer"),
                 "source_page_range": q.get("_page_range", ""),
                 "source_chunk": q.get("_source_chunk", ""),
                 "embedding": e or None,

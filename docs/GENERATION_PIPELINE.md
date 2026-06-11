@@ -94,6 +94,19 @@ After Round 1, the system audits the Bloom's distribution. For each under-repres
 - If still below target: run a small top-up pass
 - Return final set capped at requested count
 
+**Round 4 — Numeric answer verification:**
+
+Short-answer model answers that contain calculations are recomputed in a
+dedicated step-by-step LLM pass (`answer_verifier.py`). Inline generation
+occasionally produces arithmetic errors (e.g. stating P(X &lt; 5) ≈ 0.265 when
+the true value is ≈ 0.285); since the marker measures students against the
+model answer, those errors would silently penalise correct answers. Wrong
+values are rewritten before storage; verification failures are non-fatal and
+keep the original answer.
+
+If the final count is below the requested count, the job's completion message
+reports "Created N of M requested questions" so the shortfall is visible.
+
 ---
 
 ## Step 4 — Cross-Chapter Deduplication
@@ -113,6 +126,10 @@ Questions are bulk-inserted into MongoDB with:
 - `difficulty` — easy / medium / hard
 - `rubric` — per-mark grading criteria
 - `model_answer` — full correct answer
+- `correct_answer` — structured answer key for MCQ (`"A"`–`"D"`) and
+  True/False (`"True"`/`"False"`); marking compares against this directly,
+  with no model call and no re-parsing of the model answer prose. Never
+  exposed through the student assessment endpoint.
 
 ---
 

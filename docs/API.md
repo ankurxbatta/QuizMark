@@ -80,10 +80,17 @@ List all ingested books with stats.
     "with_math": 345,
     "with_images": 384,
     "chapters": [{ "num": 1, "title": "Sampling and Data" }, ...],
-    "ingested_at": "2026-06-04T20:53:53Z"
+    "ingested_at": "2026-06-04T20:53:53Z",
+    "index_builds": [
+      { "index": "math", "status": "processing", "progress": "Enriching formulas 240/607" },
+      { "index": "figure", "status": "done" },
+      { "index": "table", "status": "done" }
+    ]
   }]
 }
 ```
+`index_builds` reports the specialist RAG index builds that run in the
+background after ingestion; the Library UI shows them until they finish.
 
 ### `GET /questions/books/cache`
 List incomplete (resumable) ingestion checkpoints.
@@ -142,6 +149,13 @@ Submit a student answer.
   "answer_text": "The mean is the sum divided by the count."
 }
 ```
+Returns `409 Conflict` if the student has already submitted an answer for
+this question — one submission per student per question. The assessment UI
+shows existing results on reload instead of an empty form.
+
+MCQ and True/False submissions are marked instantly by comparing against the
+question's stored `correct_answer` key — no model call. Short answers go
+through the SLM + RAG + LLM marking pipeline.
 
 ### `GET /submissions/{submission_id}`
 Get a submission with marking result.
