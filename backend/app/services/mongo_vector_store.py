@@ -64,12 +64,29 @@ def _index_definition(filter_paths: list[str] | None = None) -> dict:
     return {"fields": fields}
 
 
+async def _ensure_collection(collection_name: str) -> None:
+    """Create the collection if it doesn't exist yet.
+
+    create_search_index() fails with NamespaceNotFound on a missing collection,
+    so on a fresh database the vector indexes were never created (and nothing
+    retried after ingestion created the collections). Creating the collection
+    up front makes index creation work on the very first boot.
+    """
+    db = await _get_db()
+    try:
+        await db.create_collection(collection_name)
+        logger.info(f"Collection '{collection_name}' created")
+    except Exception:
+        pass  # already exists
+
+
 async def _ensure_index(
     collection_name: str,
     index_name: str,
     filter_paths: list[str] | None = None,
 ) -> None:
     try:
+        await _ensure_collection(collection_name)
         col = await _get_collection(collection_name)
         existing_def: dict | None = None
         exists = False
@@ -116,6 +133,23 @@ async def ensure_vector_index() -> None:
     await _ensure_index(TABLE_COLLECTION, TABLE_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
 
 
+_indexes_ensured = False
+
+
+async def _ensure_indexes_once() -> None:
+    """Run ensure_vector_index() once per process before the first write.
+
+    Celery workers never run the FastAPI startup hook, so without this the
+    chunks written by an ingest worker on a fresh database are unsearchable
+    until the backend is restarted by hand.
+    """
+    global _indexes_ensured
+    if _indexes_ensured:
+        return
+    _indexes_ensured = True
+    await ensure_vector_index()
+
+
 # ── PDF chunk store ────────────────────────────────────────────────────────────
 
 def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None) -> dict:
@@ -153,6 +187,7 @@ def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: s
 
 async def store_chunk(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None = None) -> str:
     try:
+        await _ensure_indexes_once()
         col = await _get_collection(CHUNKS_COLLECTION)
         doc = _chunk_to_doc(chunk, embedding, book_id, book_hash)
         if "_id" in doc:
@@ -185,6 +220,7 @@ async def store_chunks_bulk(
     if not docs:
         return 0
     try:
+        await _ensure_indexes_once()
         col = await _get_collection(CHUNKS_COLLECTION)
         result = await col.insert_many(docs, ordered=False)
         return len(result.inserted_ids)

@@ -315,8 +315,18 @@ async def _process_window_chunks(
     from app.services.ingestion_chain import run_ingest_chain
     from app.services.mongo_vector_store import store_chunks_bulk
 
+    # 1-based page label for stage progress messages ("Pages 1–6: …")
+    starts = [getattr(c, "page_start", None) for c in chunks]
+    ends = [getattr(c, "page_end", None) for c in chunks]
+    window_label = ""
+    if any(s is not None for s in starts):
+        lo = min(s for s in starts if s is not None) + 1
+        hi = max(e for e in ends if e is not None) + 1
+        window_label = f"Pages {lo}–{hi}: " if hi > lo else f"Page {lo}: "
+
     ctx = await run_ingest_chain({
         "chunks": chunks, "pdf_bytes": pdf_bytes, "job_id": job_id,
+        "window_label": window_label,
     })
     return await store_chunks_bulk(ctx["chunks"], ctx["embeddings"], book_id, book_hash)
 
@@ -680,7 +690,13 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
             progress_message=error_msg,
         )
     else:
+        requested = count_per_chapter * len(chapter_nums)
         prog = f"Completed successfully. Created {total_created} questions."
+        if 0 < total_created < requested:
+            prog = (
+                f"Completed. Created {total_created} of {requested} requested questions — "
+                "near-duplicates and questions failing validation are dropped."
+            )
         err = None
         if chapter_failures:
             err = f"Completed with {len(chapter_failures)} chapter failures. " + " | ".join(chapter_failures[:2])
@@ -791,7 +807,13 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
             error_message=error_msg, progress_message=error_msg,
         )
     else:
+        requested = count_per_chapter * len(selected_chapters)
         prog = f"Completed. Created {total_created} questions from database."
+        if 0 < total_created < requested:
+            prog = (
+                f"Completed. Created {total_created} of {requested} requested questions — "
+                "near-duplicates and questions failing validation are dropped."
+            )
         err = None
         if chapter_failures:
             err = f"Completed with {len(chapter_failures)} chapter failures."

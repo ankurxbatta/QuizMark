@@ -127,10 +127,15 @@ function JobCard({ job, onDismiss }: { job: Job; onDismiss: (id: string) => void
       )}
 
       {job.status === "done" && (
-        <p className="text-xs text-green-600">
-          {job.questions_created} questions ready —{" "}
-          <a href="/questions" className="underline hover:text-green-800">View Q&amp;A Bank</a>
-        </p>
+        <>
+          <p className="text-xs text-green-600">
+            {job.questions_created} questions ready —{" "}
+            <a href="/questions" className="underline hover:text-green-800">View Q&amp;A Bank</a>
+          </p>
+          {job.progress_message?.includes(" of ") && (
+            <p className="text-xs text-gray-400">{job.progress_message}</p>
+          )}
+        </>
       )}
 
       {job.status === "failed" && (

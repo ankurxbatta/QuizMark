@@ -770,7 +770,10 @@ async def generate_questions(
 
     result = _validate_questions(all_questions, question_type)[:count]
     logger.info(f"[GEN] Valid after validation: {len(result)}")
-    return result
+
+    # Recompute numeric model answers so the marker isn't fed arithmetic errors
+    from app.services.answer_verifier import verify_numeric_model_answers
+    return await verify_numeric_model_answers(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

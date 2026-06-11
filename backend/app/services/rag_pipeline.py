@@ -55,8 +55,14 @@ Student's Answer:
 
 Instructions:
 - Assign a mark between 0 and {max_marks} (decimals allowed).
+- The model answer is a guide, not ground truth. If the question involves a
+  calculation, recompute the result yourself step by step BEFORE judging the
+  student. Model answers occasionally contain arithmetic errors.
+- If the student's numeric result is mathematically correct but disagrees with
+  the model answer, award the marks for correct mathematics and set
+  "flagged": true so an instructor reviews the question.
 - Write 2-4 sentences of feedback referencing the rubric criteria.
-- Set "flagged": true only if the answer is genuinely ambiguous.
+- Also set "flagged": true if the answer is genuinely ambiguous.
 - Respond ONLY as valid JSON:
   {{"mark": <float>, "feedback": "<string>", "flagged": <bool>, "confidence": <float 0-1>}}
 """

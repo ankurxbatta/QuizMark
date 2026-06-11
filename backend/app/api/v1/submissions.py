@@ -64,6 +64,12 @@ async def submit_answer(
     if user_id not in question.get("assigned_student_ids", []):
         raise HTTPException(403, "This question is not assigned to you")
 
+    existing = await db["submissions"].find_one(
+        {"student_id": user_id, "question_id": question_id}
+    )
+    if existing:
+        raise HTTPException(409, "You have already submitted an answer for this question")
+
     now = datetime.now(timezone.utc)
     sub_doc = {
         "_id": str(uuid.uuid4()),

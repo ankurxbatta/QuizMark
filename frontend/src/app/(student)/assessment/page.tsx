@@ -322,7 +322,27 @@ export default function AssessmentPage() {
   };
 
   useEffect(() => {
-    api.get("/questions/assessment").then((r) => setQuestions(r.data)).catch(() => {});
+    // Load assigned questions alongside existing submissions so a reload
+    // after submitting shows results instead of a blank, resubmittable form.
+    Promise.all([
+      api.get<Question[]>("/questions/assessment"),
+      api.get<SubmissionResult[]>("/submissions/my").catch(() => ({ data: [] as SubmissionResult[] })),
+    ])
+      .then(([qRes, sRes]) => {
+        const assigned = qRes.data;
+        const mySubs = sRes.data.filter((s) => assigned.some((q) => q.id === s.question_id));
+        const answeredIds = new Set(mySubs.map((s) => s.question_id));
+        const unanswered = assigned.filter((q) => !answeredIds.has(q.id));
+
+        if (assigned.length > 0 && unanswered.length === 0) {
+          setQuestions(assigned);
+          setSubmissionIds(mySubs.map((s) => s.id));
+          setSubmitted(true);
+        } else {
+          setQuestions(unanswered);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {

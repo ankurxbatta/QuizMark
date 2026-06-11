@@ -278,9 +278,18 @@ async def build_math_index(book_id: str) -> dict:
             pass
 
         batch = max(1, settings.INDEX_BUILD_BATCH_SIZE)
-        for i in range(0, len(entries), batch):
+        total = len(entries)
+        for i in range(0, total, batch):
             await _enrich_batch(entries[i:i + batch], cache_col)
+            done = min(i + batch, total)
+            # This loop runs for minutes on a real book — without progress the
+            # worker looks dead from the outside.
+            logger.info(f"math_index: enriched {done}/{total} formulas for '{book_id}'")
+            await jobs_col.update_one({"_id": job_id}, {"$set": {
+                "progress": f"Enriching formulas {done}/{total}"}})
 
+        await jobs_col.update_one({"_id": job_id}, {"$set": {
+            "progress": f"Embedding {total} formulas"}})
         texts = [embedding_text(e) for e in entries]
         embeddings: list[list[float]] = []
         for i in range(0, len(texts), max(1, settings.EMBEDDING_BATCH_SIZE)):

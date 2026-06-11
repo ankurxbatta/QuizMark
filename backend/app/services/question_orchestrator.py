@@ -289,6 +289,8 @@ async def orchestrate_question_bank(
         questions.extend(topup)
         questions = _dedup_by_prefix(questions)
 
-    final = questions[:count]
+    # Recompute numeric model answers so the marker isn't fed arithmetic errors
+    from app.services.answer_verifier import verify_numeric_model_answers
+    final = await verify_numeric_model_answers(questions[:count])
     logger.info(f"[ORCH] Final — {len(final)} questions for '{chapter_topic}'")
     return final

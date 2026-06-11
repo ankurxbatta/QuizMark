@@ -490,6 +490,15 @@ async def list_books(
             job.get("filename", "") if job else ""
         ) or book_id.replace("-", " ").replace("_", " ").title()
 
+        # Specialist index build status (math/figure/table) so the UI can show
+        # that retrieval quality is still ramping up after ingestion.
+        index_builds = []
+        async for ib in db["index_build_jobs"].find(
+            {"book_id": book_id},
+            projection={"_id": 0, "index": 1, "status": 1, "progress": 1, "error": 1},
+        ):
+            index_builds.append(ib)
+
         books.append({
             "book_id": book_id,
             "display_name": display_name,
@@ -500,6 +509,7 @@ async def list_books(
             "with_math": doc["with_math"],
             "with_images": doc["with_images"],
             "ingested_at": doc["ingested_at"].isoformat() if doc.get("ingested_at") else None,
+            "index_builds": index_builds,
         })
     return {"books": books}
 

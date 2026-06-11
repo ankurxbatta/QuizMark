@@ -22,6 +22,13 @@ interface CachedBook {
   updated_at: string | null;
 }
 
+interface IndexBuild {
+  index: string;
+  status: string;
+  progress?: string | null;
+  error?: string | null;
+}
+
 interface Book {
   book_id: string;
   display_name: string;
@@ -32,6 +39,7 @@ interface Book {
   with_math: number;
   with_images: number;
   ingested_at: string | null;
+  index_builds?: IndexBuild[];
 }
 
 function Stat({ icon: Icon, value, label, colour }: {
@@ -119,6 +127,30 @@ function BookCard({ book, onDelete }: { book: Book; onDelete: (bookId: string) =
           {book.chapters.slice(0, 4).map((c) => `Ch ${c.num}: ${c.title}`).join(" · ")}
           {book.chapters.length > 4 && ` · +${book.chapters.length - 4} more`}
         </p>
+      )}
+
+      {(book.index_builds ?? []).some((b) => b.status === "processing" || b.status === "failed") && (
+        <div className="mt-3 space-y-1">
+          {(book.index_builds ?? [])
+            .filter((b) => b.status === "processing" || b.status === "failed")
+            .map((b) => (
+              <p
+                key={b.index}
+                className={`text-xs flex items-center gap-1.5 ${
+                  b.status === "failed" ? "text-red-500" : "text-amber-600"
+                }`}
+              >
+                {b.status === "processing" ? (
+                  <Loader2 size={11} className="animate-spin shrink-0" />
+                ) : (
+                  <Hourglass size={11} className="shrink-0" />
+                )}
+                {b.status === "failed"
+                  ? `${b.index} index build failed — search quality may be reduced`
+                  : `Building ${b.index} index${b.progress ? ` — ${b.progress.toLowerCase()}` : "…"}`}
+              </p>
+            ))}
+        </div>
       )}
     </div>
   );

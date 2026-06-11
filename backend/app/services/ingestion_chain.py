@@ -27,10 +27,37 @@ import dataclasses
 import logging
 import math as _math
 import re
+from datetime import datetime, timezone
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _report_stage(ctx: dict, message: str) -> None:
+    """Best-effort progress_message update on the ingest job.
+
+    A window's math/vision/embed stages can run for minutes; without this the
+    job message sits on the previous "Read N pages" line and the UI looks
+    stalled even though the pipeline is working.
+    """
+    job_id = ctx.get("job_id")
+    if not job_id:
+        return
+    try:
+        from app.core.database import get_mongo_db
+        db = get_mongo_db()
+        label = ctx.get("window_label", "")
+        msg = f"{label}{message}" if label else message
+        await db["ingest_jobs"].update_one(
+            {"_id": job_id},
+            {"$set": {
+                "progress_message": msg,
+                "last_heartbeat_at": datetime.now(timezone.utc),
+            }},
+        )
+    except Exception:
+        pass
 
 try:
     from langchain_core.runnables import RunnableLambda
@@ -165,6 +192,7 @@ async def _semantic_stage(ctx: dict) -> dict:
 async def _math_stage(ctx: dict) -> dict:
     from app.services.chunk_validator import validate_chunks
 
+    await _report_stage(ctx, "validating and repairing formulas…")
     try:
         await validate_chunks(ctx["chunks"], job_id=ctx.get("job_id"))
     except Exception as exc:
@@ -187,6 +215,7 @@ async def _vision_stage(ctx: dict) -> dict:
     if any(getattr(c, "math_rects", None) for c in chunks):
         jobs.append(transcribe_math_chunks(chunks, pdf_bytes, concurrency=concurrency, job_id=job_id))
     if jobs:
+        await _report_stage(ctx, "reading formulas and charts with vision AI…")
         # Both vision passes share the window — run them concurrently
         results = await asyncio.gather(*jobs, return_exceptions=True)
         for r in results:
@@ -200,6 +229,7 @@ async def _vision_stage(ctx: dict) -> dict:
 async def _embed_stage(ctx: dict) -> dict:
     from app.services.llm_service import llm_service
 
+    await _report_stage(ctx, "embedding chunks for search…")
     chunks = ctx["chunks"]
     texts = [chunk_embedding_text(c) for c in chunks]
     batch_size = max(1, int(getattr(settings, "EMBEDDING_BATCH_SIZE", 100)))
