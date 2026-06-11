@@ -207,3 +207,124 @@ async def verify_numeric_model_answers(questions: list[dict]) -> list[dict]:
 
     await asyncio.gather(*[_bounded(q) for q in numeric])
     return questions
+
+
+# ── MCQ option validation ──────────────────────────────────────────────────────
+# Generated distractors are sometimes true statements (often a rephrasing of
+# the correct option). With deterministic letter-comparison marking, a student
+# who picks the synonymous distractor is wrongly given 0 — so every distractor
+# must be verifiably false before the question is stored.
+
+_MCQ_JUDGE_PROMPT = """You are reviewing a multiple-choice exam question for ambiguity.
+
+Question:
+{stem}
+
+Options:
+{options_block}
+
+For EACH option independently, decide whether it is a factually correct answer to the question — not whether it is the "best" or intended answer. An option that restates another correct option in different words is also correct.
+
+Respond ONLY as valid JSON:
+{{"A": <bool>, "B": <bool>, "C": <bool>, "D": <bool>}}
+"""
+
+_MCQ_FIX_PROMPT = """This multiple-choice exam question has a problem: some of its wrong options are actually true statements, so more than one option is correct.
+
+Question:
+{stem}
+
+Options:
+{options_block}
+
+The intended correct answer is {correct_letter}: {correct_text}
+
+Rewrite ONLY the options {fix_letters} so each becomes a plausible but unambiguously FALSE answer to the question — a common misconception or error, NOT a rephrasing of the correct answer and NOT a true statement. Keep them similar in length and tone to the other options.
+
+Respond ONLY as valid JSON mapping the rewritten letters to their new text, e.g.:
+{{"D": "<new option text>"}}
+"""
+
+
+def _options_block(options: dict[str, str]) -> str:
+    return "\n".join(f"{letter}. {options[letter]}" for letter in sorted(options))
+
+
+async def _verify_mcq_one(question: dict) -> None:
+    from app.services.question_generator import _split_mcq_text
+
+    stem, options = _split_mcq_text(question.get("question_text", ""))
+    correct = (question.get("correct_answer") or "").strip().upper()
+    if not stem or correct not in options or len(options) < 3:
+        return
+
+    raw = await llm_service.generate(_MCQ_JUDGE_PROMPT.format(
+        stem=stem, options_block=_options_block(options),
+    ))
+    verdict = _parse_json(raw)
+    if not verdict:
+        return
+    judged_true = {k.upper() for k, v in verdict.items() if v is True and k.upper() in options}
+
+    if correct not in judged_true:
+        # The stored key itself failed the check — a single LLM judgement isn't
+        # enough evidence to overturn the key, so just surface it in the logs.
+        logger.warning(
+            "[VERIFY-MCQ] stored key %s judged not-correct for %r — leaving unchanged",
+            correct, stem[:80],
+        )
+        return
+
+    extra_true = sorted(judged_true - {correct})
+    if not extra_true:
+        return  # exactly one correct option — question is fine
+
+    raw_fix = await llm_service.generate(_MCQ_FIX_PROMPT.format(
+        stem=stem,
+        options_block=_options_block(options),
+        correct_letter=correct,
+        correct_text=options[correct],
+        fix_letters=", ".join(extra_true),
+    ))
+    fixes = _parse_json(raw_fix) or {}
+    applied = []
+    for letter in extra_true:
+        new_text = str(fixes.get(letter) or fixes.get(letter.lower()) or "").strip()
+        if new_text and new_text.lower() != options[correct].lower():
+            options[letter] = new_text
+            applied.append(letter)
+    if not applied:
+        return
+    question["question_text"] = "\n".join(
+        [stem, *(f"{letter}. {options[letter]}" for letter in sorted(options))]
+    )
+    logger.info(
+        "[VERIFY-MCQ] rewrote ambiguous distractor(s) %s for %r",
+        applied, stem[:80],
+    )
+
+
+async def verify_mcq_options(questions: list[dict]) -> list[dict]:
+    """Ensure each MCQ has exactly one correct option; rewrites true distractors in place."""
+    mcqs = [q for q in questions if q.get("question_type") == "mcq"]
+    if not mcqs:
+        return questions
+    logger.info(f"[VERIFY-MCQ] checking {len(mcqs)} MCQ option sets")
+    semaphore = asyncio.Semaphore(3)
+
+    async def _bounded(q: dict) -> None:
+        async with semaphore:
+            try:
+                await _verify_mcq_one(q)
+            except Exception as exc:
+                logger.warning(f"[VERIFY-MCQ] check failed (non-fatal): {exc}")
+
+    await asyncio.gather(*[_bounded(q) for q in mcqs])
+    return questions
+
+
+async def verify_generated_questions(questions: list[dict]) -> list[dict]:
+    """All post-generation quality passes: numeric recomputation + MCQ ambiguity."""
+    await verify_numeric_model_answers(questions)
+    await verify_mcq_options(questions)
+    return questions

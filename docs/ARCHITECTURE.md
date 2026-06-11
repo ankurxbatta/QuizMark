@@ -147,10 +147,13 @@ Instructor requests generation
               → drops near-duplicates (cosine similarity ≥ 0.92)
               → enforces Bloom's distribution
 
-    Round 4:  numeric answer verification (answer_verifier.py)
-              → model answers containing calculations are recomputed in a
-                dedicated step-by-step LLM pass; wrong values are rewritten
-                so the marker is never fed arithmetic errors
+    Round 4:  quality verification (answer_verifier.py)
+              → numeric model answers: LLM extracts the calculation as a
+                Python expression, evaluated deterministically; wrong values
+                are rewritten so the marker is never fed arithmetic errors
+              → MCQ options: each option judged independently; distractors
+                that are actually true (rephrasings of the correct option)
+                are rewritten to be unambiguously false
 
   Cross-chapter dedup → bulk insert into MongoDB questions collection
 

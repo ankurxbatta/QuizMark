@@ -94,15 +94,25 @@ After Round 1, the system audits the Bloom's distribution. For each under-repres
 - If still below target: run a small top-up pass
 - Return final set capped at requested count
 
-**Round 4 — Numeric answer verification:**
+**Round 4 — Quality verification (`answer_verifier.py`):**
 
-Short-answer model answers that contain calculations are recomputed in a
-dedicated step-by-step LLM pass (`answer_verifier.py`). Inline generation
-occasionally produces arithmetic errors (e.g. stating P(X &lt; 5) ≈ 0.265 when
-the true value is ≈ 0.285); since the marker measures students against the
-model answer, those errors would silently penalise correct answers. Wrong
-values are rewritten before storage; verification failures are non-fatal and
-keep the original answer.
+*Numeric answers* — short-answer model answers containing calculations are
+checked by having the LLM extract the final calculation as a pure-Python
+expression, which is then evaluated deterministically (restricted namespace).
+Inline generation occasionally produces arithmetic errors (e.g. stating
+P(X &lt; 5) ≈ 0.265 when the true value is ≈ 0.285); since the marker measures
+students against the model answer, those errors would silently penalise
+correct answers. Wrong values are rewritten before storage with the
+deterministically computed number.
+
+*MCQ ambiguity* — each option is judged independently for factual
+correctness. Distractors that are actually true (typically a rephrasing of
+the correct option, e.g. "the area under the pdf up to 5" vs "P(X ≤ 5)") are
+rewritten into plausible but unambiguously false statements. This matters
+because MCQ marking is a deterministic letter comparison — a student picking
+a synonymous distractor would otherwise be wrongly given 0.
+
+All verification failures are non-fatal and keep the original question.
 
 If the final count is below the requested count, the job's completion message
 reports "Created N of M requested questions" so the shortfall is visible.

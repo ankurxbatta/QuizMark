@@ -289,6 +289,8 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
   C. Third option
   D. Fourth option
 - Four substantive options; distractors reflect common misconceptions.
+- Every distractor must be factually FALSE as an answer to the stem — never a
+  rephrasing or equivalent formulation of the correct option.
 - Model answer: correct letter + brief explanation.
 
 ━━━ TRUE/FALSE ━━━
@@ -475,6 +477,10 @@ BAD example (avoid): "Based on the text, explain in your own words what conditio
 - NEVER generate fill-in-the-blank sentences that just blank out a word from the text.
 - Four substantive options (A–D); distractors should reflect common misconceptions.
 - Only one option is unambiguously correct.
+- Every distractor must be factually FALSE as an answer to the stem — never a
+  rephrasing, special case, or equivalent formulation of the correct option
+  (e.g. if the correct option is "P(X ≤ 5)", a distractor must not be "the
+  area under the pdf up to 5" — that is the same statement in other words).
 - Model answer: start with the correct letter + brief explanation, e.g. "B. Increasing n lowers the standard error."
 - Never omit the options. Preferred format: put the A-D options inside question_text. If you use a separate options/choices field, it must be an object with keys A, B, C, D.
 
@@ -771,9 +777,9 @@ async def generate_questions(
     result = _validate_questions(all_questions, question_type)[:count]
     logger.info(f"[GEN] Valid after validation: {len(result)}")
 
-    # Recompute numeric model answers so the marker isn't fed arithmetic errors
-    from app.services.answer_verifier import verify_numeric_model_answers
-    return await verify_numeric_model_answers(result)
+    # Quality passes: recompute numeric model answers, de-ambiguate MCQ options
+    from app.services.answer_verifier import verify_generated_questions
+    return await verify_generated_questions(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
