@@ -29,74 +29,13 @@ from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.models.models import IngestJobStatus
 from app.services.pdf_service import parse_pdf_into_chunks
-from app.services.question_generator import generate_questions_from_chunks, DbChunk
 from app.services.question_orchestrator import orchestrate_question_bank
 from app.services.llm_service import llm_service
-from app.services.text_cleaner import clean_chunk_doc
 
 logger = logging.getLogger(__name__)
 
 _ALLOWED_QTYPES = {"mcq", "true_false", "short_answer"}
 _ALLOWED_DIFFICULTIES = {"easy", "medium", "hard"}
-
-
-def _chunk_embedding_text(chunk) -> str:
-    parts = [
-        f"{chunk.chapter_title} {chunk.section_title}",
-        chunk.text[:1500],
-    ]
-    for label, values in (
-        ("Tables", getattr(chunk, "table_texts", [])),
-        ("Images and charts", getattr(chunk, "image_texts", [])),
-    ):
-        if values:
-            parts.append(f"{label}:\n" + "\n".join(values)[:1200])
-    math_text = getattr(chunk, "math_text", "")
-    if math_text:
-        parts.append(f"Formula snippets:\n{math_text[:800]}")
-    return "\n\n".join(part for part in parts if part)
-
-
-async def _embed_and_store_sequential(chunks, book_id, db, job_id):
-    """
-    Embed chunks sequentially and store them in MongoDB.
-    Avoids batch processing to prevent API exhaustion and 429 errors.
-    Returns (stored_count, error_count).
-    """
-    from app.services.mongo_vector_store import store_chunk as _mongo_store
-
-    if not chunks:
-        return 0, 0
-
-    await _update_job(db, job_id,
-        progress_message=f"Embedding and storing {len(chunks)} chunks sequentially…",
-    )
-
-    stored = 0
-    errors = 0
-    for i, chunk in enumerate(chunks):
-        text = _chunk_embedding_text(chunk)
-        try:
-            emb = await llm_service.embed(text)
-            if emb:
-                await _mongo_store(chunk, emb, book_id)
-                stored += 1
-            else:
-                errors += 1
-        except Exception as exc:
-            logger.error(f"Sequential embedding failed for chunk {i}: {exc}")
-            errors += 1
-
-        # Update the UI every 10 chunks so it never gets stuck
-        if i % 10 == 0 and i > 0:
-            await _update_job(db, job_id,
-                progress_message=f"Stored {i}/{len(chunks)} chunks…",
-            )
-            
-        # Small delay to prevent rate limiting
-        await asyncio.sleep(settings.GEMINI_EMBEDDING_DELAY_SECONDS)
-
-    return stored, errors
 
 
 @celery_app.task(bind=True, queue="ingest_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
@@ -155,10 +94,9 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
     import fitz  # PyMuPDF — pulled here so the task module imports cheaply
     from app.services.pdf_extractor import (
         ChunkAccumulator, process_page_window, _OCR_AVAILABLE,
-        describe_graph_chunks, transcribe_math_chunks,
     )
     from app.services.mongo_vector_store import (
-        get_checkpoint, save_checkpoint, store_chunks_bulk,
+        get_checkpoint, save_checkpoint, delete_chunks_created_after,
     )
 
     db = get_mongo_db()
@@ -166,6 +104,23 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
 
     # ── Restore or create checkpoint ──────────────────────────────────────────
     ck = await get_checkpoint(book_hash) or {}
+
+    # Roll back any partially-written window from a previous failed run so the
+    # retried window is idempotent: chunks created at/after the failed window's
+    # start timestamp are deleted, then the window re-processes from the
+    # pre-window accumulator state (next_page was never advanced on failure).
+    failed_window = ck.get("failed_window")
+    if failed_window and failed_window.get("window_started_at"):
+        removed = await delete_chunks_created_after(
+            book_hash, failed_window["window_started_at"]
+        )
+        logger.info(
+            f"Rolled back {removed} partial chunk(s) from failed window "
+            f"{failed_window.get('start')}–{failed_window.get('end')} "
+            f"(book {book_hash}): {failed_window.get('error', '')[:120]}"
+        )
+        await save_checkpoint(book_hash, {"failed_window": None})
+
     next_page = int(ck.get("next_page", 0))
     pages_done = int(ck.get("pages_done", 0))
     chunks_stored = int(ck.get("chunks_stored", 0))
@@ -180,6 +135,24 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
     # ── Open PDF + size it ────────────────────────────────────────────────────
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = min(doc.page_count, settings.PDF_MAX_PAGES)
+
+    async def _record_window_failure(*, state, window_start, window_end, started_at, exc):
+        """Checkpoint a failed window WITHOUT advancing next_page. The next run
+        deletes chunks created at/after `started_at` (rollback) and re-processes
+        the same window from the pre-window accumulator `state`."""
+        await save_checkpoint(book_hash, {
+            "book_id": book_id, "job_id": job_id,
+            "total_pages": total_pages,
+            "next_page": window_start, "pages_done": pages_done,
+            "chunks_stored": chunks_stored, "ocr_active": ocr_active,
+            "status": "in_progress",
+            "state": state,
+            "failed_window": {
+                "start": window_start, "end": window_end,
+                "error": str(exc)[:500],
+                "window_started_at": started_at,
+            },
+        })
 
     now = datetime.now(timezone.utc)
     starting_msg = (
@@ -199,10 +172,20 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
 
     if next_page >= total_pages:
         # Already fully read but checkpoint not marked complete — finalize now
-        trailing = accumulator.finalize(total_pages)
-        chunks_stored += await _process_window_chunks(
-            trailing, pdf_bytes, book_id, book_hash, db, job_id
-        )
+        pre_window_state = accumulator.serialize()
+        window_started_at = datetime.now(timezone.utc)
+        try:
+            trailing = accumulator.finalize(total_pages)
+            chunks_stored += await _process_window_chunks(
+                trailing, pdf_bytes, book_id, book_hash, db, job_id
+            )
+        except Exception as exc:
+            doc.close()
+            await _record_window_failure(
+                state=pre_window_state, window_start=next_page,
+                window_end=total_pages, started_at=window_started_at, exc=exc,
+            )
+            raise
         await save_checkpoint(book_hash, {
             "book_id": book_id, "job_id": job_id,
             "total_pages": total_pages,
@@ -210,6 +193,7 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
             "chunks_stored": chunks_stored, "ocr_active": ocr_active,
             "status": "complete",
             "state": accumulator.serialize(),
+            "failed_window": None,
         })
         await _update_job(db, job_id,
             status=IngestJobStatus.done.value,
@@ -226,13 +210,23 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
 
     while next_page < total_pages:
         end = min(next_page + window, total_pages)
-        window_chunks, ocr_active = process_page_window(
-            doc, next_page, end, accumulator, ocr_active
-        )
-        # Vision + embed + bulk-insert this window's flushed chunks
-        added = await _process_window_chunks(
-            window_chunks, pdf_bytes, book_id, book_hash, db, job_id,
-        )
+        pre_window_state = accumulator.serialize()
+        window_started_at = datetime.now(timezone.utc)
+        try:
+            window_chunks, ocr_active = process_page_window(
+                doc, next_page, end, accumulator, ocr_active
+            )
+            # Vision + embed + bulk-insert this window's flushed chunks
+            added = await _process_window_chunks(
+                window_chunks, pdf_bytes, book_id, book_hash, db, job_id,
+            )
+        except Exception as exc:
+            doc.close()
+            await _record_window_failure(
+                state=pre_window_state, window_start=next_page,
+                window_end=end, started_at=window_started_at, exc=exc,
+            )
+            raise
         chunks_stored += added
 
         next_page = end
@@ -245,6 +239,7 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
             "chunks_stored": chunks_stored, "ocr_active": ocr_active,
             "status": "in_progress",
             "state": accumulator.serialize(),
+            "failed_window": None,
         })
 
         pct = int(100 * pages_done / max(total_pages, 1))
@@ -268,10 +263,20 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
             return True  # caller will re-.delay()
 
     # ── Final flush of trailing buffer ────────────────────────────────────────
-    trailing = accumulator.finalize(total_pages)
-    chunks_stored += await _process_window_chunks(
-        trailing, pdf_bytes, book_id, book_hash, db, job_id,
-    )
+    pre_window_state = accumulator.serialize()
+    window_started_at = datetime.now(timezone.utc)
+    try:
+        trailing = accumulator.finalize(total_pages)
+        chunks_stored += await _process_window_chunks(
+            trailing, pdf_bytes, book_id, book_hash, db, job_id,
+        )
+    except Exception as exc:
+        doc.close()
+        await _record_window_failure(
+            state=pre_window_state, window_start=next_page,
+            window_end=total_pages, started_at=window_started_at, exc=exc,
+        )
+        raise
     await save_checkpoint(book_hash, {
         "book_id": book_id, "job_id": job_id,
         "total_pages": total_pages,
@@ -279,6 +284,7 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
         "chunks_stored": chunks_stored, "ocr_active": ocr_active,
         "status": "complete",
         "state": accumulator.serialize(),
+        "failed_window": None,
     })
     await _update_job(db, job_id,
         status=IngestJobStatus.done.value,
@@ -299,56 +305,18 @@ async def _process_window_chunks(
     db,
     job_id: str,
 ) -> int:
-    """Vision-describe (if enabled) → batch-embed → bulk-insert one window's chunks."""
+    """Run one window's chunks through the LangChain ingestion pipeline
+    (clean → semantic → math validation → vision → embed), then bulk-insert."""
     if not chunks:
         return 0
 
-    if settings.ENABLE_VISION_EXTRACTION:
-        try:
-            from app.services.pdf_extractor import describe_graph_chunks, transcribe_math_chunks
-            if any(getattr(c, "figure_rects", None) for c in chunks):
-                await describe_graph_chunks(chunks, pdf_bytes, job_id=job_id)
-            if any(getattr(c, "math_rects", None) for c in chunks):
-                await transcribe_math_chunks(chunks, pdf_bytes, job_id=job_id)
-        except Exception as exc:
-            logger.warning(f"Vision pass on window failed (non-fatal): {exc}")
-
-    # Clean PDF noise from each chunk before embedding
-    for c in chunks:
-        try:
-            cleaned = clean_chunk_doc({
-                "text": getattr(c, "text", ""),
-                "math_text": getattr(c, "math_text", ""),
-                "image_texts": getattr(c, "image_texts", []),
-                "table_texts": getattr(c, "table_texts", []),
-                "key_terms": getattr(c, "key_terms", []),
-            })
-            c.text = cleaned["text"]
-            c.math_text = cleaned.get("math_text", "")
-            c.image_texts = cleaned.get("image_texts", [])
-            c.table_texts = cleaned.get("table_texts", [])
-            c.key_terms = cleaned.get("key_terms", [])
-        except Exception:
-            pass  # never let cleaner break ingest
-
-    # Batch embed
-    texts = [_chunk_embedding_text(c) for c in chunks]
-    embeddings: list[list[float]] = []
-    try:
-        embeddings = await llm_service.embed_batch(texts)
-    except Exception as exc:
-        logger.warning(f"embed_batch failed; per-chunk fallback: {exc}")
-    if len(embeddings) != len(chunks):
-        # Top up via per-chunk so chunks/embeddings stay aligned
-        embeddings = []
-        for t in texts:
-            try:
-                embeddings.append(await llm_service.embed(t))
-            except Exception:
-                embeddings.append([])
-
+    from app.services.ingestion_chain import run_ingest_chain
     from app.services.mongo_vector_store import store_chunks_bulk
-    return await store_chunks_bulk(chunks, embeddings, book_id, book_hash)
+
+    ctx = await run_ingest_chain({
+        "chunks": chunks, "pdf_bytes": pdf_bytes, "job_id": job_id,
+    })
+    return await store_chunks_bulk(ctx["chunks"], ctx["embeddings"], book_id, book_hash)
 
 
 @celery_app.task(bind=True, queue="ingest_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
@@ -621,26 +589,27 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         )
         return
 
-    # ── Step 2: Gemini Vision descriptions for chart pages (optional) ─────────
-    if settings.ENABLE_VISION_EXTRACTION:
-        try:
-            from app.services.pdf_extractor import describe_graph_chunks
-            has_graph_chunks = any(getattr(c, "graph_page_nums", None) for c in chunks)
-            if has_graph_chunks:
-                await _update_job(db, job_id, progress_message="Describing charts with Gemini Vision…")
-                await describe_graph_chunks(chunks, pdf_bytes, job_id=job_id)
-        except Exception as _exc:
-            await _update_job(db, job_id,
-                progress_message=f"Graph vision skipped: {str(_exc)[:120]}"
-            )
-    else:
-        logger.info("Vision extraction disabled. Skipping chart descriptions.")
+    # ── Steps 2–3: Unified ingestion chain (clean → dedupe → semantic →
+    #    math validation → vision → batched embed) → bulk-insert ───────────────
+    from app.services.ingestion_chain import run_ingest_chain
+    from app.services.mongo_vector_store import store_chunks_bulk
 
-    # ── Step 3: Embed chunks → MongoDB vector store (sequential) ──────────────
-    stored, mongo_errors = await _embed_and_store_sequential(chunks, book_id, db, job_id)
-    if mongo_errors:
+    book_id = job_id  # one-shot path: chunks are stored under the job's id
+
+    await _update_job(db, job_id,
+        progress_message=f"Processing {len(chunks)} chunks (clean → split → vision → embed)…",
+    )
+    ctx = await run_ingest_chain({
+        "chunks": chunks, "pdf_bytes": pdf_bytes, "job_id": job_id,
+    })
+    chunks = ctx["chunks"]  # the chain may re-split chunks at topic boundaries
+    stored = await store_chunks_bulk(chunks, ctx["embeddings"], book_id)
+    if stored < len(chunks):
         await _update_job(db, job_id,
-            progress_message=f"Parsed {len(chunks)} chunks. MongoDB: {mongo_errors} storage errors (non-fatal)."
+            progress_message=(
+                f"Stored {stored}/{len(chunks)} chunks "
+                f"({len(chunks) - stored} skipped, non-fatal)."
+            ),
         )
 
     # ── Step 4: Group by chapter ──────────────────────────────────────────────
@@ -665,7 +634,7 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     total_created = await _run_chapters_parallel(
         db=db, job_id=job_id,
         chapters_map=chapters_map, chapter_nums=chapter_nums,
-        book_id=job_id,
+        book_id=book_id,
         question_type=question_type,
         count_per_chapter=count_per_chapter,
         difficulty="all",

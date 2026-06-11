@@ -98,7 +98,7 @@ def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: s
         "page_end": chunk.page_end,
         "has_images": getattr(chunk, "has_images", False),
         "has_tables": getattr(chunk, "has_tables", False),
-        "has_math": getattr(chunk, "has_math_font", chunk.has_formula),
+        "has_math": getattr(chunk, "has_math_font", False) or chunk.has_formula,
         "has_formula": chunk.has_formula,
         "has_example": chunk.has_example,
         "teaching_density": chunk.teaching_density,
@@ -209,6 +209,25 @@ async def delete_book_chunks(book_id: str | None = None, book_hash: str | None =
         return result.deleted_count
     except Exception as exc:
         logger.warning(f"delete_book_chunks failed (non-fatal): {exc}")
+        return 0
+
+
+async def delete_chunks_created_after(book_hash: str, since: datetime) -> int:
+    """
+    Delete chunks for a book created at/after `since`. Used to roll back the
+    partial output of a failed ingest window so a retried window never leaves
+    orphaned or duplicated chunks behind. Returns deleted_count (0 on failure).
+    """
+    if not book_hash or not since:
+        return 0
+    try:
+        col = await _get_collection(CHUNKS_COLLECTION)
+        result = await col.delete_many(
+            {"book_hash": book_hash, "created_at": {"$gte": since}}
+        )
+        return result.deleted_count
+    except Exception as exc:
+        logger.warning(f"delete_chunks_created_after failed (non-fatal): {exc}")
         return 0
 
 

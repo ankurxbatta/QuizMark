@@ -37,7 +37,6 @@ from app.services.pdf_service import (
     _extract_key_terms,
     _teaching_density,
     _is_skip_block,
-    _split_into_sub_chunks,
     _FORMULA_RE,
     _EXAMPLE_RE,
     _SECTION_RE,
@@ -77,7 +76,10 @@ def _safe_ocr(pil_img) -> str:
     Handles the macOS pytesseract bug where stderr contains binary bytes
     (causes UnicodeDecodeError inside pytesseract's get_errors()).
     """
-    import tempfile, os, subprocess, shutil
+    import tempfile
+    import os
+    import subprocess
+    import shutil
     try:
         # Preferred path: use the Python API (fast)
         return pytesseract.image_to_string(pil_img, timeout=15).strip()
@@ -95,7 +97,7 @@ def _safe_ocr(pil_img) -> str:
             pil_img.save(tmp_in.name, format="PNG")
             tmp_out = tmp_in.name + "_out"
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [tesseract_cmd, tmp_in.name, tmp_out, "-l", "eng"],
                 capture_output=True, timeout=15,
             )
@@ -259,7 +261,7 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
         for d in page.get_drawings():
             if "rect" in d:
                 rects_to_merge.append(fitz.Rect(d["rect"]))
-                
+
         merged_rects = []
         for r in rects_to_merge:
             r = fitz.Rect(r)
@@ -272,7 +274,7 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
                     break
             if not intersected:
                 merged_rects.append(r)
-                
+
         for m in merged_rects:
             m.x0 += 10; m.y0 += 10; m.x1 -= 10; m.y1 -= 10
             m.intersect(page.rect)
@@ -372,16 +374,19 @@ class ChunkAccumulator:
 
     def _flush(self, page_end: int) -> list[EnhancedChunk]:
         """Emit chunks for whatever is in the buffer; reset the buffer."""
+        from app.services.chunking import recursive_split
+
         out: list[EnhancedChunk] = []
         text = "\n".join(self.buffer_lines).strip()
-        if len(text) < self.min_chunk_chars or _is_skip_block(text):
+        # Only true noise is discarded — short-but-real content is kept.
+        # (The old `len(text) < min_chunk_chars` guard silently dropped
+        # any buffer under 300 chars, losing e.g. short closing sections.)
+        if len(text) < 40 or _is_skip_block(text):
             self._reset_buffer()
             return out
 
         math_text = " ".join(dict.fromkeys(self.buffer_math_spans))[:500]
-        for sub in _split_into_sub_chunks(text, self.max_chunk_chars):
-            if len(sub) < self.min_chunk_chars:
-                continue
+        for sub in recursive_split(text, self.max_chunk_chars, min_chars=self.min_chunk_chars):
             out.append(EnhancedChunk(
                 chapter_num=self.current_chapter_num,
                 chapter_title=self.current_chapter_title,
@@ -562,11 +567,12 @@ async def describe_graph_chunks(
     import asyncio as _asyncio
     from app.core.config import settings as _settings
 
-    try:
-        from app.services.llm_service import GeminiClient
-        vision_client = GeminiClient()
-    except Exception as exc:
-        logger.warning(f"describe_graph_chunks: could not initialise vision client: {exc}")
+    # Route through the provider fallback chain (OpenAI -> Anthropic -> Gemini)
+    # instead of a hardcoded client, so one provider outage never kills the pass.
+    from app.services.llm_service import smart_describe_image
+
+    if not (_settings.OPENAI_API_KEY or _settings.ANTHROPIC_API_KEY or _settings.GEMINI_API_KEY):
+        logger.warning("describe_graph_chunks: no vision provider configured")
         return
 
     if not _PYMUPDF_AVAILABLE:
@@ -611,10 +617,10 @@ async def describe_graph_chunks(
                 delay = max(getattr(_settings, "GEMINI_VISION_DELAY_SECONDS", 0.0), 0.0)
                 if delay:
                     await _asyncio.sleep(delay)
-                
+
                 # Context prompt explicitly asks for description
                 full_prompt = f"{context}\n\nPlease describe this chart/figure in detail."
-                description = await vision_client.describe_image(img_bytes, context=full_prompt)
+                description = await smart_describe_image(img_bytes, context=full_prompt)
 
                 # Store in cache (fire-and-forget)
                 if _cache_collection is not None and description:
@@ -647,19 +653,14 @@ async def describe_graph_chunks(
         doc.close()
         return
 
-    logger.info(f"describe_graph_chunks: sending {len(chunk_fig_map)} figure snips to Gemini Vision")
+    logger.info(f"describe_graph_chunks: sending {len(chunk_fig_map)} figure snips to vision model")
 
-    descriptions = []
-    total = len(chunk_fig_map)
-    for i in range(0, total, concurrency):
-        batch = chunk_fig_map[i:i+concurrency]
-        batch_results = await _asyncio.gather(
-            *[_describe_fig(fig, ctx) for (_, fig, ctx) in batch],
-            return_exceptions=True,
-        )
-        descriptions.extend(batch_results)
-        if (i // concurrency) % 5 == 0:
-            logger.info(f"describe_graph_chunks: {min(i + len(batch), total)}/{total} figures described")
+    # Single gather — the semaphore meters concurrency, so no call waits for an
+    # unrelated slow one (the old fixed-size batches blocked on their slowest call)
+    descriptions = await _asyncio.gather(
+        *[_describe_fig(fig, ctx) for (_, fig, ctx) in chunk_fig_map],
+        return_exceptions=True,
+    )
 
     for (chunk_idx, _, _), desc in zip(chunk_fig_map, descriptions):
         if isinstance(desc, str) and desc:
@@ -680,24 +681,18 @@ async def transcribe_math_chunks(
 ) -> None:
     """
     For each chunk that has math_rects, render those specific rects and call
-    a vision model to extract the Math formulas as LaTeX. 
+    a vision model to extract the Math formulas as LaTeX.
     LaTeX is appended to chunk.math_text.
     """
     import asyncio as _asyncio
     from app.core.config import settings as _settings
 
-    try:
-        from app.services.llm_service import OpenAIClient, AnthropicClient
-        from app.core.config import settings as _cfg
-        if _cfg.OPENAI_API_KEY:
-            vision_client = OpenAIClient()
-        elif _cfg.ANTHROPIC_API_KEY:
-            vision_client = AnthropicClient()
-        else:
-            logger.warning("transcribe_math_chunks: no vision provider available (set OPENAI_API_KEY or ANTHROPIC_API_KEY)")
-            return
-    except Exception as exc:
-        logger.warning(f"transcribe_math_chunks: could not initialise vision client: {exc}")
+    # Route through the provider fallback chain (OpenAI -> Anthropic -> Gemini)
+    # instead of hardcoded clients, so one provider outage never kills the pass.
+    from app.services.llm_service import smart_describe_image
+
+    if not (_settings.OPENAI_API_KEY or _settings.ANTHROPIC_API_KEY or _settings.GEMINI_API_KEY):
+        logger.warning("transcribe_math_chunks: no vision provider configured")
         return
 
     if not _PYMUPDF_AVAILABLE:
@@ -721,14 +716,14 @@ async def transcribe_math_chunks(
                 delay = max(getattr(_settings, "GEMINI_VISION_DELAY_SECONDS", 0.0), 0.0)
                 if delay:
                     await _asyncio.sleep(delay)
-                
+
                 prompt = (
                     "Transcribe every mathematical formula visible in this image into valid LaTeX. "
                     "Output ONLY the LaTeX — no explanations, no prose. "
                     "Surround inline math with $...$ and display math with $$...$$. "
                     "If no formula is visible respond with exactly: NO_MATH"
                 )
-                latex = await vision_client.describe_image(img_bytes, context=prompt)
+                latex = await smart_describe_image(img_bytes, context=prompt)
                 if latex == "NO_MATH":
                     latex = ""
                 return latex
@@ -747,19 +742,13 @@ async def transcribe_math_chunks(
         doc.close()
         return
 
-    logger.info(f"transcribe_math_chunks: sending {len(chunk_math_map)} math snips to Gemini Vision")
+    logger.info(f"transcribe_math_chunks: sending {len(chunk_math_map)} math snips to vision model")
 
-    results = []
-    total = len(chunk_math_map)
-    for i in range(0, total, concurrency):
-        batch = chunk_math_map[i:i+concurrency]
-        batch_results = await _asyncio.gather(
-            *[_transcribe_math(m) for (_, m) in batch],
-            return_exceptions=True,
-        )
-        results.extend(batch_results)
-        if (i // concurrency) % 5 == 0:
-            logger.info(f"transcribe_math_chunks: {min(i + len(batch), total)}/{total} formulas transcribed")
+    # Single gather — semaphore meters concurrency (see describe_graph_chunks)
+    results = await _asyncio.gather(
+        *[_transcribe_math(m) for (_, m) in chunk_math_map],
+        return_exceptions=True,
+    )
 
     for (chunk_idx, _), latex in zip(chunk_math_map, results):
         if isinstance(latex, str) and latex:
@@ -767,4 +756,4 @@ async def transcribe_math_chunks(
             chunks[chunk_idx].math_text += f"\n{latex}\n"
 
     doc.close()
-    logger.info(f"transcribe_math_chunks: finished processing math snippets")
+    logger.info("transcribe_math_chunks: finished processing math snippets")

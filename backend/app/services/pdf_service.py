@@ -19,7 +19,6 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pdfplumber
 from pypdf import PdfReader
@@ -390,14 +389,13 @@ def parse_pdf_into_chunks(
 
     def _flush_buffer(page_end: int):
         nonlocal buffer_lines, buffer_page_start
+        from app.services.chunking import recursive_split
         text = "\n".join(buffer_lines).strip()
-        if len(text) < min_chunk_chars or _is_skip_block(text):
+        # Keep short-but-real content; only drop true noise (see chunking.py)
+        if len(text) < 40 or _is_skip_block(text):
             buffer_lines = []
             return
-        sub_chunks = _split_into_sub_chunks(text, max_chunk_chars)
-        for sub in sub_chunks:
-            if len(sub) < min_chunk_chars:
-                continue
+        for sub in recursive_split(text, max_chunk_chars, min_chars=min_chunk_chars):
             chunks.append(TextChunk(
                 chapter_num=current_chapter_num,
                 chapter_title=current_chapter_title,
