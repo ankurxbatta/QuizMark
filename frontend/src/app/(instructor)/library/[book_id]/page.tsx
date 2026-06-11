@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import api from "@/lib/api";
+import { useActiveJobs } from "@/lib/useActiveJobs";
 import Select from "@/components/Select";
 import {
   BookOpen, Database, Layers, Table2, FlaskConical, ImageIcon,
@@ -37,23 +38,6 @@ interface Job {
   questions_created: number;
   progress_message: string | null;
   error?: string | null;
-}
-
-const JOBS_LS_KEY = "active_ingest_jobs";
-
-function saveActiveJobIds(currentJobs: Job[], allStoredIds: string[]) {
-  const thisActiveIds = currentJobs
-    .filter(j => j.status !== "done" && j.status !== "failed")
-    .map(j => j.job_id);
-  // Merge: keep other pages' IDs + this page's active IDs
-  const thisAllIds = currentJobs.map(j => j.job_id);
-  const otherIds = allStoredIds.filter(id => !thisAllIds.includes(id));
-  const merged = [...new Set([...otherIds, ...thisActiveIds])];
-  if (merged.length > 0) {
-    localStorage.setItem(JOBS_LS_KEY, JSON.stringify(merged));
-  } else {
-    localStorage.removeItem(JOBS_LS_KEY);
-  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -176,9 +160,11 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
 
   // Multiple jobs
   const [jobs, setJobs]     = useState<Job[]>([]);
+  const [jobsError, setJobsError] = useState("");
   const jobsRef             = useRef<Job[]>([]);
   const pollRef             = useRef<ReturnType<typeof setInterval> | null>(null);
   const storedIdsRef        = useRef<string[]>([]);
+  const { readActiveJobIds, mergeActiveJobIds } = useActiveJobs();
 
   // Keep ref in sync for interval
   useEffect(() => { jobsRef.current = jobs; }, [jobs]);
@@ -196,22 +182,24 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
 
   // Recover jobs for this book from localStorage on mount
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(JOBS_LS_KEY);
-      if (!raw) return;
-      const ids: string[] = JSON.parse(raw);
-      storedIdsRef.current = ids;
-      if (!Array.isArray(ids) || ids.length === 0) return;
-      Promise.all(ids.map(id => api.get(`/questions/jobs/${id}`).then(r => r.data).catch(() => null)))
-        .then(results => {
-          const valid = results.filter(Boolean) as Job[];
-          // Only show jobs that belong to this book (filename === bookId)
-          const bookJobs = valid.filter(j => j.filename === bookId);
-          if (bookJobs.length > 0) setJobs(bookJobs);
-        })
-        .catch(() => {});
-    } catch {}
-  }, [bookId]);
+    const ids = readActiveJobIds();
+    storedIdsRef.current = ids;
+    if (ids.length === 0) return;
+    Promise.all(ids.map(id =>
+      api.get(`/questions/jobs/${id}`)
+        .then(r => ({ job: r.data as Job, failed: false }))
+        // 404 = job genuinely gone (skip); anything else is a real failure to surface
+        .catch(err => ({ job: null, failed: err?.response?.status !== 404 }))
+    )).then(results => {
+      if (results.some(r => r.failed)) {
+        setJobsError("Could not load the status of some generation jobs. Refresh to retry.");
+      }
+      const valid = results.map(r => r.job).filter(Boolean) as Job[];
+      // Only show jobs that belong to this book (filename === bookId)
+      const bookJobs = valid.filter(j => j.filename === bookId);
+      if (bookJobs.length > 0) setJobs(bookJobs);
+    });
+  }, [bookId, readActiveJobIds]);
 
   // Poll active jobs
   useEffect(() => {
@@ -222,19 +210,22 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
         const updated = await Promise.all(
           active.map(j => api.get(`/questions/jobs/${j.job_id}`).then(r => r.data))
         );
+        setJobsError("");
         setJobs(prev => {
           const next = [...prev];
           updated.forEach(uj => {
             const idx = next.findIndex(x => x.job_id === uj.job_id);
             if (idx !== -1) next[idx] = uj;
           });
-          saveActiveJobIds(next, storedIdsRef.current);
+          storedIdsRef.current = mergeActiveJobIds(next, storedIdsRef.current);
           return next;
         });
-      } catch {}
+      } catch {
+        setJobsError("Failed to refresh job status — retrying…");
+      }
     }, 3000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, []);
+  }, [mergeActiveJobIds]);
 
   const toggleChapter = (num: number) =>
     setSelectedChapters((prev) => {
@@ -268,11 +259,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
       setJobs(prev => {
         const next = [data, ...prev];
         // Persist to shared localStorage key
-        const stored = storedIdsRef.current;
-        const activeIds = next.filter(j => j.status !== "done" && j.status !== "failed").map(j => j.job_id);
-        const merged = [...new Set([...stored.filter(id => !next.map(j => j.job_id).includes(id)), ...activeIds])];
-        storedIdsRef.current = merged;
-        if (merged.length > 0) localStorage.setItem(JOBS_LS_KEY, JSON.stringify(merged));
+        storedIdsRef.current = mergeActiveJobIds(next, storedIdsRef.current);
         return next;
       });
     } catch (err: any) {
@@ -285,7 +272,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
   const dismissJob = (jobId: string) => {
     setJobs(prev => {
       const next = prev.filter(j => j.job_id !== jobId);
-      saveActiveJobIds(next, storedIdsRef.current);
+      storedIdsRef.current = mergeActiveJobIds(next, storedIdsRef.current);
       return next;
     });
   };
@@ -483,6 +470,13 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
               </button>
             </div>
 
+            {/* Jobs error */}
+            {jobsError && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2">
+                {jobsError}
+              </p>
+            )}
+
             {/* Jobs list */}
             {jobs.length > 0 && (
               <div className="bg-white rounded-xl border shadow-sm p-5 space-y-3">
@@ -492,7 +486,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
                     onClick={() => {
                       setJobs(prev => {
                         const next = prev.filter(j => j.status === "queued" || j.status === "processing");
-                        saveActiveJobIds(next, storedIdsRef.current);
+                        storedIdsRef.current = mergeActiveJobIds(next, storedIdsRef.current);
                         return next;
                       });
                     }}

@@ -1,11 +1,17 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import api from "@/lib/api";
+import Cookies from "js-cookie";
+import api, { API_URL } from "@/lib/api";
+import { useActiveJobs } from "@/lib/useActiveJobs";
 import {
   Upload, File, RotateCcw, Loader2, CheckCircle,
   BookOpen, Library, ArrowRight, ServerCrash
 } from "lucide-react";
+
+// SSE fallback polling: every 5s, give up after 10 minutes
+const FALLBACK_POLL_MS = 5_000;
+const FALLBACK_POLL_MAX_MS = 10 * 60 * 1000;
 
 interface JobStatus {
   job_id: string;
@@ -48,22 +54,76 @@ export default function GeneratePage() {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const [uploadError, setUploadError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const jobsRef = useRef<JobStatus[]>([]);
   const router = useRouter();
-
-  // Remove pollRef sync effect as we no longer use setInterval
-
+  const { syncJobsToStorage, readKnownJobIds } = useActiveJobs();
 
   // Listen to SSE streams for active jobs
   useEffect(() => {
     const activeJobs = jobs.filter(j => j.status !== "done" && j.status !== "failed");
     if (activeJobs.length === 0) return;
 
+    const pollTimers: ReturnType<typeof setInterval>[] = [];
+
+    const applyUpdate = (data: JobStatus) => {
+      setJobs(prev => {
+        const newJobs = [...prev];
+        const idx = newJobs.findIndex(x => x.job_id === data.job_id);
+        if (idx !== -1) {
+          // Only update if something changed
+          if (newJobs[idx].status !== data.status ||
+              newJobs[idx].progress_message !== data.progress_message ||
+              newJobs[idx].chapters_done !== data.chapters_done) {
+            newJobs[idx] = { ...newJobs[idx], ...data };
+          }
+        }
+        if (data.status === "done" || data.status === "failed") {
+          syncJobsToStorage(newJobs);
+        }
+        return newJobs;
+      });
+    };
+
+    const failJob = (jobId: string, message: string) => {
+      setJobs(prev => {
+        const newJobs = prev.map(j =>
+          j.job_id === jobId ? { ...j, status: "failed" as const, error_message: message } : j
+        );
+        syncJobsToStorage(newJobs);
+        return newJobs;
+      });
+    };
+
+    // Fallback when the SSE stream errors: poll the job status endpoint
+    // every 5s until the job finishes, 404s, or the time cap is hit.
+    const startPolling = (jobId: string) => {
+      const startedAt = Date.now();
+      const timer = setInterval(async () => {
+        if (Date.now() - startedAt > FALLBACK_POLL_MAX_MS) {
+          clearInterval(timer);
+          failJob(jobId, "Lost connection to job updates. Check the Library to see whether the book was added.");
+          return;
+        }
+        try {
+          const { data } = await api.get(`/questions/jobs/${jobId}`);
+          applyUpdate(data);
+          if (data.status === "done" || data.status === "failed") clearInterval(timer);
+        } catch (err: any) {
+          if (err?.response?.status === 404) {
+            clearInterval(timer);
+            failJob(jobId, "Job no longer exists on the server.");
+          }
+          // Other errors (network, 5xx): keep polling until the cap
+        }
+      }, FALLBACK_POLL_MS);
+      pollTimers.push(timer);
+    };
+
     const eventSources = activeJobs.map(job => {
-      const url = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/questions/jobs/${job.job_id}/stream`;
+      const token = Cookies.get("token");
+      const url = `${API_URL}/api/v1/questions/jobs/${job.job_id}/stream?token=${encodeURIComponent(token ?? "")}`;
       const es = new EventSource(url);
-      
+      let fellBack = false;
+
       es.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -71,78 +131,48 @@ export default function GeneratePage() {
             es.close();
             return;
           }
-          setJobs(prev => {
-            const newJobs = [...prev];
-            const idx = newJobs.findIndex(x => x.job_id === data.job_id);
-            if (idx !== -1) {
-              // Only update if something changed
-              if (newJobs[idx].status !== data.status || 
-                  newJobs[idx].progress_message !== data.progress_message || 
-                  newJobs[idx].chapters_done !== data.chapters_done) {
-                newJobs[idx] = { ...newJobs[idx], ...data };
-              }
-            }
-            return newJobs;
-          });
-          
-          if (data.status === "done" || data.status === "failed") {
-            es.close();
-            // Update local storage
-            setJobs(prev => {
-              const activeIds = prev.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
-              if (activeIds.length > 0) localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
-              else localStorage.removeItem("active_ingest_jobs");
-              
-              const allIds = prev.map(x => x.job_id);
-              if (allIds.length > 0) {
-                localStorage.setItem("known_ingest_jobs", JSON.stringify(allIds));
-              } else {
-                localStorage.removeItem("known_ingest_jobs");
-              }
-              return prev;
-            });
-          }
+          applyUpdate(data);
+          if (data.status === "done" || data.status === "failed") es.close();
         } catch (err) {
           console.error("SSE parse error", err);
         }
       };
-      
+
       es.onerror = () => {
         es.close();
+        if (!fellBack) {
+          fellBack = true;
+          startPolling(job.job_id);
+        }
       };
-      
+
       return es;
     });
 
     return () => {
       eventSources.forEach(es => es.close());
+      pollTimers.forEach(timer => clearInterval(timer));
     };
-  }, [jobs.length]); // Re-run when job array length changes (new job added)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs.length, syncJobsToStorage]); // Re-run when job array length changes (new job added) — not on every progress tick
 
   // Recover known jobs on page load
   useEffect(() => {
-    // Try to load from known_ingest_jobs first (our new key), fallback to active_ingest_jobs for legacy
-    const saved = localStorage.getItem("known_ingest_jobs") || localStorage.getItem("active_ingest_jobs");
-    if (saved) {
-      try {
-        const ids = JSON.parse(saved);
-        if (Array.isArray(ids) && ids.length > 0) {
-          Promise.all(ids.map(id => api.get(`/questions/jobs/${id}`).then(res => res.data)))
-            .then(data => {
-              setJobs(prev => {
-                // merge with any jobs that might have been uploaded in the split second before this resolves
-                const combined = [...prev];
-                data.forEach(d => {
-                  if (!combined.find(x => x.job_id === d.job_id)) combined.push(d);
-                });
-                return combined;
-              });
-            })
-            .catch(() => {});
-        }
-      } catch { }
-    }
-  }, []);
+    const ids = readKnownJobIds();
+    if (ids.length === 0) return;
+    Promise.all(ids.map(id => api.get(`/questions/jobs/${id}`).then(res => res.data)))
+      .then(data => {
+        setJobs(prev => {
+          // merge with any jobs that might have been uploaded in the split second before this resolves
+          const combined = [...prev];
+          data.forEach(d => {
+            if (!combined.find(x => x.job_id === d.job_id)) combined.push(d);
+          });
+          return combined;
+        });
+      })
+      .catch(() => {});
+  }, [readKnownJobIds]);
 
   const reset = () => {
     setFile(null);
@@ -159,11 +189,7 @@ export default function GeneratePage() {
       const { data } = await api.post("/questions/ingest-book", fd);
       setJobs(prev => {
         const newJobs = [data, ...prev];
-        const activeIds = newJobs.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
-        if (activeIds.length > 0) localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
-        
-        const allIds = newJobs.map(x => x.job_id);
-        localStorage.setItem("known_ingest_jobs", JSON.stringify(allIds));
+        syncJobsToStorage(newJobs);
         return newJobs;
       });
       reset();
@@ -334,15 +360,7 @@ export default function GeneratePage() {
                       onClick={() => {
                         setJobs(prev => {
                           const newJobs = prev.filter(j => j.job_id !== job.job_id);
-                          
-                          const activeIds = newJobs.filter(x => x.status !== "done" && x.status !== "failed").map(x => x.job_id);
-                          if (activeIds.length > 0) localStorage.setItem("active_ingest_jobs", JSON.stringify(activeIds));
-                          else localStorage.removeItem("active_ingest_jobs");
-                          
-                          const allIds = newJobs.map(x => x.job_id);
-                          if (allIds.length > 0) localStorage.setItem("known_ingest_jobs", JSON.stringify(allIds));
-                          else localStorage.removeItem("known_ingest_jobs");
-                          
+                          syncJobsToStorage(newJobs);
                           return newJobs;
                         });
                       }}

@@ -1,10 +1,10 @@
 import axios from "axios";
 import Cookies from "js-cookie";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const api = axios.create({
-  baseURL: `${API_BASE_URL}/api/v1`,
+  baseURL: `${API_URL}/api/v1`,
 });
 
 api.interceptors.request.use((config) => {
@@ -20,9 +20,7 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       Cookies.remove("token");
       Cookies.remove("role");
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/") ) {
-        window.location.href = "/";
-      } else if (typeof window !== "undefined" && window.location.pathname !== "/") {
+      if (typeof window !== "undefined" && window.location.pathname !== "/") {
         window.location.href = "/";
       }
     }

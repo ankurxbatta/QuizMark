@@ -24,6 +24,8 @@ export default function MarkingPage() {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [overrides, setOverrides] = useState<Record<string, { mark: string; feedback: string; reason: string }>>({});
   const [saved, setSaved] = useState<string[]>([]);
+  const [saving, setSaving] = useState<string[]>([]);
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [retrying, setRetrying] = useState<string[]>([]);
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
   const [retrySuccess, setRetrySuccess] = useState<Record<string, string>>({});
@@ -37,14 +39,23 @@ export default function MarkingPage() {
 
   const handleOverride = async (id: string) => {
     const o = overrides[id];
-    if (!o?.mark) return;
-    await api.put(`/marking/${id}/override`, {
-      override_mark: parseFloat(o.mark),
-      override_feedback: o.feedback,
-      override_reason: o.reason,
-    });
-    setSaved((s) => [...s, id]);
-    load();
+    if (!o?.mark || saving.includes(id)) return;
+    setSaving((s) => [...s, id]);
+    setSaveErrors((e) => ({ ...e, [id]: "" }));
+    try {
+      await api.put(`/marking/${id}/override`, {
+        override_mark: parseFloat(o.mark),
+        override_feedback: o.feedback,
+        override_reason: o.reason,
+      });
+      setSaved((s) => [...s, id]);
+      load();
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || "Failed to save override. Please try again.";
+      setSaveErrors((e) => ({ ...e, [id]: msg }));
+    } finally {
+      setSaving((s) => s.filter((x) => x !== id));
+    }
   };
 
   const handleRetry = async (id: string) => {
@@ -157,10 +168,14 @@ export default function MarkingPage() {
                     onChange={(e) => setOverrides({ ...overrides, [s.id]: { ...o, reason: e.target.value } })}
                     className="border border-gray-300 rounded-lg px-3 py-2 text-sm" />
                   <button onClick={() => handleOverride(s.id)}
-                    className="bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-indigo-700">
-                    Save Override
+                    disabled={saving.includes(s.id)}
+                    className="bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-indigo-700 disabled:opacity-60">
+                    {saving.includes(s.id) ? "Saving…" : "Save Override"}
                   </button>
                 </div>
+                {saveErrors[s.id] && (
+                  <p className="text-xs text-red-600">{saveErrors[s.id]}</p>
+                )}
                 <textarea rows={2} placeholder="Override feedback…" value={o.feedback}
                   onChange={(e) => setOverrides({ ...overrides, [s.id]: { ...o, feedback: e.target.value } })}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />

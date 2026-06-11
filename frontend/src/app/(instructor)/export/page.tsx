@@ -1,20 +1,19 @@
 "use client";
 import { Download } from "lucide-react";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_URL } from "@/lib/api";
 
 export default function ExportPage() {
   const exports = [
     {
       title: "Marks & Feedback Export",
       description: "CSV with Student ID, Question ID, Mark, Max Mark, Feedback, Override Flag, and Timestamp for every submission.",
-      url: `${API}/api/v1/export/marks`,
+      url: `${API_URL}/api/v1/export/marks`,
       filename: "marks_export.csv",
     },
     {
       title: "Full Audit Log Export",
       description: "CSV of all marking events, overrides, and login activity with timestamps.",
-      url: `${API}/api/v1/export/audit`,
+      url: `${API_URL}/api/v1/export/audit`,
       filename: "audit_log.csv",
     },
   ];

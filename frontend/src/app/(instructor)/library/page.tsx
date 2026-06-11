@@ -129,15 +129,20 @@ export default function LibraryPage() {
   const [cached, setCached]   = useState<CachedBook[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState("");
+  const [cacheError, setCacheError] = useState("");
   const [clearing, setClearing] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
     setError("");
+    setCacheError("");
     try {
       const [booksRes, cacheRes] = await Promise.all([
         api.get("/questions/books"),
-        api.get("/questions/books/cache").catch(() => ({ data: { cached: [] } })),
+        api.get("/questions/books/cache").catch(() => {
+          setCacheError("Could not load cached ingestions — they may not be shown below.");
+          return { data: { cached: [] } };
+        }),
       ]);
       setBooks(booksRes.data.books || []);
       setCached(cacheRes.data.cached || []);
@@ -207,6 +212,12 @@ export default function LibraryPage() {
           </div>
         ) : (
           <>
+            {cacheError && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2">
+                {cacheError}
+              </p>
+            )}
+
             {/* Cached (in-progress) ingestions */}
             {cached.length > 0 && (
               <section className="space-y-3">

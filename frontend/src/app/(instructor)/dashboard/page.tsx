@@ -21,6 +21,7 @@ export default function InstructorDashboard() {
     flagged: 0,
     last_backup: null,
   });
+  const [statsError, setStatsError] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -35,7 +36,10 @@ export default function InstructorDashboard() {
         flagged: flagged.data.length,
         last_backup: new Date().toLocaleDateString(),
       });
-    }).catch(() => {});
+      setStatsError("");
+    }).catch(() => {
+      setStatsError("Failed to load dashboard stats. Make sure the backend is running, then refresh.");
+    });
   }, []);
 
   const cards = [
@@ -62,6 +66,12 @@ export default function InstructorDashboard() {
       </header>
 
       <div className="max-w-6xl mx-auto px-8 py-10 space-y-10">
+        {statsError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl px-6 py-4 text-red-700 text-sm">
+            {statsError}
+          </div>
+        )}
+
         {/* Overview cards */}
         <section>
           <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Overview</h2>
