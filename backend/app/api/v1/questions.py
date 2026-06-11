@@ -424,11 +424,13 @@ async def delete_book(
 ):
     """Permanently remove a book: deletes all chunks, questions, jobs, checkpoints, and the stored PDF."""
     from app.services.mongo_vector_store import delete_book_chunks, delete_checkpoint, delete_book_pdf
+    from app.services.math_index import delete_math_index
 
     # Collect this book's content hashes before the chunks are gone, so the
     # matching checkpoints and GridFS PDFs can be cleaned up too.
     hashes = await db["pdf_chunks"].distinct("book_hash", {"book_id": book_id})
     await delete_book_chunks(book_id=book_id)
+    await delete_math_index(book_id)
     await db["questions"].delete_many({"book_id": book_id})
     # Job _ids are UUIDs — match on the book_id field, not _id
     await db["ingest_jobs"].delete_many({"book_id": book_id})

@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     INGEST_PAGE_WINDOW: int = 6
     INGEST_TIME_BUDGET_SECONDS: int = 1500
 
+    # ── Specialist RAG indexes (MULTI_RAG_DESIGN) ──────────────────────────────
+    MATH_INDEX_ENABLED: bool = True
+    INDEX_BUILD_BATCH_SIZE: int = 10          # formulas per enrichment LLM call
+
     # ── Question generation throughput ────────────────────────────────────────
     GEN_CHAPTER_CONCURRENCY: int = 5        # OpenAI/Anthropic handle higher concurrency
     DEDUP_SIMILARITY_THRESHOLD: float = 0.92

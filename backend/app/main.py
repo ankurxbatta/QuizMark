@@ -119,3 +119,41 @@ async def ensure_mongo_indexes():
         logger.info("[STARTUP] MongoDB indexes ready.")
     except Exception as exc:
         logger.warning(f"[STARTUP] MongoDB index setup failed (non-fatal): {exc}")
+
+
+@app.on_event("startup")
+async def backfill_specialist_indexes():
+    """
+    Auto-backfill (MULTI_RAG_DESIGN): enqueue specialist index builds for books
+    that are fully ingested but have no build recorded. Guarded by a per-book
+    marker in index_build_jobs so restarts never re-enqueue.
+    """
+    if not settings.MATH_INDEX_ENABLED:
+        return
+    try:
+        from datetime import datetime, timezone
+
+        db = get_mongo_db()
+        book_ids = await db["pdf_chunks"].distinct("book_id")
+        if not book_ids:
+            return
+        from app.tasks.index_tasks import build_math_index_task
+
+        enqueued = 0
+        for book_id in book_ids:
+            if not book_id:
+                continue
+            marker = await db["index_build_jobs"].find_one({"_id": f"math:{book_id}"})
+            if marker:
+                continue
+            await db["index_build_jobs"].insert_one({
+                "_id": f"math:{book_id}", "index": "math", "book_id": book_id,
+                "status": "queued", "started_at": None, "finished_at": None,
+                "created_at": datetime.now(timezone.utc),
+            })
+            build_math_index_task.delay(book_id)
+            enqueued += 1
+        if enqueued:
+            logger.info(f"[STARTUP] Backfill: enqueued math index builds for {enqueued} book(s).")
+    except Exception as exc:
+        logger.warning(f"[STARTUP] Specialist index backfill failed (non-fatal): {exc}")

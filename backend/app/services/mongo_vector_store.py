@@ -24,8 +24,11 @@ logger = logging.getLogger(__name__)
 CHUNKS_COLLECTION       = "pdf_chunks"
 QUESTIONS_COLLECTION    = "questions"
 CHECKPOINTS_COLLECTION  = "ingest_checkpoints"
+MATH_COLLECTION         = "math_index"
+INDEX_JOBS_COLLECTION   = "index_build_jobs"
 CHUNKS_INDEX_NAME       = "pdf_chunks_vector_index"
 QUESTIONS_INDEX_NAME    = "questions_vector_index"
+MATH_INDEX_NAME         = "math_vector_index"
 EMBEDDING_DIMENSIONS    = 768
 
 
@@ -45,39 +48,66 @@ async def _get_collection(name: str):
 
 # ── Index setup ────────────────────────────────────────────────────────────────
 
-async def _ensure_index(collection_name: str, index_name: str) -> None:
+def _index_definition(filter_paths: list[str] | None = None) -> dict:
+    fields: list[dict] = [{
+        "type": "vector",
+        "path": "embedding",
+        "numDimensions": EMBEDDING_DIMENSIONS,
+        "similarity": "cosine",
+    }]
+    for path in filter_paths or []:
+        fields.append({"type": "filter", "path": path})
+    return {"fields": fields}
+
+
+async def _ensure_index(
+    collection_name: str,
+    index_name: str,
+    filter_paths: list[str] | None = None,
+) -> None:
     try:
         col = await _get_collection(collection_name)
-        existing: set[str] = set()
+        existing_def: dict | None = None
+        exists = False
         try:
             async for idx in await col.list_search_indexes():
-                existing.add(idx.get("name", ""))
+                if idx.get("name", "") == index_name:
+                    exists = True
+                    existing_def = idx.get("latestDefinition") or idx.get("definition") or {}
         except Exception:
             pass
-        if index_name in existing:
+
+        definition = _index_definition(filter_paths)
+        if not exists:
+            await col.create_search_index({
+                "name": index_name, "type": "vectorSearch", "definition": definition,
+            })
+            logger.info(f"MongoDB vector index '{index_name}' created on '{collection_name}'")
             return
-        index_model = {
-            "name": index_name,
-            "type": "vectorSearch",
-            "definition": {
-                "fields": [{
-                    "type": "vector",
-                    "path": "embedding",
-                    "numDimensions": EMBEDDING_DIMENSIONS,
-                    "similarity": "cosine",
-                }]
-            },
-        }
-        await col.create_search_index(index_model)
-        logger.info(f"MongoDB vector index '{index_name}' created on '{collection_name}'")
+
+        # Index exists — upgrade it if requested filter fields are missing
+        # (pre-filtering inside $vectorSearch needs them declared in the index).
+        if filter_paths and existing_def is not None:
+            have = {
+                f.get("path") for f in existing_def.get("fields", [])
+                if f.get("type") == "filter"
+            }
+            missing = [p for p in filter_paths if p not in have]
+            if missing:
+                await col.update_search_index(index_name, definition)
+                logger.info(
+                    f"MongoDB vector index '{index_name}' updated with filter fields {missing} "
+                    "(rebuilds in background; filtered search degrades gracefully meanwhile)"
+                )
     except Exception as exc:
         logger.warning(f"ensure_index({collection_name}) failed (non-fatal): {exc}")
 
 
 async def ensure_vector_index() -> None:
-    """Create vector search indexes for both pdf_chunks and questions."""
-    await _ensure_index(CHUNKS_COLLECTION, CHUNKS_INDEX_NAME)
+    """Create/upgrade vector search indexes for chunks, questions and math_index."""
+    await _ensure_index(CHUNKS_COLLECTION, CHUNKS_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
     await _ensure_index(QUESTIONS_COLLECTION, QUESTIONS_INDEX_NAME)
+    await _ensure_index(MATH_COLLECTION, MATH_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
 
 
 # ── PDF chunk store ────────────────────────────────────────────────────────────
@@ -164,33 +194,76 @@ async def store_chunks_bulk(
         return n_inserted
 
 
+def build_vector_search_pipeline(
+    query_embedding: list[float],
+    k: int,
+    index_name: str,
+    filters: dict | None = None,
+    pre_filter: bool = True,
+) -> list[dict]:
+    """
+    Build the aggregation pipeline for a vector search.
+
+    pre_filter=True puts filters inside $vectorSearch (correct: always returns up
+    to k matching docs). pre_filter=False is the legacy post-$match fallback used
+    while an index rebuild hasn't yet picked up the filter field definitions —
+    it can return fewer than k results but never errors.
+    """
+    stage: dict = {
+        "$vectorSearch": {
+            "index": index_name,
+            "path": "embedding",
+            "queryVector": query_embedding,
+            "numCandidates": k * 10,
+            "limit": k,
+        }
+    }
+    pipeline: list[dict] = [stage]
+    if filters:
+        if pre_filter:
+            stage["$vectorSearch"]["filter"] = dict(filters)
+        else:
+            pipeline.append({"$match": dict(filters)})
+    pipeline.append({"$project": {"embedding": 0}})
+    return pipeline
+
+
 async def vector_search(
     query_embedding: list[float],
     k: int = 5,
     book_id: str | None = None,
+    *,
+    collection_name: str = CHUNKS_COLLECTION,
+    index_name: str = CHUNKS_INDEX_NAME,
+    filters: dict | None = None,
 ) -> list[dict]:
-    """Semantic search over pdf_chunks. Returns up to k docs (no embedding field)."""
+    """
+    Semantic search over any vector-indexed collection (default: pdf_chunks).
+    Returns up to k docs (no embedding field). Filters are applied inside
+    $vectorSearch; if the index doesn't support them yet (mid-rebuild), falls
+    back to post-filtering rather than failing.
+    """
+    flt = dict(filters or {})
+    if book_id:
+        flt["book_id"] = book_id
     try:
-        col = await _get_collection(CHUNKS_COLLECTION)
-        pipeline: list[dict] = [{
-            "$vectorSearch": {
-                "index": CHUNKS_INDEX_NAME,
-                "path": "embedding",
-                "queryVector": query_embedding,
-                "numCandidates": k * 10,
-                "limit": k,
-            }
-        }]
-        if book_id:
-            pipeline.append({"$match": {"book_id": book_id}})
-        pipeline.append({"$project": {"embedding": 0}})
-        results = await col.aggregate(pipeline).to_list(length=k)
+        col = await _get_collection(collection_name)
+        try:
+            pipeline = build_vector_search_pipeline(query_embedding, k, index_name, flt)
+            results = await col.aggregate(pipeline).to_list(length=k)
+        except Exception:
+            if not flt:
+                raise
+            pipeline = build_vector_search_pipeline(
+                query_embedding, k, index_name, flt, pre_filter=False
+            )
+            results = await col.aggregate(pipeline).to_list(length=k)
         for doc in results:
             if "_id" in doc:
                 doc["_id"] = str(doc["_id"])
         return results
     except Exception as exc:
-        logger.warning(f"vector_search (chunks) failed (non-fatal): {exc}")
+        logger.warning(f"vector_search ({collection_name}) failed (non-fatal): {exc}")
         return []
 
 

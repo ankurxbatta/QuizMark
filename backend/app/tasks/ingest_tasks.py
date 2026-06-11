@@ -201,6 +201,7 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
             completed_at=datetime.now(timezone.utc),
             progress_message=f"Book stored in Library: {chunks_stored} chunks, {total_pages} pages.",
         )
+        _enqueue_index_builds(book_id)
         doc.close()
         return False
 
@@ -293,6 +294,7 @@ async def _run_ingest_resumable(job_id: str, pdf_bytes: bytes, book_id: str, boo
         completed_at=datetime.now(timezone.utc),
         progress_message=f"Book stored in Library: {chunks_stored} chunks, {total_pages} pages.",
     )
+    _enqueue_index_builds(book_id)
     doc.close()
     return False
 
@@ -332,6 +334,18 @@ def ingest_pdf_task(self, job_id: str, pdf_b64: str, question_type: str, count_p
         loop.run_until_complete(_mark_failed(job_id, str(exc)))
     finally:
         loop.close()
+
+
+def _enqueue_index_builds(book_id: str) -> None:
+    """Kick off specialist index builds for a fully ingested book (non-fatal)."""
+    if not settings.MATH_INDEX_ENABLED:
+        return
+    try:
+        from app.tasks.index_tasks import build_math_index_task
+        build_math_index_task.delay(book_id)
+        logger.info(f"Enqueued math index build for book '{book_id}'")
+    except Exception as exc:
+        logger.warning(f"Could not enqueue index build for '{book_id}': {exc}")
 
 
 async def _update_job(db, job_id: str, **fields):
@@ -604,6 +618,8 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     })
     chunks = ctx["chunks"]  # the chain may re-split chunks at topic boundaries
     stored = await store_chunks_bulk(chunks, ctx["embeddings"], book_id)
+    if stored:
+        _enqueue_index_builds(book_id)
     if stored < len(chunks):
         await _update_job(db, job_id,
             progress_message=(

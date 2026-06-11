@@ -236,6 +236,7 @@ async def orchestrate_question_bank(
             count=needed,
             bloom_level=bloom_level,
             existing_questions=seen_texts,
+            book_id=book_id,
         )
         logger.info(f"[ORCH] Round 2 — {bloom_level} gap filled with {len(gap_questions)} questions")
         questions.extend(gap_questions)
@@ -263,6 +264,7 @@ async def orchestrate_question_bank(
                     count=1,
                     bloom_level="L3",  # default — apply/analyse most uncovered concepts
                     existing_questions=seen_texts,
+                    book_id=book_id,
                 )
                 if cc_qs:
                     questions.extend(cc_qs)

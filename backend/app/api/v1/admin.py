@@ -168,3 +168,35 @@ async def reset_cooldowns(current_user: dict = Depends(require_instructor)):
         health.rate_limited_until = 0.0
         health.quota_exhausted_until = 0.0
     return {"message": "All cooldowns reset", "providers": list(key_manager._health.keys())}
+
+
+# ── Specialist RAG indexes (MULTI_RAG_DESIGN) ──────────────────────────────────
+
+@router.post("/index/build/{book_id}")
+async def build_index_for_book(book_id: str, current_user: dict = Depends(require_instructor)):
+    """Build (or rebuild) the specialist indexes for one book."""
+    from app.tasks.index_tasks import build_math_index_task
+    task = build_math_index_task.delay(book_id)
+    return {"task_id": task.id, "book_id": book_id, "index": "math",
+            "status": "queued", "queue": "math_tasks"}
+
+
+@router.post("/index/build-all")
+async def build_all_indexes(current_user: dict = Depends(require_instructor)):
+    """Build (or rebuild) specialist indexes for every ingested book."""
+    from app.core.database import get_mongo_db
+    from app.tasks.index_tasks import build_math_index_task
+    db = get_mongo_db()
+    book_ids = [b for b in await db["pdf_chunks"].distinct("book_id") if b]
+    queued = []
+    for book_id in book_ids:
+        task = build_math_index_task.delay(book_id)
+        queued.append({"book_id": book_id, "task_id": task.id})
+    return {"queued": queued, "count": len(queued)}
+
+
+@router.get("/index/status")
+async def index_status(current_user: dict = Depends(require_instructor)):
+    """Per-book build status and document counts for the specialist indexes."""
+    from app.services.math_index import math_index_status
+    return {"math": await math_index_status()}

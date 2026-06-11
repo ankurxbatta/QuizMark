@@ -41,6 +41,7 @@ import json
 import re
 from typing import Optional
 
+from app.core.config import settings
 from app.services.llm_service import generation_service, slm_service
 from app.services.pdf_service import TextChunk
 
@@ -274,6 +275,7 @@ You are a statistics assessment author writing exam questions for a business sta
 SOURCE CONTENT (base all questions strictly on this material):
 {content}
 
+{formulas_block}
 COGNITIVE LEVEL REQUIREMENT:
 {bloom_instruction}
 
@@ -323,10 +325,17 @@ async def generate_targeted_bloom_questions(
     count: int,
     bloom_level: str,
     existing_questions: Optional[list[str]] = None,
+    book_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Generate `count` questions locked to a single Bloom's level.
     Used by the orchestrator to fill gaps after Round 1.
+
+    For L3 (Apply), the prompt is augmented with exact formulas from the math
+    specialist index (MULTI_RAG_DESIGN) so computational questions are built on
+    the textbook's verbatim repaired LaTeX rather than whatever survived in
+    prose chunks. Degrades silently to chunk-only context if the index is
+    empty or disabled.
     """
     if not chunks or count <= 0:
         return []
@@ -338,8 +347,22 @@ async def generate_targeted_bloom_questions(
     best = max(chunks, key=_score_chunk)
     content = best.to_prompt_block()
 
+    formulas_block = ""
+    if bloom_level == "L3" and settings.MATH_INDEX_ENABLED:
+        try:
+            from app.services.math_index import retrieve_formulas, render_formulas_block
+            query = f"{best.topic_tag} {best.section_title} formula calculation".strip()
+            q_emb = await slm_service.embed(query)
+            formulas = await retrieve_formulas(q_emb, book_id=book_id, k=5)
+            formulas_block = render_formulas_block(formulas)
+            if formulas_block:
+                formulas_block += "\n"
+        except Exception as exc:
+            logger.debug(f"[GEN] math index retrieval skipped: {_safe_exception_message(exc)}")
+
     prompt = _TARGETED_BLOOM_PROMPT.format(
         content=content,
+        formulas_block=formulas_block,
         bloom_instruction=bloom_instruction,
         bloom_level=bloom_level,
         count=count,

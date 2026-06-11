@@ -231,6 +231,15 @@ Trigger text cleaning for a specific book.
 ### `GET /admin/clean/preview/{book_id}`
 Preview noisy chunks before cleaning. Returns the top 10 noisiest chunks with before/after comparison.
 
+### `POST /admin/index/build/{book_id}`
+Build (or rebuild) the specialist RAG indexes for one book. Runs on `worker-math`.
+
+### `POST /admin/index/build-all`
+Build (or rebuild) specialist indexes for every ingested book.
+
+### `GET /admin/index/status`
+Per-book build status and document counts for the specialist indexes.
+
 ---
 
 ## Export (instructor)

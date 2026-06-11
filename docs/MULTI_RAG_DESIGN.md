@@ -1,6 +1,8 @@
 # Multi-Specialist RAG Architecture — Design
 
-Status: **APPROVED 2026-06-11** — decisions: auto-backfill on deploy · heuristic-only marking
+Status: **APPROVED 2026-06-11 — Phase 1 implemented** (math_index + builder on worker-math,
+vector_search generalisation + book_id pre-filter fix, auto-backfill, admin endpoints,
+KEY FORMULAS in L3 generation). Decisions: auto-backfill on deploy · heuristic-only marking
 routing · keep all 8 workers (1:1 specialist mapping) · `table_index` pulled into Phase 2
 Author: design session 2026-06-11
 

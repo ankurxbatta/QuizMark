@@ -149,6 +149,18 @@ Failed windows are rolled back and retried on resume, so partial output never le
 
 ---
 
+## Specialist RAG Indexes (MULTI_RAG_DESIGN)
+
+Per-modality retrieval indexes built asynchronously by the specialist workers
+after a book finishes ingesting (and auto-backfilled on startup for existing books).
+
+| Variable | Default | Description |
+|---|---|---|
+| `MATH_INDEX_ENABLED` | `true` | Per-formula index (`math_index` collection) built by worker-math. L3 (Apply) question generation retrieves exact formulas from it. Disable to fall back to chunk-only retrieval. |
+| `INDEX_BUILD_BATCH_SIZE` | `10` | Formulas per enrichment LLM call during index builds (results cached by content hash). |
+
+---
+
 ## RAG Retrieval
 
 | Variable | Default | Description |

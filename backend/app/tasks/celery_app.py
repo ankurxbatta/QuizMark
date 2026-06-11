@@ -11,6 +11,7 @@ celery_app = Celery(
         "app.tasks.ingest_tasks",
         "app.tasks.clean_tasks",
         "app.tasks.deepsearch_tasks",
+        "app.tasks.index_tasks",
     ],
 )
 
@@ -54,6 +55,8 @@ TASK_ROUTES = {
     "app.tasks.clean_tasks.clean_chunk_by_id_task":      {"queue": "clean_tasks"},
     # DeepSearch (RAG retrieval for question generation)
     "app.tasks.deepsearch_tasks.*":                      {"queue": "deepsearch_tasks"},
+    # Specialist index builders (MULTI_RAG_DESIGN)
+    "app.tasks.index_tasks.build_math_index_task":       {"queue": "math_tasks"},
     # Marking
     "app.tasks.marking_tasks.*":                         {"queue": "mark_tasks"},
 }
