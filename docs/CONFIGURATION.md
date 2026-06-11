@@ -16,6 +16,14 @@ All settings live in `.env`. Run `setup.sh` (Mac/Linux) or `setup.bat` (Windows)
 
 ---
 
+## Environment
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENVIRONMENT` | `development` | `development` or `production`. In production the API docs (`/docs`, `/redoc`) are disabled and demo-data seeding refuses to run. |
+
+---
+
 ## Auth
 
 | Variable | Default | Description |
@@ -114,11 +122,30 @@ All settings live in `.env`. Run `setup.sh` (Mac/Linux) or `setup.bat` (Windows)
 |---|---|---|
 | `UPLOAD_MAX_SIZE_MB` | `25` | Maximum PDF upload size. |
 | `PDF_MAX_PAGES` | `700` | Maximum pages to process per PDF. |
-| `PDF_MIN_CHUNK_CHARS` | `300` | Chunks shorter than this are discarded. |
-| `PDF_MAX_CHUNK_CHARS` | `3000` | Chunks longer than this are split. |
+| `PDF_MIN_CHUNK_CHARS` | `300` | Target minimum chunk size. Short tails are merged into the previous chunk (never silently dropped). |
+| `PDF_MAX_CHUNK_CHARS` | `3000` | Chunks longer than this are split recursively. |
 | `INGEST_PAGE_WINDOW` | `6` | Pages processed per checkpoint window. |
 | `INGEST_TIME_BUDGET_SECONDS` | `1500` | Worker re-queues the task after this long (stays under Celery 30-min soft limit). |
 | `ENABLE_VISION_EXTRACTION` | `true` | Enable chart/image vision descriptions. |
+
+---
+
+## Ingestion Chain (LangChain pipeline)
+
+Each checkpoint window runs the chain clean → chunk → validate → vision → embed.
+Failed windows are rolled back and retried on resume, so partial output never leaks into the store.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CHUNK_OVERLAP` | `200` | Character overlap between recursively split chunks. |
+| `SEMANTIC_CHUNK_RATIO` | `0.2` | Share of chunks (by teaching density) re-split at semantic boundaries. |
+| `SEMANTIC_MIN_CHARS` | `1500` | Only chunks at least this long are semantic-split candidates. |
+| `INGEST_VISION_CONCURRENCY` | `6` | Parallel vision API calls per window. |
+| `ENABLE_CHUNK_VALIDATION` | `true` | LLM math repair of formula chunks before DB insert (cached by content hash). |
+| `VALIDATION_CONCURRENCY` | `4` | Parallel validation LLM calls. |
+| `EMBEDDING_BATCH_SIZE` | `100` | Texts per embedding API call; failed batches fall back to per-item embedding. |
+| `GEMINI_EMBEDDING_DELAY_SECONDS` | `0.5` | Pause between Gemini embedding calls (free-tier pacing). |
+| `GEMINI_VISION_DELAY_SECONDS` | `0.0` | Pause between Gemini vision calls. |
 
 ---
 

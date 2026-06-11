@@ -4,7 +4,9 @@ Base URL: `http://localhost:8000/api/v1`
 
 All protected endpoints require a Bearer token. Get one from `POST /auth/login`.
 
-Interactive docs with live testing: **http://localhost:8000/docs**
+Interactive docs with live testing: **http://localhost:8000/docs** (disabled when `ENVIRONMENT=production`)
+
+List endpoints support `skip` (default 0) and `limit` (default 100, max 500) query parameters.
 
 ---
 
@@ -15,6 +17,17 @@ Interactive docs with live testing: **http://localhost:8000/docs**
 { "username": "admin", "password": "your-password" }
 ```
 Returns `{ "access_token": "...", "token_type": "bearer" }`.
+
+Rate limited to 10 requests/minute per IP. Three failed attempts lock the account for 5 minutes.
+
+### `POST /auth/register`
+```json
+{ "username": "student1", "password": "min-8-characters" }
+```
+Creates a student account. Password must be at least 8 characters. Rate limited to 5 requests/minute per IP.
+
+### `GET /auth/students`
+List all student accounts. Instructor only.
 
 ---
 
@@ -48,8 +61,11 @@ Poll ingestion job status.
 ```
 Status values: `queued` · `processing` · `done` · `failed`
 
-### `GET /questions/jobs/{job_id}/stream`
+### `GET /questions/jobs/{job_id}/stream?token={jwt}`
 Server-Sent Events stream for real-time job progress. Used by the frontend.
+
+Browsers' EventSource API cannot send Authorization headers, so the JWT must be passed
+as the `token` query parameter. Requests with a missing or invalid token are rejected.
 
 ### `GET /questions/books`
 List all ingested books with stats.
@@ -141,24 +157,42 @@ Get a submission with marking result.
 }
 ```
 
-### `POST /marking/mark/{submission_id}`
-Trigger marking for a specific submission.
-
 ### `GET /submissions`
-List submissions. Params: `student_id` · `question_id` · `is_marked` · `is_flagged`
+List submissions (instructor). Params: `student_id` · `question_id` · `is_marked` · `is_flagged` · `skip` · `limit`
+
+### `GET /submissions/my`
+List the calling student's own submissions. Params: `skip` · `limit`
 
 ---
 
-## Analytics
+## Marking (instructor)
 
-### `GET /analytics/overview`
-Summary stats: total questions, submissions, marked count, average score.
+### `POST /marking/{submission_id}/retry`
+Re-queue AI marking for a submission. Marking is idempotent — a submission already
+being marked by another worker is skipped, and stale claims (>10 min) are retaken.
 
-### `GET /analytics/by-topic`
-Per-topic breakdown of question count and average student score.
+### `PUT /marking/{submission_id}/override`
+Override the AI mark with an instructor mark + reason. Writes an audit-log entry
+recording the actor, the previous mark, and the new mark.
 
-### `GET /analytics/by-student`
-Per-student performance summary.
+### `GET /marking/flagged`
+Submissions flagged for instructor review (low marking confidence).
+
+### `GET /marking/audit-log`
+Mark-override audit trail.
+
+---
+
+## Analytics (instructor)
+
+### `GET /analytics/pipeline`
+Marking pipeline stats: counts per confidence band, flagged rate, auto vs overridden marks.
+
+### `GET /analytics/questions`
+Per-question performance breakdown. Params: `skip` · `limit`
+
+### `GET /analytics/confidence-distribution`
+Distribution of marking confidence across submissions. Params: `skip` · `limit`
 
 ---
 
@@ -199,15 +233,17 @@ Preview noisy chunks before cleaning. Returns the top 10 noisiest chunks with be
 
 ---
 
-## Export
+## Export (instructor)
 
-### `GET /export/questions`
-Export questions as CSV or JSON.
+CSV responses are streamed (constant memory regardless of data size) and
+formula-injection safe: cell values starting with `=`, `+`, `-`, `@` are
+prefixed with an apostrophe so spreadsheets treat them as text.
 
-Params: `format` (`csv` · `json`) · `topic_tag` · `difficulty`
+### `GET /export/marks`
+Export all submissions with marks, feedback, and question context as CSV.
 
-### `GET /export/submissions`
-Export submissions and marking results.
+### `GET /export/audit`
+Export the mark-override audit log as CSV.
 
 ---
 

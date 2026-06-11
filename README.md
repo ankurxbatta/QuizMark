@@ -37,6 +37,7 @@ Open **http://localhost:3000** and log in with `admin` + the password you chose.
 |---|---|
 | Frontend | Next.js 15, TypeScript, Tailwind CSS |
 | Backend API | FastAPI (Python 3.11) |
+| Ingestion pipeline | LangChain (LCEL chain: clean → chunk → validate → vision → embed) |
 | Database + vector store | MongoDB Atlas Local (768-dim cosine vector search) |
 | Background jobs | Celery + Redis (8 specialised workers) |
 | Infrastructure | Docker Compose |
@@ -52,7 +53,7 @@ Open **http://localhost:3000** and log in with `admin` + the password you chose.
 | Service | URL | Purpose |
 |---|---|---|
 | App | http://localhost:3000 | Instructor + student UI |
-| API docs | http://localhost:8000/docs | Interactive Swagger UI |
+| API docs | http://localhost:8000/docs | Interactive Swagger UI (disabled when `ENVIRONMENT=production`) |
 | MongoDB UI | http://localhost:8081 | Browse the database |
 | Flower | http://localhost:5555 | Live worker / task monitor |
 
@@ -153,6 +154,9 @@ backend/app/
     api_key_manager.py   — quota tracking, auto-rotation between providers
     text_cleaner.py      — PDF noise removal (ligatures, mojibake, boilerplate)
     pdf_extractor.py     — PyMuPDF page extraction, chunk accumulator
+    chunking.py          — recursive + semantic chunk splitting (LangChain)
+    chunk_validator.py   — LLM math repair + dedup before DB insert
+    ingestion_chain.py   — LCEL pipeline: clean → chunk → validate → vision → embed
     question_generator.py— DeepSearch retrieval, Bloom's taxonomy generation
     question_orchestrator.py — multi-round agentic question bank generation
     rag_pipeline.py      — hybrid SLM + RAG marking pipeline
@@ -175,6 +179,8 @@ frontend/src/app/
   (student)/
     assessment/          — take an assessment
 
+backend/tests/           — pytest suite (auth, RBAC, rate limiting, chunking, marking)
+
 scripts/
   ingest_book.py         — standalone script to ingest a book directly (bypasses Celery)
 
@@ -183,7 +189,41 @@ docs/
   CONFIGURATION.md       — all .env variables explained
   GENERATION_PIPELINE.md — question generation deep-dive
   API.md                 — REST API reference
+
+.github/workflows/ci.yml — CI: backend lint + tests, frontend build
 ```
+
+---
+
+## Development
+
+Docker Compose automatically merges `docker-compose.override.yml`, which enables
+backend hot-reload and mounts the source tree — so `docker compose up -d` gives you
+a live-reloading dev environment, while the base `docker-compose.yml` stays production-safe.
+
+Backend tests and linting run against Python 3.11:
+
+```bash
+cd backend
+python3.11 -m venv .venv-test           # or: uv venv --python 3.11 .venv-test
+.venv-test/bin/pip install -r requirements.txt -r requirements-dev.txt
+.venv-test/bin/pytest tests -q          # 29 tests, no DB or network needed
+.venv-test/bin/ruff check app tests     # lint
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev        # local dev server
+npm run build      # production build (also run by CI)
+```
+
+CI (GitHub Actions) runs lint + tests + builds on every push to `main`/`Develop` and on PRs.
+
+After changing `backend/requirements.txt` (e.g. the LangChain pins), rebuild images:
+`docker compose build`.
 
 ---
 

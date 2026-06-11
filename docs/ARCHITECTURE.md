@@ -69,32 +69,44 @@ PDF Upload (up to 25 MB, 700 pages)
         │
         │  ingest_book_resumable_task → ingest_tasks queue
         ▼
-  worker-ingest      — processes 6 pages at a time:
+  worker-ingest      — processes 6 pages at a time through the
+                       LangChain (LCEL) ingestion chain:
 
     ┌─ Parse pages (PyMuPDF) ─────────────── sync
     │    text · tables · math fonts · vector graphics detected
     │
-    ├─ Vision API calls ──────────────────── asyncio.gather (max 5 concurrent)
-    │    chart pages → OpenAI gpt-4o-mini → natural-language description
-    │    fallback: Anthropic claude-haiku
-    │
-    ├─ Math API calls ────────────────────── asyncio.gather (max 5 concurrent)
-    │    math-font pages → OpenAI gpt-4o-mini → LaTeX formula extraction
-    │    fallback: Anthropic claude-haiku
-    │
     ├─ Text cleaning ─────────────────────── sync, in-process
     │    ligatures · mojibake · boilerplate · page-number noise stripped
     │
-    ├─ Batch embeddings ──────────────────── 1 API call for all chunks
-    │    Gemini gemini-embedding-001 (768-dim) → OpenAI fallback (same 768-dim)
+    ├─ Chunking ──────────────────────────── recursive split + semantic re-split
+    │    short tails merged (never dropped) · top 20% by teaching density
+    │    re-split at semantic boundaries
     │
-    ├─ MongoDB bulk insert
+    ├─ Chunk validation ──────────────────── LLM math repair, cached by content hash
+    │    restores operators lost in PDF extraction · dedups content
+    │    across text / tables / math
+    │
+    ├─ Vision + Math API calls ───────────── semaphore-metered asyncio.gather
+    │    chart pages → description · math-font pages → LaTeX
+    │    provider fallback chain: OpenAI → Anthropic → Gemini
+    │
+    ├─ Batch embeddings ──────────────────── EMBEDDING_BATCH_SIZE texts per call
+    │    Gemini gemini-embedding-001 (768-dim) → OpenAI fallback (same 768-dim)
+    │    failed batches fall back to per-item embedding
+    │
+    ├─ MongoDB bulk insert ───────────────── deterministic chunk IDs
+    │    (re-inserts after a crash are duplicate-key no-ops)
     │
     └─ Checkpoint saved (next_page + accumulator state)
          │
          └─▶ next 6 pages ... repeat until complete
 
 Re-uploading the same PDF resumes from the last checkpoint automatically.
+If a window fails mid-flight, its partial chunks are rolled back on resume
+and the same window is retried — no orphaned or duplicated chunks.
+
+Both ingestion paths (one-shot upload+generate and resumable book-only)
+run through the same chain.
 ```
 
 ---

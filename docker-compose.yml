@@ -16,7 +16,7 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -30,14 +30,14 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     env_file:
       - .env
     depends_on:
       broker:
-        condition: service_started
+        condition: service_healthy
       mongodb:
         condition: service_healthy
     healthcheck:
@@ -47,7 +47,6 @@ services:
       retries: 10
       start_period: 60s
     volumes:
-      - ./backend:/app
       - ./data/uploads:/app/uploads
       - ./Book:/app/Book:ro
     restart: unless-stopped
@@ -64,8 +63,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     volumes:
       - ./data/uploads:/app/uploads
       - ./Book:/app/Book:ro
@@ -83,8 +84,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     mem_limit: 1g
     restart: unless-stopped
     networks:
@@ -99,8 +102,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -115,8 +120,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -130,8 +137,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -147,8 +156,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -162,8 +173,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -177,8 +190,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
-      - mongodb
+      broker:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -196,7 +211,8 @@ services:
     env_file:
       - .env
     depends_on:
-      - broker
+      broker:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
@@ -206,6 +222,12 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
     networks:
       - app-network

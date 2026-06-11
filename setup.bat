@@ -64,8 +64,10 @@ goto :after_pw
 :need_pw
 echo.
 echo   ⚠  Choose an admin password for the instructor login.
+:ask_pw
 set /p ADMIN_PW_INPUT="  Admin password (min 8 chars): "
-if "!ADMIN_PW_INPUT!"=="" ( echo   ✗  Password cannot be empty. & pause & exit /b 1 )
+if "!ADMIN_PW_INPUT!"=="" ( echo   ✗  Password cannot be empty. & goto :ask_pw )
+if "!ADMIN_PW_INPUT:~7,1!"=="" ( echo   ⚠  Must be at least 8 characters. & goto :ask_pw )
 call :set_env ADMIN_PASSWORD "!ADMIN_PW_INPUT!"
 echo   ✓  ADMIN_PASSWORD saved
 :after_pw

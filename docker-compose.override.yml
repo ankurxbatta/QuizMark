@@ -1,0 +1,9 @@
+# Dev-only overrides — automatically merged by `docker compose up`.
+# The base docker-compose.yml is production-safe (no --reload, no source bind mount).
+services:
+  backend:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - ./data/uploads:/app/uploads
+      - ./Book:/app/Book:ro

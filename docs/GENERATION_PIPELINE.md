@@ -31,7 +31,11 @@ teaching_density— fraction of lines containing teaching signals
 key_terms       — extracted statistical/domain terms
 ```
 
+Chunks pass through the LangChain ingestion chain before storage:
+clean → recursive/semantic chunking → LLM validation (math repair + dedup) → vision → batched embedding.
+
 Ingestion is **resumable** — re-uploading the same PDF continues from the last saved checkpoint.
+Failed windows are rolled back and retried on resume, so the store never contains partial output.
 
 ---
 
