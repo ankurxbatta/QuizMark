@@ -4,20 +4,31 @@
 
 QuizMark is a containerised web application built on FastAPI + Next.js. All heavy processing is done by specialised Celery workers, not the API server. The API server only validates requests and hands tasks to Redis queues.
 
+```mermaid
+flowchart TD
+    B["Browser"] --> FE["Next.js frontend :3000"]
+    FE --> API["FastAPI backend :8000"]
+    API --> R[["Redis broker :6379"]]
+
+    R --> WI["worker-ingest"]
+    R --> WV["worker-vision"]
+    R --> WM["worker-math"]
+    R --> WC["worker-clean"]
+    R --> WE["worker-embed"]
+    R --> WD["worker-deepsearch"]
+    R --> WG["worker-gen"]
+    R --> WK["worker-mark"]
+
+    WI & WV & WM & WC & WE & WD & WG & WK --> DB[("MongoDB :27017<br/>data store + 768-dim vector indexes")]
+    API --> DB
+
+    FL["Flower :5555<br/>worker dashboard"] -.-> R
+    ME["mongo-express :8081<br/>DB browser"] -.-> DB
 ```
-Browser → Next.js (3000) → FastAPI (8000) → Redis broker
-                                                  │
-                           ┌──────────────────────┼──────────────────────┐
-                           │                      │                      │
-                     worker-ingest         worker-gen            worker-mark
-                     worker-vision         worker-deepsearch     worker-clean
-                     worker-math           worker-embed
-                           │                      │                      │
-                           └──────────────────────┼──────────────────────┘
-                                                  │
-                                              MongoDB
-                                   (data store + 768-dim vector index)
-```
+
+For the question-generation subsystem in component-level detail (retrieval
+routing, orchestration rounds, verification), see
+[QUESTION_GENERATION_ARCHITECTURE.md](QUESTION_GENERATION_ARCHITECTURE.md).
 
 ---
 
