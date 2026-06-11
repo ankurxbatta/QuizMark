@@ -319,6 +319,42 @@ No preamble. No trailing text. Just the JSON array.
 """
 
 
+async def _specialist_context(best_chunk, bloom_level: str, book_id: Optional[str]) -> str:
+    """
+    Bloom-level → specialist-index routing (MULTI_RAG_DESIGN):
+      L3 Apply   → exact formulas from math_index
+      L4 Analyze → figures + tables from figure_index / table_index
+    Returns a ready-to-insert prompt block ("" when nothing applies/retrieves).
+    """
+    blocks: list[str] = []
+    try:
+        if bloom_level == "L3" and settings.MATH_INDEX_ENABLED:
+            from app.services.math_index import retrieve_formulas, render_formulas_block
+            query = f"{best_chunk.topic_tag} {best_chunk.section_title} formula calculation".strip()
+            q_emb = await slm_service.embed(query)
+            block = render_formulas_block(await retrieve_formulas(q_emb, book_id=book_id, k=5))
+            if block:
+                blocks.append(block)
+
+        elif bloom_level == "L4" and (settings.FIGURE_INDEX_ENABLED or settings.TABLE_INDEX_ENABLED):
+            query = f"{best_chunk.topic_tag} {best_chunk.section_title} data chart interpretation".strip()
+            q_emb = await slm_service.embed(query)
+            if settings.FIGURE_INDEX_ENABLED:
+                from app.services.figure_index import retrieve_figures, render_figures_block
+                block = render_figures_block(await retrieve_figures(q_emb, book_id=book_id, k=3))
+                if block:
+                    blocks.append(block)
+            if settings.TABLE_INDEX_ENABLED:
+                from app.services.table_index import retrieve_tables, render_tables_block
+                block = render_tables_block(await retrieve_tables(q_emb, book_id=book_id, k=2))
+                if block:
+                    blocks.append(block)
+    except Exception as exc:
+        logger.debug(f"[GEN] specialist index retrieval skipped: {_safe_exception_message(exc)}")
+
+    return ("\n\n".join(blocks) + "\n") if blocks else ""
+
+
 async def generate_targeted_bloom_questions(
     chunks: list,
     question_type: str,
@@ -331,11 +367,12 @@ async def generate_targeted_bloom_questions(
     Generate `count` questions locked to a single Bloom's level.
     Used by the orchestrator to fill gaps after Round 1.
 
-    For L3 (Apply), the prompt is augmented with exact formulas from the math
-    specialist index (MULTI_RAG_DESIGN) so computational questions are built on
-    the textbook's verbatim repaired LaTeX rather than whatever survived in
-    prose chunks. Degrades silently to chunk-only context if the index is
-    empty or disabled.
+    Bloom-level → modality routing (MULTI_RAG_DESIGN): L3 (Apply) prompts are
+    augmented with exact formulas from the math specialist index, and L4
+    (Analyze) prompts with real figures and tables from the figure/table
+    indexes — so computational questions are built on verbatim repaired LaTeX
+    and analysis questions reference actual charts/tables from the book.
+    Degrades silently to chunk-only context if the indexes are empty/disabled.
     """
     if not chunks or count <= 0:
         return []
@@ -347,18 +384,7 @@ async def generate_targeted_bloom_questions(
     best = max(chunks, key=_score_chunk)
     content = best.to_prompt_block()
 
-    formulas_block = ""
-    if bloom_level == "L3" and settings.MATH_INDEX_ENABLED:
-        try:
-            from app.services.math_index import retrieve_formulas, render_formulas_block
-            query = f"{best.topic_tag} {best.section_title} formula calculation".strip()
-            q_emb = await slm_service.embed(query)
-            formulas = await retrieve_formulas(q_emb, book_id=book_id, k=5)
-            formulas_block = render_formulas_block(formulas)
-            if formulas_block:
-                formulas_block += "\n"
-        except Exception as exc:
-            logger.debug(f"[GEN] math index retrieval skipped: {_safe_exception_message(exc)}")
+    formulas_block = await _specialist_context(best, bloom_level, book_id)
 
     prompt = _TARGETED_BLOOM_PROMPT.format(
         content=content,

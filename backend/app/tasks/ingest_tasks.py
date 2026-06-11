@@ -338,14 +338,22 @@ def ingest_pdf_task(self, job_id: str, pdf_b64: str, question_type: str, count_p
 
 def _enqueue_index_builds(book_id: str) -> None:
     """Kick off specialist index builds for a fully ingested book (non-fatal)."""
-    if not settings.MATH_INDEX_ENABLED:
-        return
     try:
-        from app.tasks.index_tasks import build_math_index_task
-        build_math_index_task.delay(book_id)
-        logger.info(f"Enqueued math index build for book '{book_id}'")
+        from app.tasks import index_tasks
+        enqueued = []
+        if settings.MATH_INDEX_ENABLED:
+            index_tasks.build_math_index_task.delay(book_id)
+            enqueued.append("math")
+        if settings.FIGURE_INDEX_ENABLED:
+            index_tasks.build_figure_index_task.delay(book_id)
+            enqueued.append("figure")
+        if settings.TABLE_INDEX_ENABLED:
+            index_tasks.build_table_index_task.delay(book_id)
+            enqueued.append("table")
+        if enqueued:
+            logger.info(f"Enqueued {'/'.join(enqueued)} index builds for book '{book_id}'")
     except Exception as exc:
-        logger.warning(f"Could not enqueue index build for '{book_id}': {exc}")
+        logger.warning(f"Could not enqueue index builds for '{book_id}': {exc}")
 
 
 async def _update_job(db, job_id: str, **fields):

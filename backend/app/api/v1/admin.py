@@ -172,26 +172,38 @@ async def reset_cooldowns(current_user: dict = Depends(require_instructor)):
 
 # ── Specialist RAG indexes (MULTI_RAG_DESIGN) ──────────────────────────────────
 
+def _enabled_index_builders():
+    from app.tasks import index_tasks
+    builders = [
+        ("math", settings.MATH_INDEX_ENABLED, index_tasks.build_math_index_task),
+        ("figure", settings.FIGURE_INDEX_ENABLED, index_tasks.build_figure_index_task),
+        ("table", settings.TABLE_INDEX_ENABLED, index_tasks.build_table_index_task),
+    ]
+    return [(name, task) for name, enabled, task in builders if enabled]
+
+
 @router.post("/index/build/{book_id}")
 async def build_index_for_book(book_id: str, current_user: dict = Depends(require_instructor)):
-    """Build (or rebuild) the specialist indexes for one book."""
-    from app.tasks.index_tasks import build_math_index_task
-    task = build_math_index_task.delay(book_id)
-    return {"task_id": task.id, "book_id": book_id, "index": "math",
-            "status": "queued", "queue": "math_tasks"}
+    """Build (or rebuild) all enabled specialist indexes for one book."""
+    queued = [
+        {"index": name, "task_id": task.delay(book_id).id}
+        for name, task in _enabled_index_builders()
+    ]
+    return {"book_id": book_id, "queued": queued, "status": "queued"}
 
 
 @router.post("/index/build-all")
 async def build_all_indexes(current_user: dict = Depends(require_instructor)):
-    """Build (or rebuild) specialist indexes for every ingested book."""
+    """Build (or rebuild) all enabled specialist indexes for every ingested book."""
     from app.core.database import get_mongo_db
-    from app.tasks.index_tasks import build_math_index_task
     db = get_mongo_db()
     book_ids = [b for b in await db["pdf_chunks"].distinct("book_id") if b]
-    queued = []
-    for book_id in book_ids:
-        task = build_math_index_task.delay(book_id)
-        queued.append({"book_id": book_id, "task_id": task.id})
+    builders = _enabled_index_builders()
+    queued = [
+        {"book_id": book_id, "index": name, "task_id": task.delay(book_id).id}
+        for book_id in book_ids
+        for name, task in builders
+    ]
     return {"queued": queued, "count": len(queued)}
 
 
@@ -199,4 +211,10 @@ async def build_all_indexes(current_user: dict = Depends(require_instructor)):
 async def index_status(current_user: dict = Depends(require_instructor)):
     """Per-book build status and document counts for the specialist indexes."""
     from app.services.math_index import math_index_status
-    return {"math": await math_index_status()}
+    from app.services.figure_index import figure_index_status
+    from app.services.table_index import table_index_status
+    return {
+        "math": await math_index_status(),
+        "figure": await figure_index_status(),
+        "table": await table_index_status(),
+    }

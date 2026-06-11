@@ -156,8 +156,12 @@ after a book finishes ingesting (and auto-backfilled on startup for existing boo
 
 | Variable | Default | Description |
 |---|---|---|
-| `MATH_INDEX_ENABLED` | `true` | Per-formula index (`math_index` collection) built by worker-math. L3 (Apply) question generation retrieves exact formulas from it. Disable to fall back to chunk-only retrieval. |
-| `INDEX_BUILD_BATCH_SIZE` | `10` | Formulas per enrichment LLM call during index builds (results cached by content hash). |
+| `MATH_INDEX_ENABLED` | `true` | Per-formula index (`math_index`) built by worker-math. L3 (Apply) question generation retrieves exact formulas from it. |
+| `FIGURE_INDEX_ENABLED` | `true` | Per-figure index (`figure_index`) built by worker-vision from stored chart descriptions. L4 (Analyze) generation retrieves real figures from it. |
+| `TABLE_INDEX_ENABLED` | `true` | Per-table index (`table_index`) built by worker-clean from stored markdown tables. L4 (Analyze) generation retrieves real tables from it. |
+| `INDEX_BUILD_BATCH_SIZE` | `10` | Items per enrichment LLM call during index builds (results cached by content hash). |
+
+Disabling any index falls back to chunk-only retrieval for that modality.
 
 ---
 

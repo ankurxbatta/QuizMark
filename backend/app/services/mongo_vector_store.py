@@ -25,10 +25,14 @@ CHUNKS_COLLECTION       = "pdf_chunks"
 QUESTIONS_COLLECTION    = "questions"
 CHECKPOINTS_COLLECTION  = "ingest_checkpoints"
 MATH_COLLECTION         = "math_index"
+FIGURE_COLLECTION       = "figure_index"
+TABLE_COLLECTION        = "table_index"
 INDEX_JOBS_COLLECTION   = "index_build_jobs"
 CHUNKS_INDEX_NAME       = "pdf_chunks_vector_index"
 QUESTIONS_INDEX_NAME    = "questions_vector_index"
 MATH_INDEX_NAME         = "math_vector_index"
+FIGURE_INDEX_NAME       = "figure_vector_index"
+TABLE_INDEX_NAME        = "table_vector_index"
 EMBEDDING_DIMENSIONS    = 768
 
 
@@ -104,10 +108,12 @@ async def _ensure_index(
 
 
 async def ensure_vector_index() -> None:
-    """Create/upgrade vector search indexes for chunks, questions and math_index."""
+    """Create/upgrade vector search indexes for chunks, questions and the specialist indexes."""
     await _ensure_index(CHUNKS_COLLECTION, CHUNKS_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
     await _ensure_index(QUESTIONS_COLLECTION, QUESTIONS_INDEX_NAME)
     await _ensure_index(MATH_COLLECTION, MATH_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
+    await _ensure_index(FIGURE_COLLECTION, FIGURE_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
+    await _ensure_index(TABLE_COLLECTION, TABLE_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
 
 
 # ── PDF chunk store ────────────────────────────────────────────────────────────

@@ -128,32 +128,39 @@ async def backfill_specialist_indexes():
     that are fully ingested but have no build recorded. Guarded by a per-book
     marker in index_build_jobs so restarts never re-enqueue.
     """
-    if not settings.MATH_INDEX_ENABLED:
-        return
     try:
         from datetime import datetime, timezone
+        from app.tasks import index_tasks
+
+        builders = [
+            ("math", settings.MATH_INDEX_ENABLED, index_tasks.build_math_index_task),
+            ("figure", settings.FIGURE_INDEX_ENABLED, index_tasks.build_figure_index_task),
+            ("table", settings.TABLE_INDEX_ENABLED, index_tasks.build_table_index_task),
+        ]
+        builders = [(name, task) for name, enabled, task in builders if enabled]
+        if not builders:
+            return
 
         db = get_mongo_db()
-        book_ids = await db["pdf_chunks"].distinct("book_id")
+        book_ids = [b for b in await db["pdf_chunks"].distinct("book_id") if b]
         if not book_ids:
             return
-        from app.tasks.index_tasks import build_math_index_task
 
         enqueued = 0
         for book_id in book_ids:
-            if not book_id:
-                continue
-            marker = await db["index_build_jobs"].find_one({"_id": f"math:{book_id}"})
-            if marker:
-                continue
-            await db["index_build_jobs"].insert_one({
-                "_id": f"math:{book_id}", "index": "math", "book_id": book_id,
-                "status": "queued", "started_at": None, "finished_at": None,
-                "created_at": datetime.now(timezone.utc),
-            })
-            build_math_index_task.delay(book_id)
-            enqueued += 1
+            for name, task in builders:
+                marker_id = f"{name}:{book_id}"
+                marker = await db["index_build_jobs"].find_one({"_id": marker_id})
+                if marker:
+                    continue
+                await db["index_build_jobs"].insert_one({
+                    "_id": marker_id, "index": name, "book_id": book_id,
+                    "status": "queued", "started_at": None, "finished_at": None,
+                    "created_at": datetime.now(timezone.utc),
+                })
+                task.delay(book_id)
+                enqueued += 1
         if enqueued:
-            logger.info(f"[STARTUP] Backfill: enqueued math index builds for {enqueued} book(s).")
+            logger.info(f"[STARTUP] Backfill: enqueued {enqueued} specialist index build(s).")
     except Exception as exc:
         logger.warning(f"[STARTUP] Specialist index backfill failed (non-fatal): {exc}")

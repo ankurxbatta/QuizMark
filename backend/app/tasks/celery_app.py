@@ -57,6 +57,8 @@ TASK_ROUTES = {
     "app.tasks.deepsearch_tasks.*":                      {"queue": "deepsearch_tasks"},
     # Specialist index builders (MULTI_RAG_DESIGN)
     "app.tasks.index_tasks.build_math_index_task":       {"queue": "math_tasks"},
+    "app.tasks.index_tasks.build_figure_index_task":     {"queue": "vision_tasks"},
+    "app.tasks.index_tasks.build_table_index_task":      {"queue": "clean_tasks"},
     # Marking
     "app.tasks.marking_tasks.*":                         {"queue": "mark_tasks"},
 }

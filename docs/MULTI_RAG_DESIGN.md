@@ -1,9 +1,12 @@
 # Multi-Specialist RAG Architecture — Design
 
-Status: **APPROVED 2026-06-11 — Phase 1 implemented** (math_index + builder on worker-math,
-vector_search generalisation + book_id pre-filter fix, auto-backfill, admin endpoints,
-KEY FORMULAS in L3 generation). Decisions: auto-backfill on deploy · heuristic-only marking
-routing · keep all 8 workers (1:1 specialist mapping) · `table_index` pulled into Phase 2
+Status: **APPROVED 2026-06-11 — Phases 1 & 2 implemented.**
+Phase 1: math_index + builder on worker-math, vector_search generalisation + book_id
+pre-filter fix, auto-backfill, admin endpoints, KEY FORMULAS in L3 generation.
+Phase 2: figure_index (worker-vision) + table_index (worker-clean) + L4 visual/tabular
+routing (FIGURES/TABLES prompt blocks in Analyze-level generation).
+Decisions: auto-backfill on deploy · heuristic-only marking routing · keep all 8 workers
+(1:1 specialist mapping) · `table_index` pulled into Phase 2
 Author: design session 2026-06-11
 
 ---
