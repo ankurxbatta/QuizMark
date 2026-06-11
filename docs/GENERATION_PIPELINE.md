@@ -105,12 +105,15 @@ students against the model answer, those errors would silently penalise
 correct answers. Wrong values are rewritten before storage with the
 deterministically computed number.
 
-*MCQ ambiguity* — each option is judged independently for factual
-correctness. Distractors that are actually true (typically a rephrasing of
-the correct option, e.g. "the area under the pdf up to 5" vs "P(X ≤ 5)") are
-rewritten into plausible but unambiguously false statements. This matters
-because MCQ marking is a deterministic letter comparison — a student picking
-a synonymous distractor would otherwise be wrongly given 0.
+*MCQ distractors* — when the generating LLM omits options, the structural
+fallback fills the gaps with generic placeholders; the verification pass
+replaces those with topic-specific false distractors written by the LLM.
+Then each option is judged independently for factual correctness, and
+distractors that are actually true (typically a rephrasing of the correct
+option, e.g. "the area under the pdf up to 5" vs "P(X ≤ 5)") are rewritten
+into plausible but unambiguously false statements. This matters because MCQ
+marking is a deterministic letter comparison — a student picking a
+synonymous distractor would otherwise be wrongly given 0.
 
 All verification failures are non-fatal and keep the original question.
 

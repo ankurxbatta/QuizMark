@@ -246,8 +246,50 @@ Respond ONLY as valid JSON mapping the rewritten letters to their new text, e.g.
 """
 
 
+_MCQ_DISTRACTOR_PROMPT = """You are writing wrong options for a multiple-choice statistics exam question.
+
+Question:
+{stem}
+
+Correct answer ({correct_letter}): {correct_text}
+
+Write a plausible but unambiguously FALSE option for each of the letters {fill_letters}. Each one must:
+- Be a believable answer a student with a common misconception might pick
+- Be specific to this question's topic (no generic filler)
+- Be factually false — never a rephrasing or special case of the correct answer
+- Match the correct option's length and tone
+
+Respond ONLY as valid JSON mapping each letter to its option text, e.g.:
+{{"B": "<option text>", "C": "<option text>"}}
+"""
+
+
 def _options_block(options: dict[str, str]) -> str:
     return "\n".join(f"{letter}. {options[letter]}" for letter in sorted(options))
+
+
+async def _fill_generic_distractors(question: dict, stem: str, options: dict[str, str]) -> None:
+    """Replace boilerplate fallback distractors with topic-specific false ones."""
+    letters = question.pop("_generic_distractors", None) or []
+    correct = (question.get("correct_answer") or "").strip().upper()
+    letters = [l for l in letters if l in options and l != correct]
+    if not letters or correct not in options:
+        return
+    raw = await llm_service.generate(_MCQ_DISTRACTOR_PROMPT.format(
+        stem=stem,
+        correct_letter=correct,
+        correct_text=options[correct],
+        fill_letters=", ".join(letters),
+    ))
+    fixes = _parse_json(raw) or {}
+    applied = []
+    for letter in letters:
+        new_text = str(fixes.get(letter) or fixes.get(letter.lower()) or "").strip()
+        if new_text and new_text.lower() != options[correct].lower():
+            options[letter] = new_text
+            applied.append(letter)
+    if applied:
+        logger.info("[VERIFY-MCQ] replaced generic distractor(s) %s for %r", applied, stem[:80])
 
 
 async def _verify_mcq_one(question: dict) -> None:
@@ -256,15 +298,24 @@ async def _verify_mcq_one(question: dict) -> None:
     stem, options = _split_mcq_text(question.get("question_text", ""))
     correct = (question.get("correct_answer") or "").strip().upper()
     if not stem or correct not in options or len(options) < 3:
+        question.pop("_generic_distractors", None)
         return
 
+    before = dict(options)
+
+    # Pass 1: replace boilerplate fallback distractors with topic-specific
+    # ones, then let the ambiguity judge validate the replacements too.
+    await _fill_generic_distractors(question, stem, options)
+
+    # Pass 2: judge each option independently for factual correctness.
     raw = await llm_service.generate(_MCQ_JUDGE_PROMPT.format(
         stem=stem, options_block=_options_block(options),
     ))
     verdict = _parse_json(raw)
-    if not verdict:
-        return
-    judged_true = {k.upper() for k, v in verdict.items() if v is True and k.upper() in options}
+    judged_true = (
+        {k.upper() for k, v in verdict.items() if v is True and k.upper() in options}
+        if verdict else {correct}
+    )
 
     if correct not in judged_true:
         # The stored key itself failed the check — a single LLM judgement isn't
@@ -273,35 +324,34 @@ async def _verify_mcq_one(question: dict) -> None:
             "[VERIFY-MCQ] stored key %s judged not-correct for %r — leaving unchanged",
             correct, stem[:80],
         )
-        return
+        judged_true = {correct}
 
     extra_true = sorted(judged_true - {correct})
-    if not extra_true:
-        return  # exactly one correct option — question is fine
+    if extra_true:
+        raw_fix = await llm_service.generate(_MCQ_FIX_PROMPT.format(
+            stem=stem,
+            options_block=_options_block(options),
+            correct_letter=correct,
+            correct_text=options[correct],
+            fix_letters=", ".join(extra_true),
+        ))
+        fixes = _parse_json(raw_fix) or {}
+        applied = []
+        for letter in extra_true:
+            new_text = str(fixes.get(letter) or fixes.get(letter.lower()) or "").strip()
+            if new_text and new_text.lower() != options[correct].lower():
+                options[letter] = new_text
+                applied.append(letter)
+        if applied:
+            logger.info(
+                "[VERIFY-MCQ] rewrote ambiguous distractor(s) %s for %r",
+                applied, stem[:80],
+            )
 
-    raw_fix = await llm_service.generate(_MCQ_FIX_PROMPT.format(
-        stem=stem,
-        options_block=_options_block(options),
-        correct_letter=correct,
-        correct_text=options[correct],
-        fix_letters=", ".join(extra_true),
-    ))
-    fixes = _parse_json(raw_fix) or {}
-    applied = []
-    for letter in extra_true:
-        new_text = str(fixes.get(letter) or fixes.get(letter.lower()) or "").strip()
-        if new_text and new_text.lower() != options[correct].lower():
-            options[letter] = new_text
-            applied.append(letter)
-    if not applied:
-        return
-    question["question_text"] = "\n".join(
-        [stem, *(f"{letter}. {options[letter]}" for letter in sorted(options))]
-    )
-    logger.info(
-        "[VERIFY-MCQ] rewrote ambiguous distractor(s) %s for %r",
-        applied, stem[:80],
-    )
+    if options != before:
+        question["question_text"] = "\n".join(
+            [stem, *(f"{letter}. {options[letter]}" for letter in sorted(options))]
+        )
 
 
 async def verify_mcq_options(questions: list[dict]) -> list[dict]:

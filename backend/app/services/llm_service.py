@@ -65,7 +65,7 @@ class OpenAIClient:
                     headers=self._hdrs(),
                     json={"model": self.model, "messages": [{"role": "user", "content": prompt}],
                           "max_tokens": self.max_tokens, "temperature": settings.LLM_TEMPERATURE})
-            if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+            if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
                 await _retry_sleep(r, attempt); continue
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
@@ -87,7 +87,7 @@ class OpenAIClient:
                               {"type": "text", "text": prompt},
                               {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
                           ]}], "max_tokens": 500})
-            if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+            if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
                 await _retry_sleep(r, attempt); continue
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"].strip()
@@ -122,7 +122,7 @@ class AnthropicClient:
                     headers=self._hdrs(),
                     json={"model": self.model, "max_tokens": self.max_tokens,
                           "messages": [{"role": "user", "content": prompt}]})
-            if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+            if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
                 await _retry_sleep(r, attempt); continue
             r.raise_for_status()
             return r.json()["content"][0]["text"]
@@ -144,7 +144,7 @@ class AnthropicClient:
                                "media_type": "image/png", "data": b64}},
                               {"type": "text", "text": prompt},
                           ]}]})
-            if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+            if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
                 await _retry_sleep(r, attempt); continue
             r.raise_for_status()
             text = r.json()["content"][0]["text"].strip()
@@ -178,7 +178,7 @@ class GeminiClient:
             async with httpx.AsyncClient(timeout=90) as c:
                 r = await c.post(f"{self._base}/models/{self.model}:generateContent",
                     params={"key": settings.GEMINI_API_KEY}, json=payload)
-            if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+            if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
                 if r.status_code == 429:
                     key_manager.mark_quota_exhausted("gemini", r.text[:200])
                 await _retry_sleep(r, attempt); continue
@@ -202,7 +202,7 @@ async def _openai_embed(text: str) -> list[float]:
             r = await c.post(f"{settings.OPENAI_BASE_URL}/embeddings",
                 headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
                 json={"model": settings.OPENAI_EMBEDDING_MODEL, "input": text[:8191], "dimensions": 768})
-        if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+        if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
             await _retry_sleep(r, attempt); continue
         r.raise_for_status()
         return r.json()["data"][0]["embedding"]
@@ -218,7 +218,7 @@ async def _openai_embed_batch(texts: list[str]) -> list[list[float]]:
                 headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
                 json={"model": settings.OPENAI_EMBEDDING_MODEL,
                       "input": [t[:8191] for t in texts], "dimensions": 768})
-        if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+        if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
             await _retry_sleep(r, attempt); continue
         r.raise_for_status()
         items = sorted(r.json()["data"], key=lambda x: x["index"])
@@ -237,7 +237,7 @@ async def _gemini_embed(text: str) -> list[float]:
                 params={"key": settings.GEMINI_API_KEY},
                 json={"model": f"models/{model}", "content": {"parts": [{"text": text[:2048]}]},
                       "taskType": "SEMANTIC_SIMILARITY", "outputDimensionality": 768})
-        if r.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+        if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
             if r.status_code == 429:
                 key_manager.mark_quota_exhausted("gemini_embed", r.text[:200])
                 raise RuntimeError("Gemini embed quota exhausted")

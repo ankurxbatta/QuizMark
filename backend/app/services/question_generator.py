@@ -1208,9 +1208,16 @@ def _normalise_mcq(q: dict, raw_question_text) -> None:
         options[correct_letter] = correct_text
 
     distractors = iter(_generic_mcq_distractors(q.get("topic_tag", "Statistics"), correct_text))
+    filled_letters: list[str] = []
     for letter in _MCQ_LETTERS:
         if not options.get(letter):
             options[letter] = next(distractors, f"An incorrect interpretation of {q.get('topic_tag', 'the concept')}.")
+            filled_letters.append(letter)
+    if filled_letters:
+        # Generic placeholders keep the question well-formed, but they read as
+        # boilerplate; the verification pass replaces them with topic-specific
+        # false distractors written by the LLM.
+        q["_generic_distractors"] = filled_letters
 
     options = {letter: _clean_option_text(options[letter]) for letter in _MCQ_LETTERS}
     q["question_text"] = "\n".join(

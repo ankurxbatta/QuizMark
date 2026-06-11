@@ -211,33 +211,39 @@ async def orchestrate_question_bank(
     gaps = _audit_bloom_gaps(questions, target_count=count)
     logger.info(f"[ORCH] Round 2 — {len(gaps)} Bloom's gaps: {[g['bloom_level'] for g in gaps]}")
 
-    # Process each gap sequentially so each gap's output feeds the next's context
+    # Process each gap sequentially so each gap's output feeds the next's context.
+    # Gap-filling is enrichment — a failure (e.g. a transient embed error during
+    # retrieval) must never discard the questions already generated.
     for gap in gaps:
         bloom_level = gap["bloom_level"]
         needed = gap["needed"]
         logger.info(f"[ORCH] Round 2 — filling {bloom_level} gap, need {needed} questions")
 
-        # Level-specific retrieval query
-        focused_topic = f"{gap['retrieval_suffix']} {chapter_topic}"
-        raw_chunks_r2 = await deep_retrieve_for_generation(
-            topic=focused_topic,
-            book_id=book_id,
-            k=8,
-        )
-        chunks_r2 = [DbChunk(doc) for doc in raw_chunks_r2]
+        try:
+            # Level-specific retrieval query
+            focused_topic = f"{gap['retrieval_suffix']} {chapter_topic}"
+            raw_chunks_r2 = await deep_retrieve_for_generation(
+                topic=focused_topic,
+                book_id=book_id,
+                k=8,
+            )
+            chunks_r2 = [DbChunk(doc) for doc in raw_chunks_r2]
 
-        if not chunks_r2:
-            logger.warning(f"[ORCH] Round 2 — no chunks for {bloom_level} gap, skipping")
+            if not chunks_r2:
+                logger.warning(f"[ORCH] Round 2 — no chunks for {bloom_level} gap, skipping")
+                continue
+
+            gap_questions = await generate_targeted_bloom_questions(
+                chunks=chunks_r2,
+                question_type=question_type,
+                count=needed,
+                bloom_level=bloom_level,
+                existing_questions=seen_texts,
+                book_id=book_id,
+            )
+        except Exception as exc:
+            logger.warning(f"[ORCH] Round 2 — {bloom_level} gap fill failed (non-fatal): {exc}")
             continue
-
-        gap_questions = await generate_targeted_bloom_questions(
-            chunks=chunks_r2,
-            question_type=question_type,
-            count=needed,
-            bloom_level=bloom_level,
-            existing_questions=seen_texts,
-            book_id=book_id,
-        )
         logger.info(f"[ORCH] Round 2 — {bloom_level} gap filled with {len(gap_questions)} questions")
         questions.extend(gap_questions)
         seen_texts.extend(q["question_text"] for q in gap_questions)
@@ -251,21 +257,25 @@ async def orchestrate_question_bank(
         if uncovered:
             logger.info(f"[ORCH] Round 2b — {len(uncovered)} uncovered concepts: {uncovered}")
             for concept in uncovered[:5]:  # cap so we don't explode the run
-                focused = f"{concept} {chapter_topic}"
-                raw_cc = await deep_retrieve_for_generation(
-                    topic=focused, book_id=book_id, k=6,
-                )
-                cc_chunks = [DbChunk(doc) for doc in raw_cc]
-                if not cc_chunks:
+                try:
+                    focused = f"{concept} {chapter_topic}"
+                    raw_cc = await deep_retrieve_for_generation(
+                        topic=focused, book_id=book_id, k=6,
+                    )
+                    cc_chunks = [DbChunk(doc) for doc in raw_cc]
+                    if not cc_chunks:
+                        continue
+                    cc_qs = await generate_targeted_bloom_questions(
+                        chunks=cc_chunks,
+                        question_type=question_type,
+                        count=1,
+                        bloom_level="L3",  # default — apply/analyse most uncovered concepts
+                        existing_questions=seen_texts,
+                        book_id=book_id,
+                    )
+                except Exception as exc:
+                    logger.warning(f"[ORCH] Round 2b — concept {concept!r} fill failed (non-fatal): {exc}")
                     continue
-                cc_qs = await generate_targeted_bloom_questions(
-                    chunks=cc_chunks,
-                    question_type=question_type,
-                    count=1,
-                    bloom_level="L3",  # default — apply/analyse most uncovered concepts
-                    existing_questions=seen_texts,
-                    book_id=book_id,
-                )
                 if cc_qs:
                     questions.extend(cc_qs)
                     seen_texts.extend(q["question_text"] for q in cc_qs)
