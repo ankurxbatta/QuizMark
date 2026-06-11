@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -30,6 +31,8 @@ from app.core.config import settings
 from app.services.llm_service import llm_service, online_service, slm_service
 from app.services.slm_scorer import slm_pre_score, SLMResult
 from app.services.mongo_vector_store import vector_search, search_similar_questions
+
+logger = logging.getLogger(__name__)
 
 
 _MARKING_PROMPT = """You are an expert statistics tutor marking a student answer.
@@ -189,7 +192,53 @@ async def _retrieve_context(
             f"Rubric: {q.get('rubric', '')}"
         )
 
+    # ── Source 3: specialist indexes, heuristically routed (MULTI_RAG_DESIGN) ──
+    # No extra LLM or embedding calls: intent comes from regex over the question
+    # + rubric, and the already-computed concept embedding is reused. The marker
+    # gets the canonical formula (or figure/table) to check the student against.
+    specialist_block = await _specialist_marking_context(
+        question_text, rubric, concept_embeddings[0] if concept_embeddings else answer_emb
+    )
+    if specialist_block:
+        parts.append(specialist_block)
+
     return "\n\n".join(parts) if parts else "No relevant context available."
+
+
+async def _specialist_marking_context(
+    question_text: str,
+    rubric: str,
+    query_emb: list[float],
+) -> str:
+    """Heuristic-routed specialist context for marking. '' when nothing applies."""
+    from app.services.retrieval_router import (
+        INTENT_COMPUTATIONAL,
+        INTENT_VISUAL,
+        classify_intent,
+    )
+
+    blocks: list[str] = []
+    try:
+        intent = classify_intent(f"{question_text} {rubric}")
+        if intent == INTENT_COMPUTATIONAL and settings.MATH_INDEX_ENABLED:
+            from app.services.math_index import render_formulas_block, retrieve_formulas
+            block = render_formulas_block(await retrieve_formulas(query_emb, k=3))
+            if block:
+                blocks.append(block)
+        elif intent == INTENT_VISUAL:
+            if settings.FIGURE_INDEX_ENABLED:
+                from app.services.figure_index import render_figures_block, retrieve_figures
+                block = render_figures_block(await retrieve_figures(query_emb, k=2))
+                if block:
+                    blocks.append(block)
+            if settings.TABLE_INDEX_ENABLED:
+                from app.services.table_index import render_tables_block, retrieve_tables
+                block = render_tables_block(await retrieve_tables(query_emb, k=2))
+                if block:
+                    blocks.append(block)
+    except Exception as exc:
+        logger.debug(f"specialist marking context skipped: {exc}")
+    return "\n\n".join(blocks)
 
 
 async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:

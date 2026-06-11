@@ -160,26 +160,16 @@ async def deep_retrieve_for_generation(
     Returns:
         List of raw MongoDB chunk dicts ready for _DbChunk construction.
     """
-    from app.services.mongo_vector_store import vector_search
+    from app.services.retrieval_router import routed_retrieve
 
     queries = await _generate_retrieval_queries(topic, n=4)
-    k_per_query = max(3, k // len(queries))
-
     embeddings = await asyncio.gather(*[slm_service.embed(q) for q in queries])
-    raw_batches = await asyncio.gather(
-        *[vector_search(emb, k=k_per_query, book_id=book_id) for emb in embeddings]
-    )
 
-    seen_ids: set[str] = set()
-    chunks: list[dict] = []
-    for batch in raw_batches:
-        for chunk in batch:
-            cid = chunk.get("_id", "")
-            if cid not in seen_ids:
-                seen_ids.add(cid)
-                chunks.append(chunk)
-
-    return chunks[:k]
+    # Intent-routed multi-index retrieval with RRF fusion (MULTI_RAG_DESIGN
+    # Phase 3): sub-queries about formulas/charts also hit the specialist
+    # indexes, whose top hits pull their source chunks in via cross-links.
+    fused = await routed_retrieve(queries, embeddings, book_id=book_id, k=k)
+    return fused.text_chunks[:k]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

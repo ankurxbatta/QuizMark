@@ -64,6 +64,51 @@ def deepsearch_retrieve_task(
     soft_time_limit=120,
     time_limit=150,
 )
+def multi_index_retrieve_task(
+    self,
+    queries: list[str],
+    book_id: str | None = None,
+    k: int = 8,
+) -> dict:
+    """
+    Queue-shaped intent-routed retrieval (MULTI_RAG_DESIGN Phase 3): embeds the
+    queries, routes them across the text/math/figure/table indexes, fuses with
+    RRF and expands cross-links. Returns a serialisable FusedContext dict.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_run_multi_index_retrieve(queries, book_id, k))
+    except Exception as exc:
+        logger.warning(f"multi_index_retrieve_task failed: {exc}")
+        raise self.retry(exc=exc, countdown=10)
+    finally:
+        loop.close()
+
+
+async def _run_multi_index_retrieve(queries: list[str], book_id: str | None, k: int) -> dict:
+    import asyncio as _asyncio
+
+    from app.services.llm_service import slm_service
+    from app.services.retrieval_router import routed_retrieve
+
+    embeddings = await _asyncio.gather(*[slm_service.embed(q) for q in queries])
+    fused = await routed_retrieve(queries, embeddings, book_id=book_id, k=k)
+    return {
+        "text_chunks": fused.text_chunks,
+        "formulas": fused.formulas,
+        "figures": fused.figures,
+        "tables": fused.tables,
+    }
+
+
+@celery_app.task(
+    bind=True,
+    queue="deepsearch_tasks",
+    max_retries=2,
+    soft_time_limit=120,
+    time_limit=150,
+)
 def deepsearch_concept_extract_task(self, chapter_topic: str, book_id: str) -> dict:
     """
     Extract key concepts from a chapter using the LLM.

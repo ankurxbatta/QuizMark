@@ -110,6 +110,8 @@ class Settings(BaseSettings):
     FIGURE_INDEX_ENABLED: bool = True
     TABLE_INDEX_ENABLED: bool = True
     INDEX_BUILD_BATCH_SIZE: int = 10          # items per enrichment LLM call
+    RRF_K: int = 60                           # reciprocal-rank fusion constant
+    EXPANSION_NEIGHBORS: int = 2              # parent chunks pulled in via cross-links
 
     # ── Question generation throughput ────────────────────────────────────────
     GEN_CHAPTER_CONCURRENCY: int = 5        # OpenAI/Anthropic handle higher concurrency

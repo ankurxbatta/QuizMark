@@ -59,6 +59,7 @@ TASK_ROUTES = {
     "app.tasks.index_tasks.build_math_index_task":       {"queue": "math_tasks"},
     "app.tasks.index_tasks.build_figure_index_task":     {"queue": "vision_tasks"},
     "app.tasks.index_tasks.build_table_index_task":      {"queue": "clean_tasks"},
+    "app.tasks.index_tasks.rebuild_index_embeddings_task": {"queue": "embed_tasks"},
     # Marking
     "app.tasks.marking_tasks.*":                         {"queue": "mark_tasks"},
 }

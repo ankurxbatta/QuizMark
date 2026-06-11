@@ -160,8 +160,13 @@ after a book finishes ingesting (and auto-backfilled on startup for existing boo
 | `FIGURE_INDEX_ENABLED` | `true` | Per-figure index (`figure_index`) built by worker-vision from stored chart descriptions. L4 (Analyze) generation retrieves real figures from it. |
 | `TABLE_INDEX_ENABLED` | `true` | Per-table index (`table_index`) built by worker-clean from stored markdown tables. L4 (Analyze) generation retrieves real tables from it. |
 | `INDEX_BUILD_BATCH_SIZE` | `10` | Items per enrichment LLM call during index builds (results cached by content hash). |
+| `RRF_K` | `60` | Reciprocal-rank fusion constant for multi-index retrieval. |
+| `EXPANSION_NEIGHBORS` | `2` | Parent chunks pulled into results via specialist cross-links. |
 
-Disabling any index falls back to chunk-only retrieval for that modality.
+Disabling any index falls back to chunk-only retrieval for that modality. Generation
+retrieval routes sub-queries by intent (conceptual/computational/visual) across the
+indexes and fuses results; marking gets heuristically-routed canonical formulas,
+figures and tables in its context with no added LLM or embedding calls.
 
 ---
 

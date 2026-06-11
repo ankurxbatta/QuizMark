@@ -1,10 +1,15 @@
 # Multi-Specialist RAG Architecture — Design
 
-Status: **APPROVED 2026-06-11 — Phases 1 & 2 implemented.**
+Status: **APPROVED 2026-06-11 — Phases 1–3 implemented.**
 Phase 1: math_index + builder on worker-math, vector_search generalisation + book_id
 pre-filter fix, auto-backfill, admin endpoints, KEY FORMULAS in L3 generation.
 Phase 2: figure_index (worker-vision) + table_index (worker-clean) + L4 visual/tabular
 routing (FIGURES/TABLES prompt blocks in Analyze-level generation).
+Phase 3: retrieval_router (heuristic intents → specialist search → RRF fusion →
+parent-chunk cross-link expansion) wired into generation retrieval; heuristic-routed
+specialist context in marking; rebuild_index_embeddings_task (worker-embed) and
+multi_index_retrieve_task (worker-deepsearch). All 8 workers now serve their
+intended specialist roles. Remaining: Phase 4 (optional — rerankers, eval harness).
 Decisions: auto-backfill on deploy · heuristic-only marking routing · keep all 8 workers
 (1:1 specialist mapping) · `table_index` pulled into Phase 2
 Author: design session 2026-06-11
