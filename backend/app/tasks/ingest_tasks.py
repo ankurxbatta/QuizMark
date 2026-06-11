@@ -105,31 +105,42 @@ def ingest_book_resumable_task(self, job_id: str, pdf_b64: str, book_id: str, bo
     Page-by-page resumable PDF ingestion. Auto-continues across the Celery time
     limit by re-.delay()ing the same task with the same (job_id, book_hash).
     """
-    # Reset the Motor client so it binds to the new event loop, not the previous
-    # task's closed loop (Motor caches the client as a module-level singleton).
-    import app.core.database as _db_module
-    _db_module._client = None
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        pdf_bytes = base64.b64decode(pdf_b64)
         should_continue = loop.run_until_complete(
-            _run_ingest_resumable(job_id, pdf_bytes, book_id, book_hash)
+            _run_ingest_resumable_entry(job_id, pdf_b64, book_id, book_hash)
         )
         if should_continue:
-            # Re-queue self to keep going under a fresh time budget
-            ingest_book_resumable_task.delay(job_id, pdf_b64, book_id, book_hash)
+            # Re-queue self with an empty payload — the PDF lives in GridFS now,
+            # so continuation messages stay tiny instead of carrying ~30MB of b64.
+            ingest_book_resumable_task.delay(job_id, "", book_id, book_hash)
     except SoftTimeLimitExceeded:
         # Checkpoint is already saved at last window boundary — requeue and exit
         try:
-            ingest_book_resumable_task.delay(job_id, pdf_b64, book_id, book_hash)
+            ingest_book_resumable_task.delay(job_id, "", book_id, book_hash)
         except Exception:
             loop.run_until_complete(_mark_failed(job_id, "Soft time limit hit and re-queue failed."))
     except Exception as exc:
         loop.run_until_complete(_mark_failed(job_id, str(exc)))
     finally:
         loop.close()
+
+
+async def _run_ingest_resumable_entry(job_id: str, pdf_b64: str, book_id: str, book_hash: str) -> bool:
+    """Resolve the PDF bytes (inline b64 from older messages, else GridFS) and run."""
+    from app.services.mongo_vector_store import load_book_pdf, save_book_pdf
+
+    if pdf_b64:
+        pdf_bytes = base64.b64decode(pdf_b64)
+        # Self-heal: persist inline payloads so future re-queues can go id-only
+        await save_book_pdf(book_hash, f"{book_id}.pdf", pdf_bytes)
+    else:
+        pdf_bytes = await load_book_pdf(book_hash)
+        if not pdf_bytes:
+            await _mark_failed(job_id, "PDF not found in storage — please re-upload the book.")
+            return False
+    return await _run_ingest_resumable(job_id, pdf_bytes, book_id, book_hash)
 
 
 # Backward-compatible alias — older callers / imports still work
@@ -342,9 +353,6 @@ async def _process_window_chunks(
 
 @celery_app.task(bind=True, queue="ingest_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def ingest_pdf_task(self, job_id: str, pdf_b64: str, question_type: str, count_per_chapter: int):
-    import app.core.database as _db_module
-    _db_module._client = None
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -698,9 +706,6 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
 @celery_app.task(bind=True, queue="gen_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
 def generate_from_book_task(self, job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all"):
     """Generate questions from chunks already stored in MongoDB (no PDF re-upload needed)."""
-    import app.core.database as _db_module
-    _db_module._client = None
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:

@@ -212,7 +212,7 @@ async def ingest_book_to_library(
     Re-uploading the same content resumes from the last checkpointed page;
     if the book is already fully ingested, this is a no-op.
     """
-    from app.services.mongo_vector_store import get_checkpoint, save_checkpoint
+    from app.services.mongo_vector_store import get_checkpoint, save_checkpoint, save_book_pdf
 
     raw_bytes = await file.read()
     filename = (file.filename or "upload.pdf")
@@ -223,6 +223,13 @@ async def ingest_book_to_library(
 
     book_hash = hashlib.sha256(raw_bytes).hexdigest()[:16]
     info = get_pdf_info(raw_bytes)
+    if info.get("error") or not info.get("pages"):
+        # Reject unreadable PDFs here instead of queueing a job doomed to fail
+        raise HTTPException(
+            422,
+            f"Could not read this PDF ({info.get('error') or 'no pages found'}). "
+            "The file may be corrupt, encrypted, or not a real PDF.",
+        )
     book_id = filename.rsplit(".", 1)[0]
     now = datetime.now(timezone.utc)
 
@@ -283,6 +290,43 @@ async def ingest_book_to_library(
     job_id = (checkpoint.get("job_id") if resumed else None) or str(uuid.uuid4())
     pages_done = int((checkpoint or {}).get("pages_done", 0))
 
+    # Guard: if this book's job is actively running (fresh heartbeat), don't
+    # queue a second concurrent task — two workers racing on the same checkpoint
+    # corrupt each other's progress. Just return the live job status instead.
+    if resumed:
+        job = await db["ingest_jobs"].find_one({"_id": job_id})
+        if job and job.get("status") in ("queued", "processing"):
+            hb = job.get("last_heartbeat_at")
+            if hb is not None and hb.tzinfo is None:
+                hb = hb.replace(tzinfo=timezone.utc)
+            if hb and (now - hb).total_seconds() < 600:
+                return {
+                    "job_id": job_id,
+                    "filename": filename,
+                    "book_id": checkpoint.get("book_id", book_id),
+                    "book_hash": book_hash,
+                    "total_pages": checkpoint.get("total_pages", info.get("pages")),
+                    "pages_done": pages_done,
+                    "progress_percent": int(100 * pages_done / max(checkpoint.get("total_pages") or 1, 1)),
+                    "status": job.get("status"),
+                    "already_ingested": False,
+                    "already_running": True,
+                    "resumed": True,
+                    "resumed_from_page": pages_done,
+                    "total_chapters": 0,
+                    "chapters_done": 0,
+                    "current_chapter": None,
+                    "current_chapter_title": None,
+                    "questions_created": 0,
+                    "progress_message": job.get("progress_message")
+                        or "Ingestion already in progress for this book.",
+                    "last_heartbeat_at": hb.isoformat() if hb else None,
+                    "error": None,
+                    "created_at": now.isoformat(),
+                    "started_at": None,
+                    "completed_at": None,
+                }
+
     job_doc = {
         "_id": job_id,
         "filename": filename,
@@ -324,7 +368,10 @@ async def ingest_book_to_library(
             "state": None,
         })
 
-    pdf_b64 = base64.b64encode(raw_bytes).decode("utf-8")
+    # Store the PDF once in GridFS so the Celery message (and every re-queue)
+    # carries only ids. Fall back to the inline payload if GridFS save failed.
+    saved = await save_book_pdf(book_hash, filename, raw_bytes)
+    pdf_b64 = "" if saved else base64.b64encode(raw_bytes).decode("utf-8")
     ingest_book_only_task.delay(job_id, pdf_b64, book_id, book_hash)
 
     return {
@@ -360,9 +407,10 @@ async def clear_book_cache(
     _: dict = Depends(require_instructor),
 ):
     """Delete the checkpoint AND any partial chunks for this book hash. Generated questions are kept."""
-    from app.services.mongo_vector_store import delete_checkpoint, delete_book_chunks
+    from app.services.mongo_vector_store import delete_checkpoint, delete_book_chunks, delete_book_pdf
     await delete_checkpoint(book_hash)
     await delete_book_chunks(book_hash=book_hash)
+    await delete_book_pdf(book_hash)
     return
 
 
@@ -372,11 +420,20 @@ async def delete_book(
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    """Permanently remove a book: deletes all chunks, questions, and job record."""
-    from app.services.mongo_vector_store import delete_book_chunks
+    """Permanently remove a book: deletes all chunks, questions, jobs, checkpoints, and the stored PDF."""
+    from app.services.mongo_vector_store import delete_book_chunks, delete_checkpoint, delete_book_pdf
+
+    # Collect this book's content hashes before the chunks are gone, so the
+    # matching checkpoints and GridFS PDFs can be cleaned up too.
+    hashes = await db["pdf_chunks"].distinct("book_hash", {"book_id": book_id})
     await delete_book_chunks(book_id=book_id)
     await db["questions"].delete_many({"book_id": book_id})
-    await db["ingest_jobs"].delete_one({"_id": book_id})
+    # Job _ids are UUIDs — match on the book_id field, not _id
+    await db["ingest_jobs"].delete_many({"book_id": book_id})
+    for h in hashes:
+        if h:
+            await delete_checkpoint(h)
+            await delete_book_pdf(h)
     return
 
 

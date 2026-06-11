@@ -21,9 +21,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_mongo_client: Any = None
-_mongo_db: Any = None
-
 CHUNKS_COLLECTION       = "pdf_chunks"
 QUESTIONS_COLLECTION    = "questions"
 CHECKPOINTS_COLLECTION  = "ingest_checkpoints"
@@ -35,17 +32,10 @@ EMBEDDING_DIMENSIONS    = 768
 # ── Connection ─────────────────────────────────────────────────────────────────
 
 async def _get_db():
-    global _mongo_client, _mongo_db
-    if _mongo_db is None:
-        import motor.motor_asyncio
-        from app.core.config import settings
-        _mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
-            settings.MONGODB_URL,
-            serverSelectionTimeoutMS=5000,
-        )
-        _mongo_db = _mongo_client[settings.MONGODB_DB_NAME]
-        logger.info(f"MongoDB connected: {settings.MONGODB_URL}/{settings.MONGODB_DB_NAME}")
-    return _mongo_db
+    # Delegate to the shared loop-aware client so Celery tasks (one event loop
+    # per execution) never reuse a client bound to a previous task's closed loop.
+    from app.core.database import get_mongo_db
+    return get_mongo_db()
 
 
 async def _get_collection(name: str):
@@ -93,7 +83,7 @@ async def ensure_vector_index() -> None:
 # ── PDF chunk store ────────────────────────────────────────────────────────────
 
 def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None) -> dict:
-    return {
+    doc = {
         "book_id": book_id,
         "book_hash": book_hash,
         "chapter_num": chunk.chapter_num,
@@ -116,12 +106,23 @@ def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: s
         "embedding": embedding,
         "created_at": datetime.now(timezone.utc),
     }
+    if book_hash:
+        # Deterministic id: a resumed/crashed ingest re-creating the same chunk
+        # hits a duplicate-key no-op instead of inserting a second copy.
+        import hashlib
+        key = f"{book_hash}:{chunk.page_start}:{chunk.page_end}:{chunk.text[:2000]}"
+        doc["_id"] = hashlib.sha1(key.encode("utf-8", "ignore")).hexdigest()[:24]
+    return doc
 
 
 async def store_chunk(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None = None) -> str:
     try:
         col = await _get_collection(CHUNKS_COLLECTION)
-        result = await col.insert_one(_chunk_to_doc(chunk, embedding, book_id, book_hash))
+        doc = _chunk_to_doc(chunk, embedding, book_id, book_hash)
+        if "_id" in doc:
+            await col.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+            return str(doc["_id"])
+        result = await col.insert_one(doc)
         return str(result.inserted_id)
     except Exception as exc:
         logger.warning(f"store_chunk failed (non-fatal): {exc}")
@@ -152,8 +153,15 @@ async def store_chunks_bulk(
         result = await col.insert_many(docs, ordered=False)
         return len(result.inserted_ids)
     except Exception as exc:
+        # Duplicate _ids (chunk re-created after a crash/resume) are expected —
+        # ordered=False means all non-duplicates were still inserted.
+        details = getattr(exc, "details", None) or {}
+        n_inserted = int(details.get("nInserted", 0))
+        write_errors = details.get("writeErrors", [])
+        if write_errors and all(e.get("code") == 11000 for e in write_errors):
+            return n_inserted
         logger.warning(f"store_chunks_bulk failed (non-fatal): {exc}")
-        return 0
+        return n_inserted
 
 
 async def vector_search(
@@ -231,6 +239,64 @@ async def get_chunk_stats(book_id: str | None = None) -> dict:
     except Exception as exc:
         logger.warning(f"get_chunk_stats failed: {exc}")
         return {}
+
+
+# ── Book PDF storage (GridFS) ──────────────────────────────────────────────────
+# The uploaded PDF is stored once per book_hash so Celery messages carry only
+# ids — re-queues of big books no longer push ~30MB of base64 through Redis.
+
+PDF_BUCKET = "book_pdfs"
+
+
+async def save_book_pdf(book_hash: str, filename: str, data: bytes) -> bool:
+    """Store the PDF in GridFS keyed by book_hash (no-op if already stored)."""
+    try:
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        db = await _get_db()
+        existing = await db[f"{PDF_BUCKET}.files"].find_one(
+            {"metadata.book_hash": book_hash}, {"_id": 1}
+        )
+        if existing:
+            return True
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name=PDF_BUCKET)
+        await bucket.upload_from_stream(
+            filename, data, metadata={"book_hash": book_hash}
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"save_book_pdf failed: {exc}")
+        return False
+
+
+async def load_book_pdf(book_hash: str) -> bytes | None:
+    try:
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        db = await _get_db()
+        f = await db[f"{PDF_BUCKET}.files"].find_one(
+            {"metadata.book_hash": book_hash}, {"_id": 1}
+        )
+        if not f:
+            return None
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name=PDF_BUCKET)
+        stream = await bucket.open_download_stream(f["_id"])
+        return await stream.read()
+    except Exception as exc:
+        logger.warning(f"load_book_pdf failed: {exc}")
+        return None
+
+
+async def delete_book_pdf(book_hash: str) -> None:
+    try:
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        db = await _get_db()
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name=PDF_BUCKET)
+        cursor = db[f"{PDF_BUCKET}.files"].find(
+            {"metadata.book_hash": book_hash}, {"_id": 1}
+        )
+        async for f in cursor:
+            await bucket.delete(f["_id"])
+    except Exception as exc:
+        logger.warning(f"delete_book_pdf failed: {exc}")
 
 
 # ── Ingest checkpoints (resumable page-by-page ingestion) ──────────────────────
