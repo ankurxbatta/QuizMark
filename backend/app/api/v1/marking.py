@@ -43,11 +43,15 @@ async def override_mark(
     )
 
     actor_id = claims.get("sub", "")
+    old_mark = sub.get("override_mark") if sub.get("override_mark") is not None else sub.get("auto_mark")
     log_doc = {
         "_id": str(uuid.uuid4()),
         "event_type": "override",
         "actor_id": actor_id,
         "submission_id": submission_id,
+        "student_id": sub.get("student_id"),
+        "question_id": sub.get("question_id"),
+        "old_mark": old_mark,
         "detail": f"Mark changed to {payload.override_mark}. Reason: {payload.override_reason or 'N/A'}",
         "timestamp": datetime.now(timezone.utc),
     }

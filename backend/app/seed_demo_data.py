@@ -1,7 +1,9 @@
 import asyncio
+import sys
 import uuid
 from datetime import datetime, timezone
 
+from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.core.security import hash_password
 
@@ -40,6 +42,13 @@ async def upsert_user(db, username: str, password: str, role: str) -> dict:
 
 
 async def main():
+    if settings.ENVIRONMENT != "development":
+        print(
+            "Refusing to seed demo data: ENVIRONMENT is "
+            f"'{settings.ENVIRONMENT}', not 'development'. "
+            "Demo users have hardcoded credentials and must never be created outside development."
+        )
+        sys.exit(1)
     db = get_mongo_db()
     for username, (password, role) in DEMO_USERS.items():
         user = await upsert_user(db, username, password, role)

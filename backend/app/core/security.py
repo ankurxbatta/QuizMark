@@ -1,3 +1,6 @@
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
@@ -54,6 +57,34 @@ def require_instructor(claims: dict = Depends(get_current_user)) -> dict:
             detail="Instructor access required",
         )
     return claims
+
+
+class SlidingWindowLimiter:
+    """Minimal in-process per-key rate limiter (suitable for single-instance deployments)."""
+
+    def __init__(self, max_calls: int, window_seconds: float = 60.0):
+        self.max_calls = max_calls
+        self.window = window_seconds
+        self._hits: dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def check(self, key: str) -> None:
+        """Record a hit for `key`; raise 429 if it exceeds the window limit."""
+        now = time.monotonic()
+        with self._lock:
+            hits = self._hits[key]
+            while hits and now - hits[0] > self.window:
+                hits.popleft()
+            if len(hits) >= self.max_calls:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many requests. Please try again shortly.",
+                )
+            hits.append(now)
+
+
+login_limiter = SlidingWindowLimiter(max_calls=10, window_seconds=60.0)
+register_limiter = SlidingWindowLimiter(max_calls=5, window_seconds=60.0)
 
 
 def require_student(claims: dict = Depends(get_current_user)) -> dict:

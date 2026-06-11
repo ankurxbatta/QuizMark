@@ -8,7 +8,7 @@ import asyncio
 import httpx
 from fastapi import APIRouter, Depends
 
-from app.core.security import get_current_user
+from app.core.security import require_instructor
 from app.services.api_key_manager import key_manager
 from app.core.config import settings
 
@@ -95,7 +95,7 @@ async def _probe_anthropic() -> dict:
 
 
 @router.get("/api-status")
-async def api_status(current_user: dict = Depends(get_current_user)):
+async def api_status(current_user: dict = Depends(require_instructor)):
     """Live probe of all configured API providers + rotation stats."""
     probes = await asyncio.gather(
         _probe_gemini_embed(), _probe_openai_embed(),
@@ -122,7 +122,7 @@ async def api_status(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/clean/book/{book_id}")
-async def trigger_clean_book(book_id: str, current_user: dict = Depends(get_current_user)):
+async def trigger_clean_book(book_id: str, current_user: dict = Depends(require_instructor)):
     """Trigger async cleaning of all chunks for a specific book."""
     from app.tasks.clean_tasks import clean_book_chunks_task
     task = clean_book_chunks_task.delay(book_id)
@@ -130,7 +130,7 @@ async def trigger_clean_book(book_id: str, current_user: dict = Depends(get_curr
 
 
 @router.post("/clean/all")
-async def trigger_clean_all(current_user: dict = Depends(get_current_user)):
+async def trigger_clean_all(current_user: dict = Depends(require_instructor)):
     """Trigger async cleaning of ALL chunks in the database."""
     from app.tasks.clean_tasks import clean_all_chunks_task
     task = clean_all_chunks_task.delay()
@@ -138,7 +138,7 @@ async def trigger_clean_all(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/clean/preview/{book_id}")
-async def preview_noise(book_id: str, current_user: dict = Depends(get_current_user)):
+async def preview_noise(book_id: str, current_user: dict = Depends(require_instructor)):
     """Show sample noisy chunks before running the cleaner."""
     from app.core.database import get_mongo_db
     from app.services.text_cleaner import estimate_noise_ratio, clean_text
@@ -162,7 +162,7 @@ async def preview_noise(book_id: str, current_user: dict = Depends(get_current_u
 
 
 @router.post("/api-status/reset-cooldowns")
-async def reset_cooldowns(current_user: dict = Depends(get_current_user)):
+async def reset_cooldowns(current_user: dict = Depends(require_instructor)):
     """Reset all provider cooldowns (use after adding new API keys)."""
     for health in key_manager._health.values():
         health.rate_limited_until = 0.0

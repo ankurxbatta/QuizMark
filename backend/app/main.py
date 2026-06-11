@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import auth, questions, submissions, marking, export, analytics
@@ -7,19 +8,23 @@ from app.core.config import settings
 from app.core.database import get_mongo_db
 from app.core.security import hash_password, verify_password
 
+logger = logging.getLogger("app.startup")
+
+_is_production = settings.ENVIRONMENT == "production"
+
 app = FastAPI(
     title="Quiz Generation & Marking API",
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(auth.router,        prefix="/api/v1/auth",        tags=["auth"])
@@ -33,7 +38,7 @@ app.include_router(admin_v1.router,    prefix="/api/v1/admin",        tags=["adm
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok"}
 
 
 async def _wait_for_mongo(max_attempts: int = 15, delay: float = 3.0):
@@ -45,7 +50,7 @@ async def _wait_for_mongo(max_attempts: int = 15, delay: float = 3.0):
             return db
         except Exception as exc:
             if attempt < max_attempts - 1:
-                print(f"[STARTUP] MongoDB not ready (attempt {attempt + 1}/{max_attempts}): {exc!r} — retrying in {delay}s")
+                logger.warning(f"[STARTUP] MongoDB not ready (attempt {attempt + 1}/{max_attempts}): {exc!r} — retrying in {delay}s")
                 await asyncio.sleep(delay)
             else:
                 raise
@@ -71,7 +76,7 @@ async def ensure_admin_user():
                 "locked_until": None,
                 "created_at": datetime.now(timezone.utc),
             })
-            print(f"[STARTUP] Admin user '{settings.ADMIN_USERNAME}' created.")
+            logger.info(f"[STARTUP] Admin user '{settings.ADMIN_USERNAME}' created.")
             return
         needs_update = (
             user["role"] != desired_role
@@ -83,7 +88,7 @@ async def ensure_admin_user():
                 {"$set": {"role": desired_role, "hashed_password": hash_password(settings.ADMIN_PASSWORD)}},
             )
     except Exception as exc:
-        print(f"[STARTUP] Admin user setup failed (non-fatal): {exc}")
+        logger.warning(f"[STARTUP] Admin user setup failed (non-fatal): {exc}")
 
 
 @app.on_event("startup")
@@ -95,7 +100,7 @@ async def ensure_mongo_indexes():
         try:
             await ensure_vector_index()
         except Exception as exc:
-            print(f"[MONGO] Vector index setup failed (non-fatal): {exc}")
+            logger.warning(f"[MONGO] Vector index setup failed (non-fatal): {exc}")
 
         await db["users"].create_index("username", unique=True)
         await db["questions"].create_index("topic_tag")
@@ -104,12 +109,13 @@ async def ensure_mongo_indexes():
         await db["submissions"].create_index("question_id")
         await db["submissions"].create_index("is_flagged")
         await db["submissions"].create_index("is_marked")
+        await db["submissions"].create_index([("is_marked", 1), ("auto_confidence", 1)])
         await db["audit_logs"].create_index("timestamp")
         await db["ingest_jobs"].create_index("created_at")
         await db["pdf_chunks"].create_index("book_hash")
         await db["pdf_chunks"].create_index("book_id")
         await db["ingest_checkpoints"].create_index("updated_at")
         await db["ingest_checkpoints"].create_index("status")
-        print("[STARTUP] MongoDB indexes ready.")
+        logger.info("[STARTUP] MongoDB indexes ready.")
     except Exception as exc:
-        print(f"[STARTUP] MongoDB index setup failed (non-fatal): {exc}")
+        logger.warning(f"[STARTUP] MongoDB index setup failed (non-fatal): {exc}")

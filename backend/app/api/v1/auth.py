@@ -1,12 +1,19 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
 
 from app.core.database import get_db
-from app.core.security import verify_password, hash_password, create_access_token, require_instructor
+from app.core.security import (
+    verify_password,
+    hash_password,
+    create_access_token,
+    require_instructor,
+    login_limiter,
+    register_limiter,
+)
 from app.core.config import settings
 from app.schemas.schemas import LoginRequest, TokenResponse, UserOut
 
@@ -28,12 +35,14 @@ def _user_out(doc: dict) -> dict:
 
 
 @router.post("/register", response_model=UserOut, status_code=201)
-async def register(payload: RegisterRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def register(payload: RegisterRequest, request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
+    ip = request.client.host if request.client else "unknown"
+    register_limiter.check(ip)
     username = payload.username.strip()
     if not username:
         raise HTTPException(400, "Username is required")
-    if len(payload.password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    if len(payload.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
 
     if await db["users"].find_one({"username": username}):
         raise HTTPException(409, "Username already taken")
@@ -62,7 +71,9 @@ async def list_students(
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, db: AsyncIOMotorDatabase = Depends(get_db)):
+async def login(payload: LoginRequest, request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
+    ip = request.client.host if request.client else "unknown"
+    login_limiter.check(ip)
     user = await db["users"].find_one({"username": payload.username})
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")

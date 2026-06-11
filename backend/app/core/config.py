@@ -9,6 +9,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
+    # ── Environment ──────────────────────────────────────────────────────────
+    ENVIRONMENT: str = "development"
+
     # ── Auth ─────────────────────────────────────────────────────────────────
     SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
@@ -85,6 +88,16 @@ class Settings(BaseSettings):
     PDF_MAX_PAGES: int = 700
     PDF_MIN_CHUNK_CHARS: int = 300
     PDF_MAX_CHUNK_CHARS: int = 3000
+
+    # ── Ingestion chain (chunking / validation / parallelism) ─────────────────
+    CHUNK_OVERLAP: int = 200                 # recursive splitter overlap (chars)
+    SEMANTIC_CHUNK_RATIO: float = 0.2        # share of chunks re-split semantically
+    SEMANTIC_MIN_CHARS: int = 1500           # only chunks this long are candidates
+    INGEST_VISION_CONCURRENCY: int = 6       # parallel vision API calls per pass
+    ENABLE_CHUNK_VALIDATION: bool = True     # LLM math repair before DB insert
+    VALIDATION_CONCURRENCY: int = 4          # parallel validation LLM calls
+    GEMINI_EMBEDDING_DELAY_SECONDS: float = 0.5
+    GEMINI_VISION_DELAY_SECONDS: float = 0.0
     ENABLE_VISION_EXTRACTION: bool = True
     EMBEDDING_BATCH_SIZE: int = 100
 

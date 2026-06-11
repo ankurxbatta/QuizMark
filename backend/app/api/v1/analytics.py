@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_db
@@ -118,13 +118,15 @@ async def question_accuracy(
 
 @router.get("/confidence-distribution")
 async def confidence_distribution(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
     docs = await db["submissions"].find(
         {"is_marked": True, "auto_confidence": {"$ne": None}},
         {"auto_confidence": 1},
-    ).to_list(length=50000)
+    ).skip(skip).limit(limit).to_list(length=limit)
     values = [d["auto_confidence"] for d in docs if d.get("auto_confidence") is not None]
 
     bins = [0] * 20

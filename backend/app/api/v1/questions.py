@@ -8,8 +8,10 @@ import base64
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from jose import JWTError
+
 from app.core.database import get_db
-from app.core.security import require_instructor, get_current_user
+from app.core.security import require_instructor, get_current_user, decode_token
 from app.core.config import settings
 from app.models.models import IngestJobStatus
 from app.schemas.schemas import (
@@ -23,7 +25,7 @@ from app.schemas.schemas import (
 )
 from app.services.question_generator import generate_questions, generate_questions_from_chunks
 from app.services.llm_service import llm_service
-from app.services.pdf_service import parse_pdf_into_chunks, extract_text_from_pdf, get_pdf_info, extract_chapters_from_pdf
+from app.services.pdf_service import parse_pdf_into_chunks, get_pdf_info, extract_chapters_from_pdf
 from app.tasks.ingest_tasks import ingest_pdf_task, generate_from_book_task, ingest_book_only_task
 
 router = APIRouter()
@@ -720,16 +722,25 @@ async def get_job_status(
 @router.get("/jobs/{job_id}/stream")
 async def stream_job_status(
     job_id: str,
+    token: str = Query(...),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     """
     Server-Sent Events (SSE) endpoint to stream job progress.
-    No auth required here because SSE in browsers doesn't support headers well.
-    (In a real app, use a short-lived token in the URL or rely on cookies).
+
+    Browsers' EventSource API cannot send Authorization headers, so the JWT is
+    passed as a `token` query parameter and validated explicitly here.
     """
     from fastapi.responses import StreamingResponse
     import asyncio
     import json
+
+    try:
+        claims = decode_token(token)
+    except JWTError:
+        raise HTTPException(401, "Invalid or expired token")
+    if not claims.get("sub"):
+        raise HTTPException(401, "Invalid or expired token")
 
     async def event_generator():
         last_status = None
@@ -803,18 +814,20 @@ async def list_topics(
 
 @router.get("/assessment", response_model=List[AssessmentQuestionOut])
 async def list_assessment_questions(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     claims: dict = Depends(get_current_user),
 ):
     if claims.get("role") == "instructor":
-        cursor = db["questions"].find({}, {"embedding": 0}).sort("created_at", -1)
-        docs = await cursor.to_list(length=2000)
+        cursor = db["questions"].find({}, {"embedding": 0}).sort("created_at", -1).skip(skip).limit(limit)
+        docs = await cursor.to_list(length=limit)
         return [_q_out(d) for d in docs]
 
     student_id = claims["sub"]
     doc = await db["questions"].find(
         {"assigned_student_ids": student_id}, {"embedding": 0}
-    ).sort("created_at", -1).to_list(length=2000)
+    ).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
     return [_q_out(d) for d in doc]
 
 

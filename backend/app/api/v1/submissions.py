@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_db
@@ -29,11 +29,13 @@ def _sub_out(sub: dict, question: dict | None = None) -> dict:
 
 @router.get("/my", response_model=List[SubmissionOut])
 async def list_my_submissions(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     claims: dict = Depends(get_current_user),
 ):
     student_id = claims["sub"]
-    subs = await db["submissions"].find({"student_id": student_id}).sort("submitted_at", 1).to_list(length=2000)
+    subs = await db["submissions"].find({"student_id": student_id}).sort("submitted_at", 1).skip(skip).limit(limit).to_list(length=limit)
     result = []
     for sub in subs:
         q = await db["questions"].find_one({"_id": sub["question_id"]}, {"question_text": 1, "question_type": 1, "max_marks": 1})
@@ -91,11 +93,13 @@ async def submit_answer(
 @router.get("/", response_model=List[SubmissionOut])
 async def list_submissions(
     flagged_only: bool = False,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
     filt = {"is_flagged": True} if flagged_only else {}
-    subs = await db["submissions"].find(filt).to_list(length=5000)
+    subs = await db["submissions"].find(filt).skip(skip).limit(limit).to_list(length=limit)
     result = []
     for sub in subs:
         q = await db["questions"].find_one({"_id": sub["question_id"]}, {"question_text": 1, "question_type": 1, "max_marks": 1})
