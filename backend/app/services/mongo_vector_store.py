@@ -27,12 +27,14 @@ CHECKPOINTS_COLLECTION  = "ingest_checkpoints"
 MATH_COLLECTION         = "math_index"
 FIGURE_COLLECTION       = "figure_index"
 TABLE_COLLECTION        = "table_index"
+EXERCISE_COLLECTION     = "book_exercises"
 INDEX_JOBS_COLLECTION   = "index_build_jobs"
 CHUNKS_INDEX_NAME       = "pdf_chunks_vector_index"
 QUESTIONS_INDEX_NAME    = "questions_vector_index"
 MATH_INDEX_NAME         = "math_vector_index"
 FIGURE_INDEX_NAME       = "figure_vector_index"
 TABLE_INDEX_NAME        = "table_vector_index"
+EXERCISE_INDEX_NAME     = "exercise_vector_index"
 EMBEDDING_DIMENSIONS    = 768
 
 
@@ -131,6 +133,7 @@ async def ensure_vector_index() -> None:
     await _ensure_index(MATH_COLLECTION, MATH_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
     await _ensure_index(FIGURE_COLLECTION, FIGURE_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
     await _ensure_index(TABLE_COLLECTION, TABLE_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
+    await _ensure_index(EXERCISE_COLLECTION, EXERCISE_INDEX_NAME, filter_paths=["book_id", "chapter_num"])
 
 
 _indexes_ensured = False
@@ -431,6 +434,73 @@ async def delete_book_pdf(book_hash: str) -> None:
             await bucket.delete(f["_id"])
     except Exception as exc:
         logger.warning(f"delete_book_pdf failed: {exc}")
+
+
+# ── Generated question-asset images (GridFS) ───────────────────────────────────
+# AI-generated figure images attached to questions are stored once by asset_id
+# (a uuid4 hex). Questions carry only the id; the image streams from here.
+
+ASSET_BUCKET = "question_assets"
+
+
+async def save_question_asset(asset_id: str, png_bytes: bytes) -> bool:
+    """Store a generated PNG in GridFS keyed by asset_id (no-op if already stored)."""
+    try:
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        db = await _get_db()
+        existing = await db[f"{ASSET_BUCKET}.files"].find_one(
+            {"metadata.asset_id": asset_id}, {"_id": 1}
+        )
+        if existing:
+            return True
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name=ASSET_BUCKET)
+        await bucket.upload_from_stream(
+            asset_id, png_bytes, metadata={"asset_id": asset_id}
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"save_question_asset failed: {exc}")
+        return False
+
+
+async def load_question_asset(asset_id: str) -> bytes | None:
+    try:
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        db = await _get_db()
+        f = await db[f"{ASSET_BUCKET}.files"].find_one(
+            {"metadata.asset_id": asset_id}, {"_id": 1}
+        )
+        if not f:
+            return None
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name=ASSET_BUCKET)
+        stream = await bucket.open_download_stream(f["_id"])
+        return await stream.read()
+    except Exception as exc:
+        logger.warning(f"load_question_asset failed: {exc}")
+        return None
+
+
+async def delete_question_assets(asset_ids: list[str]) -> int:
+    """Delete generated images by asset_id. Returns the number deleted."""
+    if not asset_ids:
+        return 0
+    deleted = 0
+    try:
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        db = await _get_db()
+        bucket = AsyncIOMotorGridFSBucket(db, bucket_name=ASSET_BUCKET)
+        cursor = db[f"{ASSET_BUCKET}.files"].find(
+            {"metadata.asset_id": {"$in": list(asset_ids)}}, {"_id": 1}
+        )
+        async for f in cursor:
+            try:
+                await bucket.delete(f["_id"])
+                deleted += 1
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning(f"delete_question_assets failed: {exc}")
+    return deleted
 
 
 # ── Ingest checkpoints (resumable page-by-page ingestion) ──────────────────────

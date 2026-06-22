@@ -137,6 +137,32 @@ def _balance_bloom_distribution(
     return balanced
 
 
+# ── Seed-exercise retrieval (WS3 — ground generation in real exercises) ────────
+
+async def _retrieve_seed_exercises(
+    chapter_topic: str,
+    book_id: Optional[str],
+    chapter_num: Optional[int],
+) -> list[dict]:
+    """
+    Retrieve real exercises from this exact chapter ONCE so generation rounds can
+    reuse them as seeds. Degrades to [] when the index is disabled/empty/failing.
+    """
+    from app.core.config import settings
+    if not settings.EXERCISE_INDEX_ENABLED:
+        return []
+    try:
+        from app.services.exercise_index import retrieve_exercises
+        from app.services.llm_service import slm_service
+        q_emb = await slm_service.embed(chapter_topic)
+        return await retrieve_exercises(
+            q_emb, book_id=book_id, chapter_num=chapter_num, k=6,
+        )
+    except Exception as exc:
+        logger.debug(f"[ORCH] seed exercise retrieval skipped: {exc}")
+        return []
+
+
 # ── Main orchestrator ──────────────────────────────────────────────────────────
 
 async def orchestrate_question_bank(
@@ -146,6 +172,7 @@ async def orchestrate_question_bank(
     count: int,
     difficulty: str = "all",
     existing_questions: Optional[list[str]] = None,
+    chapter_num: Optional[int] = None,
 ) -> list[dict]:
     """
     3-round agentic question bank generation for one chapter/topic.
@@ -166,7 +193,7 @@ async def orchestrate_question_bank(
 
     # ── Round 0: "Read the chapter carefully" → extract key concepts ──────────
     seed_raw = await deep_retrieve_for_generation(
-        topic=chapter_topic, book_id=book_id, k=6,
+        topic=chapter_topic, book_id=book_id, chapter_num=chapter_num, k=6,
     )
     seed_chunks = [DbChunk(doc) for doc in seed_raw]
     chapter_concepts: list[str] = await extract_chapter_concepts(
@@ -187,6 +214,7 @@ async def orchestrate_question_bank(
     raw_chunks_r1 = await deep_retrieve_for_generation(
         topic=enriched_topic,
         book_id=book_id,
+        chapter_num=chapter_num,
         k=max(r1_target * 2, 12),
     )
     chunks_r1 = [DbChunk(doc) for doc in raw_chunks_r1]
@@ -195,12 +223,18 @@ async def orchestrate_question_bank(
         logger.warning("[ORCH] Round 1 — no chunks retrieved, returning empty")
         return []
 
+    # Retrieve real chapter exercises ONCE (cheap, reused across all rounds).
+    seed_exercises = await _retrieve_seed_exercises(chapter_topic, book_id, chapter_num)
+    if seed_exercises:
+        logger.info(f"[ORCH] Round 1 — {len(seed_exercises)} seed exercises retrieved")
+
     questions: list[dict] = await generate_questions_from_chunks(
         chunks_r1,
         question_type=question_type,
         count=r1_target,
         difficulty=difficulty,
         existing_questions=existing_questions,
+        seed_exercises=seed_exercises,
     )
     logger.info(f"[ORCH] Round 1 — generated {len(questions)} questions")
 
@@ -225,6 +259,7 @@ async def orchestrate_question_bank(
             raw_chunks_r2 = await deep_retrieve_for_generation(
                 topic=focused_topic,
                 book_id=book_id,
+                chapter_num=chapter_num,
                 k=8,
             )
             chunks_r2 = [DbChunk(doc) for doc in raw_chunks_r2]
@@ -240,6 +275,8 @@ async def orchestrate_question_bank(
                 bloom_level=bloom_level,
                 existing_questions=seen_texts,
                 book_id=book_id,
+                chapter_num=chapter_num,
+                seed_exercises=seed_exercises,
             )
         except Exception as exc:
             logger.warning(f"[ORCH] Round 2 — {bloom_level} gap fill failed (non-fatal): {exc}")
@@ -260,7 +297,7 @@ async def orchestrate_question_bank(
                 try:
                     focused = f"{concept} {chapter_topic}"
                     raw_cc = await deep_retrieve_for_generation(
-                        topic=focused, book_id=book_id, k=6,
+                        topic=focused, book_id=book_id, chapter_num=chapter_num, k=6,
                     )
                     cc_chunks = [DbChunk(doc) for doc in raw_cc]
                     if not cc_chunks:
@@ -272,6 +309,8 @@ async def orchestrate_question_bank(
                         bloom_level="L3",  # default — apply/analyse most uncovered concepts
                         existing_questions=seen_texts,
                         book_id=book_id,
+                        chapter_num=chapter_num,
+                        seed_exercises=seed_exercises,
                     )
                 except Exception as exc:
                     logger.warning(f"[ORCH] Round 2b — concept {concept!r} fill failed (non-fatal): {exc}")
@@ -295,6 +334,7 @@ async def orchestrate_question_bank(
             count=shortfall,
             difficulty=difficulty,
             existing_questions=seen_texts,
+            seed_exercises=seed_exercises,
         )
         questions.extend(topup)
         questions = _dedup_by_prefix(questions)
@@ -302,5 +342,15 @@ async def orchestrate_question_bank(
     # Quality passes: recompute numeric model answers, de-ambiguate MCQ options
     from app.services.answer_verifier import verify_generated_questions
     final = await verify_generated_questions(questions[:count])
+
+    # Attach optional table/figure assets (bounded; degrades cleanly).
+    try:
+        from app.services.question_assets import attach_assets_to_questions
+        final = await attach_assets_to_questions(
+            final, chapter_num=chapter_num, book_id=book_id,
+        )
+    except Exception as exc:
+        logger.warning(f"[ORCH] asset attachment failed (non-fatal): {exc}")
+
     logger.info(f"[ORCH] Final — {len(final)} questions for '{chapter_topic}'")
     return final

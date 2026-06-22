@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 1024
 
+    # ── Image generation (question figure assets) ────────────────────────────
+    # OpenAI gpt-image-1 is the verified-working default; Gemini's preview image
+    # model name churns and 404s, so it is only the fallback.
+    IMAGE_GEN_ENABLED: bool = True
+    IMAGE_GEN_PROVIDER: str = "openai"
+    GEMINI_IMAGE_MODEL: str = "gemini-2.5-flash-image-preview"
+    OPENAI_IMAGE_MODEL: str = "gpt-image-1"
+    ASSET_MAX_PER_CHAPTER: int = 4
+
     # ── Online LLM (answer marking) ───────────────────────────────────────────
     ONLINE_LLM_ENABLED: bool = True
     ONLINE_LLM_PROVIDER: str = "openai"
@@ -109,6 +118,7 @@ class Settings(BaseSettings):
     MATH_INDEX_ENABLED: bool = True
     FIGURE_INDEX_ENABLED: bool = True
     TABLE_INDEX_ENABLED: bool = True
+    EXERCISE_INDEX_ENABLED: bool = True
     INDEX_BUILD_BATCH_SIZE: int = 10          # items per enrichment LLM call
     RRF_K: int = 60                           # reciprocal-rank fusion constant
     EXPANSION_NEIGHBORS: int = 2              # parent chunks pulled in via cross-links

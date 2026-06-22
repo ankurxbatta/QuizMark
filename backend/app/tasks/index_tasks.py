@@ -55,6 +55,13 @@ def build_table_index_task(self, book_id: str):
     return _run_build(self, build_table_index, book_id, "build_table_index_task")
 
 
+@celery_app.task(bind=True, queue="deepsearch_tasks", max_retries=2, soft_time_limit=1500, time_limit=1800)
+def build_exercise_index_task(self, book_id: str):
+    """Build (or rebuild) the real-exercise index for one book."""
+    from app.services.exercise_index import build_exercise_index
+    return _run_build(self, build_exercise_index, book_id, "build_exercise_index_task")
+
+
 @celery_app.task(bind=True, queue="embed_tasks", max_retries=2, soft_time_limit=1500, time_limit=1800)
 def rebuild_index_embeddings_task(self, index_name: str, book_id: str):
     """
@@ -66,7 +73,9 @@ def rebuild_index_embeddings_task(self, index_name: str, book_id: str):
     from app.services.math_index import build_math_index
     from app.services.figure_index import build_figure_index
     from app.services.table_index import build_table_index
-    builders = {"math": build_math_index, "figure": build_figure_index, "table": build_table_index}
+    from app.services.exercise_index import build_exercise_index
+    builders = {"math": build_math_index, "figure": build_figure_index,
+                "table": build_table_index, "exercise": build_exercise_index}
     builder = builders.get(index_name)
     if builder is None:
         raise ValueError(f"Unknown index '{index_name}' (expected one of {sorted(builders)})")

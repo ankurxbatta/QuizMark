@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 import base64
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Header
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from jose import JWTError
@@ -37,6 +37,7 @@ def _q_out(doc: dict) -> dict:
     doc.setdefault("assigned_student_ids", [])
     doc.setdefault("source_page_range", None)
     doc.setdefault("source_chunk", None)
+    doc.setdefault("assets", [])
     doc.pop("embedding", None)
     return doc
 
@@ -423,10 +424,13 @@ async def delete_book(
     _: dict = Depends(require_instructor),
 ):
     """Permanently remove a book: deletes all chunks, questions, jobs, checkpoints, and the stored PDF."""
-    from app.services.mongo_vector_store import delete_book_chunks, delete_checkpoint, delete_book_pdf
+    from app.services.mongo_vector_store import (
+        delete_book_chunks, delete_checkpoint, delete_book_pdf, delete_question_assets,
+    )
     from app.services.math_index import delete_math_index
     from app.services.figure_index import delete_figure_index
     from app.services.table_index import delete_table_index
+    from app.services.exercise_index import delete_exercise_index
 
     # Collect this book's content hashes before the chunks are gone, so the
     # matching checkpoints and GridFS PDFs can be cleaned up too.
@@ -435,6 +439,19 @@ async def delete_book(
     await delete_math_index(book_id)
     await delete_figure_index(book_id)
     await delete_table_index(book_id)
+    await delete_exercise_index(book_id)
+
+    # Collect generated asset image ids before the questions are removed so the
+    # GridFS images don't leak.
+    asset_ids: list[str] = []
+    async for q in db["questions"].find(
+        {"book_id": book_id, "assets.image_id": {"$ne": None}}, {"assets": 1}
+    ):
+        for a in q.get("assets", []) or []:
+            if a.get("image_id"):
+                asset_ids.append(a["image_id"])
+    if asset_ids:
+        await delete_question_assets(asset_ids)
     await db["questions"].delete_many({"book_id": book_id})
     # Job _ids are UUIDs — match on the book_id field, not _id
     await db["ingest_jobs"].delete_many({"book_id": book_id})
@@ -644,6 +661,7 @@ async def generate_from_upload(
             "correct_answer": q_data.get("correct_answer"),
             "source_page_range": q_data.get("_page_range"),
             "source_chunk": q_data.get("_source_chunk"),
+            "assets": q_data.get("assets", []),
             "embedding": embedding,
             "assigned_student_ids": [],
             "created_at": datetime.now(timezone.utc),
@@ -805,6 +823,43 @@ async def stream_job_status(
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+# ── Generated asset images ─────────────────────────────────────────────────────
+# Placed before the `/{question_id}` catch-all so "assets" is never matched as a
+# question id. Streams the PNG from GridFS. Auth accepts either an Authorization
+# header OR a ?token= query param, because <img> tags can't send headers (same
+# pattern as the SSE endpoint). Any authenticated user may load images.
+
+@router.get("/assets/{image_id}")
+async def get_question_asset_image(
+    image_id: str,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    from fastapi.responses import Response
+    from app.services.mongo_vector_store import load_question_asset
+
+    raw = token
+    if not raw and authorization and authorization.lower().startswith("bearer "):
+        raw = authorization[7:].strip()
+    if not raw:
+        raise HTTPException(401, "Authentication required")
+    try:
+        claims = decode_token(raw)
+    except JWTError:
+        raise HTTPException(401, "Invalid or expired token")
+    if not claims.get("sub"):
+        raise HTTPException(401, "Invalid or expired token")
+
+    png = await load_question_asset(image_id)
+    if png is None:
+        raise HTTPException(404, "Asset not found")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 # ── Count / topics / assessment ───────────────────────────────────────────────
 
 @router.get("/count")
@@ -944,6 +999,7 @@ async def create_question(
         "_id": str(uuid.uuid4()),
         **payload.model_dump(),
         "correct_answer": _derive_correct_answer(qtype, payload.question_text, payload.model_answer),
+        "assets": [],
         "embedding": embedding,
         "assigned_student_ids": [],
         "created_at": datetime.now(timezone.utc),
@@ -976,6 +1032,15 @@ async def delete_question(
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
+    from app.services.mongo_vector_store import delete_question_assets
+
+    doc = await db["questions"].find_one({"_id": question_id}, {"assets": 1})
     result = await db["questions"].delete_one({"_id": question_id})
     if result.deleted_count == 0:
         raise HTTPException(404, "Question not found")
+    asset_ids = [
+        a["image_id"] for a in (doc or {}).get("assets", []) or []
+        if a.get("image_id")
+    ]
+    if asset_ids:
+        await delete_question_assets(asset_ids)

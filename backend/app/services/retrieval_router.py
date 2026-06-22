@@ -143,6 +143,7 @@ async def routed_retrieve(
     queries: list[str],
     embeddings: list[list[float]],
     book_id: str | None = None,
+    chapter_num: int | None = None,
     k: int = 8,
 ) -> FusedContext:
     """
@@ -157,22 +158,24 @@ async def routed_retrieve(
 
     k_per_query = max(2, k // max(1, len(queries)))
 
+    chunk_filters = {"chapter_num": chapter_num} if chapter_num is not None else None
     chunk_searches = [
-        vector_search(emb, k=k_per_query, book_id=book_id) for emb in embeddings
+        vector_search(emb, k=k_per_query, book_id=book_id, filters=chunk_filters)
+        for emb in embeddings
     ]
     specialist_searches: list = []
     specialist_kinds: list[str] = []
     for query, emb in zip(queries, embeddings):
         intent = classify_intent(query)
         if intent == INTENT_COMPUTATIONAL and settings.MATH_INDEX_ENABLED:
-            specialist_searches.append(retrieve_formulas(emb, book_id=book_id, k=3))
+            specialist_searches.append(retrieve_formulas(emb, book_id=book_id, chapter_num=chapter_num, k=3))
             specialist_kinds.append("formula")
         elif intent == INTENT_VISUAL:
             if settings.FIGURE_INDEX_ENABLED:
-                specialist_searches.append(retrieve_figures(emb, book_id=book_id, k=3))
+                specialist_searches.append(retrieve_figures(emb, book_id=book_id, chapter_num=chapter_num, k=3))
                 specialist_kinds.append("figure")
             if settings.TABLE_INDEX_ENABLED:
-                specialist_searches.append(retrieve_tables(emb, book_id=book_id, k=2))
+                specialist_searches.append(retrieve_tables(emb, book_id=book_id, chapter_num=chapter_num, k=2))
                 specialist_kinds.append("table")
 
     all_results = await asyncio.gather(

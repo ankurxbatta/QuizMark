@@ -360,6 +360,9 @@ def _enqueue_index_builds(book_id: str) -> None:
         if settings.TABLE_INDEX_ENABLED:
             index_tasks.build_table_index_task.delay(book_id)
             enqueued.append("table")
+        if settings.EXERCISE_INDEX_ENABLED:
+            index_tasks.build_exercise_index_task.delay(book_id)
+            enqueued.append("exercise")
         if enqueued:
             logger.info(f"Enqueued {'/'.join(enqueued)} index builds for book '{book_id}'")
     except Exception as exc:
@@ -408,6 +411,8 @@ def _normalise_q(q_data: dict, question_type: str, topic_tag: str) -> dict | Non
         "difficulty": difficulty,
         "bloom_level": q_data.get("bloom_level", "L3"),
         "correct_answer": q_data.get("correct_answer"),
+        "chapter_num": q_data.get("chapter_num"),
+        "assets": q_data.get("assets", []),
         "_page_range": q_data.get("_page_range", ""),
         "_source_chunk": q_data.get("_source_chunk", ""),
     }
@@ -437,6 +442,7 @@ async def _generate_chapter(
             count=count_per_chapter,
             difficulty=difficulty,
             existing_questions=existing_questions,
+            chapter_num=chapter_num,
         )
     except Exception as exc:
         logger.warning(f"orchestrate Chapter {chapter_num} failed: {exc}")
@@ -446,6 +452,7 @@ async def _generate_chapter(
     for q_data in raw:
         norm = _normalise_q(q_data, question_type, topic_tag)
         if norm is not None:
+            norm["chapter_num"] = chapter_num
             normalised.append(norm)
     if not normalised:
         return [], []
@@ -571,6 +578,9 @@ async def _run_chapters_parallel(
                 "difficulty": q["difficulty"],
                 "bloom_level": q.get("bloom_level", "L3"),
                 "correct_answer": q.get("correct_answer"),
+                "book_id": book_id,
+                "chapter_num": q.get("chapter_num"),
+                "assets": q.get("assets", []),
                 "source_page_range": q.get("_page_range", ""),
                 "source_chunk": q.get("_source_chunk", ""),
                 "embedding": e or None,

@@ -178,6 +178,7 @@ def _enabled_index_builders():
         ("math", settings.MATH_INDEX_ENABLED, index_tasks.build_math_index_task),
         ("figure", settings.FIGURE_INDEX_ENABLED, index_tasks.build_figure_index_task),
         ("table", settings.TABLE_INDEX_ENABLED, index_tasks.build_table_index_task),
+        ("exercise", settings.EXERCISE_INDEX_ENABLED, index_tasks.build_exercise_index_task),
     ]
     return [(name, task) for name, enabled, task in builders if enabled]
 
@@ -213,8 +214,10 @@ async def index_status(current_user: dict = Depends(require_instructor)):
     from app.services.math_index import math_index_status
     from app.services.figure_index import figure_index_status
     from app.services.table_index import table_index_status
+    from app.services.exercise_index import exercise_index_status
     return {
         "math": await math_index_status(),
         "figure": await figure_index_status(),
         "table": await table_index_status(),
+        "exercise": await exercise_index_status(),
     }

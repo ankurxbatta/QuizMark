@@ -348,12 +348,14 @@ async def build_math_index(book_id: str) -> dict:
 async def retrieve_formulas(
     query_embedding: list[float],
     book_id: str | None = None,
+    chapter_num: int | None = None,
     k: int = 5,
 ) -> list[dict]:
     if not settings.MATH_INDEX_ENABLED:
         return []
+    filters = {"chapter_num": chapter_num} if chapter_num is not None else None
     return await vector_search(
-        query_embedding, k=k, book_id=book_id,
+        query_embedding, k=k, book_id=book_id, filters=filters,
         collection_name=MATH_COLLECTION, index_name=MATH_INDEX_NAME,
     )
 

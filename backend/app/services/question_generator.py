@@ -143,6 +143,7 @@ async def extract_chapter_concepts(
 async def deep_retrieve_for_generation(
     topic: str,
     book_id: Optional[str] = None,
+    chapter_num: Optional[int] = None,
     k: int = 12,
 ) -> list[dict]:
     """
@@ -168,7 +169,7 @@ async def deep_retrieve_for_generation(
     # Intent-routed multi-index retrieval with RRF fusion (MULTI_RAG_DESIGN
     # Phase 3): sub-queries about formulas/charts also hit the specialist
     # indexes, whose top hits pull their source chunks in via cross-links.
-    fused = await routed_retrieve(queries, embeddings, book_id=book_id, k=k)
+    fused = await routed_retrieve(queries, embeddings, book_id=book_id, chapter_num=chapter_num, k=k)
     return fused.text_chunks[:k]
 
 
@@ -265,6 +266,9 @@ You are a statistics assessment author writing exam questions for a business sta
 SOURCE CONTENT (base all questions strictly on this material):
 {content}
 
+Base every question STRICTLY on the SOURCE CONTENT and SEED EXERCISES provided. Do NOT use facts, examples, or terminology from other chapters or outside knowledge.
+
+{seed_exercises_block}
 {formulas_block}
 COGNITIVE LEVEL REQUIREMENT:
 {bloom_instruction}
@@ -311,7 +315,7 @@ No preamble. No trailing text. Just the JSON array.
 """
 
 
-async def _specialist_context(best_chunk, bloom_level: str, book_id: Optional[str]) -> str:
+async def _specialist_context(best_chunk, bloom_level: str, book_id: Optional[str], chapter_num: Optional[int] = None) -> str:
     """
     Bloom-level → specialist-index routing (MULTI_RAG_DESIGN):
       L3 Apply   → exact formulas from math_index
@@ -324,7 +328,7 @@ async def _specialist_context(best_chunk, bloom_level: str, book_id: Optional[st
             from app.services.math_index import retrieve_formulas, render_formulas_block
             query = f"{best_chunk.topic_tag} {best_chunk.section_title} formula calculation".strip()
             q_emb = await slm_service.embed(query)
-            block = render_formulas_block(await retrieve_formulas(q_emb, book_id=book_id, k=5))
+            block = render_formulas_block(await retrieve_formulas(q_emb, book_id=book_id, chapter_num=chapter_num, k=5))
             if block:
                 blocks.append(block)
 
@@ -333,12 +337,12 @@ async def _specialist_context(best_chunk, bloom_level: str, book_id: Optional[st
             q_emb = await slm_service.embed(query)
             if settings.FIGURE_INDEX_ENABLED:
                 from app.services.figure_index import retrieve_figures, render_figures_block
-                block = render_figures_block(await retrieve_figures(q_emb, book_id=book_id, k=3))
+                block = render_figures_block(await retrieve_figures(q_emb, book_id=book_id, chapter_num=chapter_num, k=3))
                 if block:
                     blocks.append(block)
             if settings.TABLE_INDEX_ENABLED:
                 from app.services.table_index import retrieve_tables, render_tables_block
-                block = render_tables_block(await retrieve_tables(q_emb, book_id=book_id, k=2))
+                block = render_tables_block(await retrieve_tables(q_emb, book_id=book_id, chapter_num=chapter_num, k=2))
                 if block:
                     blocks.append(block)
     except Exception as exc:
@@ -354,6 +358,8 @@ async def generate_targeted_bloom_questions(
     bloom_level: str,
     existing_questions: Optional[list[str]] = None,
     book_id: Optional[str] = None,
+    chapter_num: Optional[int] = None,
+    seed_exercises: Optional[list[dict]] = None,
 ) -> list[dict]:
     """
     Generate `count` questions locked to a single Bloom's level.
@@ -376,10 +382,12 @@ async def generate_targeted_bloom_questions(
     best = max(chunks, key=_score_chunk)
     content = best.to_prompt_block()
 
-    formulas_block = await _specialist_context(best, bloom_level, book_id)
+    formulas_block = await _specialist_context(best, bloom_level, book_id, chapter_num)
+    seed_exercises_block = _render_seed_exercises_block(seed_exercises)
 
     prompt = _TARGETED_BLOOM_PROMPT.format(
         content=content,
+        seed_exercises_block=seed_exercises_block,
         formulas_block=formulas_block,
         bloom_instruction=bloom_instruction,
         bloom_level=bloom_level,
@@ -446,6 +454,9 @@ You are a statistics assessment author writing exam questions for a business sta
 SOURCE TEXT:
 {content}
 
+Base every question STRICTLY on the SOURCE CONTENT and SEED EXERCISES provided. Do NOT use facts, examples, or terminology from other chapters or outside knowledge.
+
+{seed_exercises_block}
 Generate {count} high-quality exam questions of type "{qtype}".
 
 {blooms_guide}
@@ -596,6 +607,18 @@ _DIFFICULTY_INSTRUCTION = {
 }
 
 
+def _render_seed_exercises_block(seed_exercises: Optional[list[dict]]) -> str:
+    """Render real chapter exercises as a prompt block ("" when none)."""
+    if not seed_exercises:
+        return ""
+    try:
+        from app.services.exercise_index import render_exercises_block
+        block = render_exercises_block(seed_exercises)
+    except Exception:
+        return ""
+    return (block + "\n") if block else ""
+
+
 def _build_uniqueness_block(existing_questions: list[str]) -> str:
     """Build the uniqueness instruction block from a list of existing question texts."""
     if not existing_questions:
@@ -610,6 +633,7 @@ async def _generate_from_chunk(
     questions_per_chunk: int,
     difficulty: str = "all",
     existing_questions: Optional[list[str]] = None,
+    seed_exercises: Optional[list[dict]] = None,
 ) -> list[dict]:
     """Single-stage generation with Bloom's Taxonomy distribution and uniqueness enforcement."""
     diff_note = _DIFFICULTY_INSTRUCTION.get(difficulty, "")
@@ -619,9 +643,11 @@ async def _generate_from_chunk(
 
     blooms_guide = _BLOOMS_GUIDE.format(count=questions_per_chunk)
     uniqueness_block = _build_uniqueness_block(existing_questions or [])
+    seed_exercises_block = _render_seed_exercises_block(seed_exercises)
 
     prompt = _PLAIN_TEXT_PROMPT.format(
         content=content,
+        seed_exercises_block=seed_exercises_block,
         count=questions_per_chunk,
         qtype=question_type,
         blooms_guide=blooms_guide,
@@ -670,6 +696,7 @@ async def generate_questions_from_chunks(
     topic_filter: Optional[str] = None,
     difficulty: str = "all",
     existing_questions: Optional[list[str]] = None,
+    seed_exercises: Optional[list[dict]] = None,
 ) -> list[dict]:
     """
     Generate `count` questions from a list of TextChunk objects.
@@ -706,6 +733,7 @@ async def generate_questions_from_chunks(
                 questions_per_chunk,
                 difficulty=difficulty,
                 existing_questions=existing_questions,
+                seed_exercises=seed_exercises,
             )
 
     results = await asyncio.gather(*[_bounded(c) for c in selected])
@@ -750,6 +778,7 @@ async def generate_questions(
 
     prompt = _PLAIN_TEXT_PROMPT.format(
         content=content[:4000],
+        seed_exercises_block="",
         count=count,
         qtype=question_type,
         blooms_guide=blooms_guide,

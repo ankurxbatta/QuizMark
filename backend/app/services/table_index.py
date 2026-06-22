@@ -289,12 +289,14 @@ async def build_table_index(book_id: str) -> dict:
 async def retrieve_tables(
     query_embedding: list[float],
     book_id: str | None = None,
+    chapter_num: int | None = None,
     k: int = 2,
 ) -> list[dict]:
     if not settings.TABLE_INDEX_ENABLED:
         return []
+    filters = {"chapter_num": chapter_num} if chapter_num is not None else None
     return await vector_search(
-        query_embedding, k=k, book_id=book_id,
+        query_embedding, k=k, book_id=book_id, filters=filters,
         collection_name=TABLE_COLLECTION, index_name=TABLE_INDEX_NAME,
     )
 

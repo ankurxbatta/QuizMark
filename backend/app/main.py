@@ -136,6 +136,7 @@ async def backfill_specialist_indexes():
             ("math", settings.MATH_INDEX_ENABLED, index_tasks.build_math_index_task),
             ("figure", settings.FIGURE_INDEX_ENABLED, index_tasks.build_figure_index_task),
             ("table", settings.TABLE_INDEX_ENABLED, index_tasks.build_table_index_task),
+            ("exercise", settings.EXERCISE_INDEX_ENABLED, index_tasks.build_exercise_index_task),
         ]
         builders = [(name, task) for name, enabled, task in builders if enabled]
         if not builders:
