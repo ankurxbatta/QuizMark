@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
+import MathText from "@/components/MathText";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -317,7 +318,7 @@ function ResultsView({
                       {displayFeedback && (
                         <div>
                           <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Feedback</p>
-                          <p className="text-sm text-gray-700 leading-relaxed">{displayFeedback}</p>
+                          <MathText text={displayFeedback} className="text-sm text-gray-700 leading-relaxed block" />
                         </div>
                       )}
                       {result.is_flagged && (
@@ -486,7 +487,7 @@ export default function AssessmentPage() {
                 const { stem, options } = extractMcqParts(q.question_text);
                 return (
                   <div className="space-y-3">
-                    <p className="text-gray-800 font-medium">{stem || q.question_text}</p>
+                    <MathText text={stem || q.question_text} className="text-gray-800 font-medium block" />
                     {options.length > 0 ? (
                       <div className="space-y-2">
                         {options.map(({ letter, text: optText }) => (
@@ -508,7 +509,8 @@ export default function AssessmentPage() {
                               className="mt-0.5 accent-indigo-600"
                             />
                             <span className="text-sm text-gray-700">
-                              <span className="font-semibold">{letter}.</span> {optText}
+                              <span className="font-semibold">{letter}.</span>{" "}
+                              <MathText text={optText} />
                             </span>
                           </label>
                         ))}
@@ -532,7 +534,7 @@ export default function AssessmentPage() {
                 );
               })() : q.question_type === "true_false" ? (
                 <div className="space-y-3">
-                  <p className="text-gray-800 font-medium">{q.question_text}</p>
+                  <MathText text={q.question_text} className="text-gray-800 font-medium block" />
                   <div className="flex gap-3">
                     {(["True", "False"] as const).map((opt) => (
                       <label
@@ -559,7 +561,7 @@ export default function AssessmentPage() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <p className="text-gray-800 font-medium">{q.question_text}</p>
+                  <MathText text={q.question_text} className="text-gray-800 font-medium block" />
                   <textarea
                     rows={4}
                     placeholder="Write your answer here…"

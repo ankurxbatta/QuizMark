@@ -302,6 +302,7 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
 - Model answer: "True" or "False" + 1–2 sentence justification.
 
 ━━━ ALL TYPES ━━━
+- Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - max_marks: L1=2, L2=2, L3=4, L4=6, L5=8
 - difficulty: easy (L1–L2) | medium (L3–L4) | hard (L5)
 - topic_tag: chapter/concept area
@@ -514,6 +515,7 @@ Good examples:
   • "True or False: Increasing sample size while holding all else constant produces a wider confidence interval."
 
 ━━━ ALL TYPES ━━━
+- Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - Spread questions across different concepts in the source.
 - max_marks: 2–8 depending on complexity (L1=2, L2=2, L3=4, L4=6, L5=8).
 - difficulty: easy (L1–L2) | medium (L3–L4) | hard (L5).
@@ -815,6 +817,24 @@ async def generate_questions(
 #  Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def unmangle_latex(obj):
+    """Repair LaTeX commands corrupted by JSON parsing.
+
+    LaTeX like ``\\binom`` / ``\\frac`` starts with ``\\b`` / ``\\f``, which are
+    JSON escape sequences (backspace / form-feed). When the model emits them
+    single-escaped, json.loads turns ``\\b``→ a backspace char, leaving ``inom``.
+    Backspace (\\x08) and form-feed (\\x0c) never occur legitimately in question
+    text, so converting them back to ``\\b`` / ``\\f`` restores the command.
+    """
+    if isinstance(obj, str):
+        return obj.replace("\x08", "\\b").replace("\x0c", "\\f")
+    if isinstance(obj, list):
+        return [unmangle_latex(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: unmangle_latex(v) for k, v in obj.items()}
+    return obj
+
+
 def _parse_json_array(raw: str) -> list[dict]:
     """Extract and parse the first JSON array from raw LLM output."""
     # Strip markdown code fences if present
@@ -823,12 +843,12 @@ def _parse_json_array(raw: str) -> list[dict]:
     if not match:
         return []
     try:
-        return json.loads(match.group())
+        return unmangle_latex(json.loads(match.group()))
     except json.JSONDecodeError:
         # Try to recover partial JSON
         try:
             partial = match.group().rstrip(",] \n") + "]"
-            return json.loads(partial)
+            return unmangle_latex(json.loads(partial))
         except Exception:
             return []
 
@@ -1293,6 +1313,12 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
             qt = expected_type
         if expected_type in {"short_answer", "mcq", "true_false"}:
             qt = expected_type
+        # A statement the model phrased as "True or False: …" is far better served
+        # as a selectable true_false question (student just picks True/False and it
+        # is marked deterministically) than as a free-text box — reclassify it
+        # regardless of the requested type.
+        if qt != "mcq" and re.match(r"\s*true\s*(?:or|/)\s*false\b", q["question_text"], re.IGNORECASE):
+            qt = "true_false"
         q["question_type"] = qt
         if q["question_type"] == "mcq":
             _normalise_mcq(q, raw_question_text)

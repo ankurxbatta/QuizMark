@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import api, { API_URL } from "@/lib/api";
 import Cookies from "js-cookie";
 import Select from "@/components/Select";
+import MathText from "@/components/MathText";
 import { Check, Pencil, Plus, Trash2, Users, X } from "lucide-react";
 
 interface QuestionAsset {
@@ -304,7 +305,7 @@ export default function QuestionsPage() {
               {questions.map((q) => (
                 <tr key={q.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 max-w-xs align-top">
-                    <div className="truncate">{q.question_text}</div>
+                    <div className="truncate"><MathText text={q.question_text} /></div>
                     {q.assets && q.assets.length > 0 && (
                       <span className="mt-1 inline-block text-xs text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
                         {q.assets[0].kind === "table" ? "Table attached" : "Figure attached"}

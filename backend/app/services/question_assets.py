@@ -94,7 +94,13 @@ def markdown_table_to_html(md: str) -> str:
 
     def _cells(cells: list[str], tag: str) -> str:
         padded = list(cells) + [""] * (ncols - len(cells))
-        return "".join(f"<{tag}>{html.escape(c)}</{tag}>" for c in padded)
+        # A blank body cell is usually a value the exercise asks the student to
+        # find (e.g. a missing probability) — show "?" so it reads as intentional
+        # rather than as a broken empty cell.
+        placeholder = "?" if tag == "td" else ""
+        return "".join(
+            f"<{tag}>{html.escape(c) if c else placeholder}</{tag}>" for c in padded
+        )
 
     head = usable[0]
     body = usable[1:]
@@ -264,10 +270,12 @@ async def attach_assets_to_questions(
     if limit == 0:
         return questions
 
+    # Only attach to questions that EXPLICITLY reference a table/figure/data —
+    # the bloom-L4 signal alone was too loose and bolted tables onto unrelated
+    # questions (e.g. a binomial word problem that never mentions a table).
     candidates = [
         q for q in questions
         if _ASSET_HINT_RE.search(q.get("question_text", "") or "")
-        or q.get("bloom_level") == "L4"
     ][:limit]
     if not candidates:
         return questions

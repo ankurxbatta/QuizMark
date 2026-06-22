@@ -108,11 +108,12 @@ def _looks_numeric(question: dict) -> bool:
 
 def _parse_json(raw: str) -> dict | None:
     try:
+        from app.services.question_generator import unmangle_latex
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
             return None
         data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
+        return unmangle_latex(data) if isinstance(data, dict) else None
     except Exception:
         return None
 
@@ -374,7 +375,10 @@ async def verify_mcq_options(questions: list[dict]) -> list[dict]:
 
 
 async def verify_generated_questions(questions: list[dict]) -> list[dict]:
-    """All post-generation quality passes: numeric recomputation + MCQ ambiguity."""
+    """All post-generation quality passes: numeric recomputation + MCQ ambiguity
+    + math formatting (bare expressions → $-delimited LaTeX for KaTeX)."""
     await verify_numeric_model_answers(questions)
     await verify_mcq_options(questions)
+    from app.services.math_format import latexify_questions
+    await latexify_questions(questions)
     return questions

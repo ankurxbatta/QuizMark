@@ -208,6 +208,20 @@ async def build_all_indexes(current_user: dict = Depends(require_instructor)):
     return {"queued": queued, "count": len(queued)}
 
 
+@router.post("/questions/latexify")
+async def latexify_stored_questions(
+    book_id: str | None = None, current_user: dict = Depends(require_instructor)
+):
+    """Backfill: wrap bare math in stored questions as $-delimited LaTeX.
+
+    Formats questions generated before the math-rendering pass existed. Optionally
+    scope to one book via ``?book_id=…``; omit to backfill every stored question.
+    """
+    from app.services.math_format import backfill_stored_questions
+    result = await backfill_stored_questions(book_id)
+    return {"book_id": book_id, **result}
+
+
 @router.get("/index/status")
 async def index_status(current_user: dict = Depends(require_instructor)):
     """Per-book build status and document counts for the specialist indexes."""
