@@ -1,8 +1,18 @@
 "use client";
 import { useEffect, useState } from "react";
-import api from "@/lib/api";
+import api, { API_URL } from "@/lib/api";
+import Cookies from "js-cookie";
 import Select from "@/components/Select";
 import { Check, Pencil, Plus, Trash2, Users, X } from "lucide-react";
+
+interface QuestionAsset {
+  kind: string;
+  caption?: string;
+  alt_text?: string;
+  table_html?: string;
+  image_id?: string;
+  source_page?: number;
+}
 
 interface Question {
   id: string;
@@ -14,6 +24,32 @@ interface Question {
   topic_tag: string;
   difficulty: string;
   assigned_student_ids?: string[];
+  assets?: QuestionAsset[];
+}
+
+function QuestionAssets({ assets }: { assets?: QuestionAsset[] }) {
+  if (!assets || assets.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-2">
+      {assets.map((asset, idx) => (
+        <div key={idx} className="space-y-1">
+          {asset.table_html ? (
+            <div
+              className="overflow-x-auto border rounded-lg [&_table]:w-full [&_table]:text-xs [&_th]:border [&_th]:border-gray-200 [&_th]:bg-gray-50 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-gray-200 [&_td]:px-2 [&_td]:py-1"
+              dangerouslySetInnerHTML={{ __html: asset.table_html }}
+            />
+          ) : asset.image_id ? (
+            <img
+              src={`${API_URL}/api/v1/questions/assets/${asset.image_id}?token=${Cookies.get("token") || ""}`}
+              alt={asset.alt_text || "Figure"}
+              className="rounded border max-h-64"
+            />
+          ) : null}
+          {asset.caption && <p className="text-xs text-gray-400 italic">{asset.caption}</p>}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 interface Student {
@@ -69,7 +105,7 @@ export default function QuestionsPage() {
   };
 
   const startEdit = (q: Question) => {
-    const { id, assigned_student_ids, ...rest } = q;
+    const { id, assigned_student_ids, assets, ...rest } = q;
     setForm(rest); setEditId(id); setShowForm(true);
   };
 
@@ -267,7 +303,15 @@ export default function QuestionsPage() {
             <tbody className="divide-y divide-gray-100">
               {questions.map((q) => (
                 <tr key={q.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 max-w-xs truncate">{q.question_text}</td>
+                  <td className="px-4 py-3 max-w-xs align-top">
+                    <div className="truncate">{q.question_text}</div>
+                    {q.assets && q.assets.length > 0 && (
+                      <span className="mt-1 inline-block text-xs text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
+                        {q.assets[0].kind === "table" ? "Table attached" : "Figure attached"}
+                      </span>
+                    )}
+                    <QuestionAssets assets={q.assets} />
+                  </td>
                   <td className="px-4 py-3 capitalize">{q.question_type.replace("_", " ")}</td>
                   <td className="px-4 py-3">{q.topic_tag}</td>
                   <td className="px-4 py-3 capitalize">{q.difficulty}</td>

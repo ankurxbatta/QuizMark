@@ -304,6 +304,88 @@ async def smart_embed_batch(texts: list[str]) -> list[list[float]]:
     return await key_manager.with_fallback("embedding_batch", providers, _try)
 
 
+# ── Image generation: Gemini → OpenAI ──────────────────────────────────────────
+
+async def _gemini_generate_image(prompt: str) -> bytes:
+    """Gemini image model via the Generative Language API → PNG bytes."""
+    if not settings.GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    model = settings.GEMINI_IMAGE_MODEL.removeprefix("models/")
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    for attempt in range(5):
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(
+                f"{settings.GEMINI_BASE_URL}/models/{model}:generateContent",
+                params={"key": settings.GEMINI_API_KEY}, json=payload,
+            )
+        if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
+            if r.status_code == 429:
+                key_manager.mark_quota_exhausted("gemini", r.text[:200])
+            await _retry_sleep(r, attempt); continue
+        r.raise_for_status()
+        candidates = r.json().get("candidates") or []
+        for cand in candidates:
+            for part in (cand.get("content") or {}).get("parts") or []:
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline and inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        raise RuntimeError("Gemini returned no image data")
+    raise RuntimeError("Gemini image generation exhausted retries")
+
+
+async def _openai_generate_image(prompt: str) -> bytes:
+    """OpenAI images endpoint → PNG bytes (gpt-image-1 returns b64_json)."""
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    for attempt in range(5):
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(f"{settings.OPENAI_BASE_URL}/images/generations",
+                headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": settings.OPENAI_IMAGE_MODEL, "prompt": prompt,
+                      "size": "1024x1024"})
+        if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
+            await _retry_sleep(r, attempt); continue
+        r.raise_for_status()
+        data = r.json().get("data") or []
+        if data and data[0].get("b64_json"):
+            return base64.b64decode(data[0]["b64_json"])
+        raise RuntimeError("OpenAI returned no image data")
+    raise RuntimeError("OpenAI image generation exhausted retries")
+
+
+async def generate_image(prompt: str) -> bytes:
+    """Generate an image from a text prompt with provider fallback.
+
+    Primary provider is settings.IMAGE_GEN_PROVIDER (default "gemini"); the
+    other provider is tried on failure. Raises if every provider fails — callers
+    wrap this in try/except and degrade cleanly.
+    """
+    primary = (settings.IMAGE_GEN_PROVIDER or "gemini").lower()
+    order = ["gemini", "openai"] if primary == "gemini" else ["openai", "gemini"]
+    last_exc: Exception | None = None
+    for provider in order:
+        try:
+            if provider == "gemini":
+                png = await _gemini_generate_image(prompt)
+            else:
+                png = await _openai_generate_image(prompt)
+            if png:
+                return png
+        except Exception as exc:
+            log.warning(f"[image-gen] {provider} failed: {exc}")
+            last_exc = exc
+    raise RuntimeError(f"All image providers failed: {last_exc}")
+
+
+async def smart_generate_image(prompt: str) -> bytes:
+    """Module-level convenience alias for generate_image."""
+    return await generate_image(prompt)
+
+
 async def smart_describe_image(image_bytes: bytes, context: str = "") -> str:
     _openai = OpenAIClient()
     _anthropic = AnthropicClient()

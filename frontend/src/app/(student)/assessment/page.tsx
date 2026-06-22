@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import api from "@/lib/api";
+import api, { API_URL } from "@/lib/api";
 import {
   CheckCircle,
   Clock,
@@ -15,6 +15,15 @@ import Cookies from "js-cookie";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+interface QuestionAsset {
+  kind: string;
+  caption?: string;
+  alt_text?: string;
+  table_html?: string;
+  image_id?: string;
+  source_page?: number;
+}
+
 interface Question {
   id: string;
   question_text: string;
@@ -22,6 +31,7 @@ interface Question {
   max_marks: number;
   topic_tag?: string;
   difficulty?: string;
+  assets?: QuestionAsset[];
 }
 
 interface SubmissionResult {
@@ -37,6 +47,36 @@ interface SubmissionResult {
   override_feedback: string | null;
   is_flagged: boolean;
   is_marked: boolean;
+  assets?: QuestionAsset[];
+}
+
+// ─── Asset rendering ──────────────────────────────────────────────────────────
+
+function QuestionAssets({ assets }: { assets?: QuestionAsset[] }) {
+  if (!assets || assets.length === 0) return null;
+  return (
+    <div className="space-y-3">
+      {assets.map((asset, idx) => (
+        <div key={idx} className="space-y-1.5">
+          {asset.table_html ? (
+            <div
+              className="overflow-x-auto border rounded-lg [&_table]:w-full [&_table]:text-sm [&_th]:border [&_th]:border-gray-200 [&_th]:bg-gray-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-gray-200 [&_td]:px-3 [&_td]:py-2"
+              dangerouslySetInnerHTML={{ __html: asset.table_html }}
+            />
+          ) : asset.image_id ? (
+            <img
+              src={`${API_URL}/api/v1/questions/assets/${asset.image_id}?token=${Cookies.get("token") || ""}`}
+              alt={asset.alt_text || "Figure"}
+              className="rounded border max-h-80"
+            />
+          ) : null}
+          {asset.caption && (
+            <p className="text-xs text-gray-400 italic">{asset.caption}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -249,6 +289,9 @@ function ResultsView({
               {/* Expanded detail */}
               {isOpen && (
                 <div className="border-t px-6 py-5 space-y-4 bg-gray-50">
+                  {/* Attached assets (table / figure) */}
+                  <QuestionAssets assets={result?.assets ?? question?.assets} />
+
                   {/* Your answer */}
                   <div>
                     <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Your answer</p>
@@ -436,6 +479,8 @@ export default function AssessmentPage() {
                   </span>
                 </div>
               </div>
+
+              <QuestionAssets assets={q.assets} />
 
               {q.question_type === "mcq" ? (() => {
                 const { stem, options } = extractMcqParts(q.question_text);

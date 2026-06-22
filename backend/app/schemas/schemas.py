@@ -20,6 +20,15 @@ class QuestionUpdate(QuestionCreate):
     pass
 
 
+class QuestionAsset(BaseModel):
+    kind: str
+    caption: Optional[str] = None
+    alt_text: Optional[str] = None
+    table_html: Optional[str] = None
+    image_id: Optional[str] = None
+    source_page: Optional[int] = None
+
+
 class QuestionOut(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -33,6 +42,7 @@ class QuestionOut(BaseModel):
     difficulty: Optional[Difficulty] = None
     source_page_range: Optional[str] = None
     source_chunk: Optional[str] = None
+    assets: list[QuestionAsset] = Field(default_factory=list)
     assigned_student_ids: list[str] = Field(default_factory=list)
     created_at: datetime
 
@@ -46,6 +56,7 @@ class AssessmentQuestionOut(BaseModel):
     difficulty: Optional[Difficulty] = None
     source_page_range: Optional[str] = None
     source_chunk: Optional[str] = None
+    assets: list[QuestionAsset] = Field(default_factory=list)
     created_at: datetime
 
 
