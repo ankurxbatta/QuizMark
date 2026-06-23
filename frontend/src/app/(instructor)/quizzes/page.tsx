@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import MathText from "@/components/MathText";
 import { Button, PageHeader, Card, EmptyState, Badge } from "@/components/ui";
 import {
-  ClipboardList, Plus, Users, Pencil, Trash2, X, Search, Check, CheckCircle2,
+  ClipboardList, Plus, Users, Pencil, Trash2, X, Search, Check, CheckCircle2, FileCheck, FileText,
 } from "lucide-react";
 
 interface Quiz {
@@ -155,6 +155,16 @@ export default function QuizzesPage() {
                     Assign
                   </Button>
                   <Button variant="ghost" icon={Pencil} onClick={() => openEdit(quiz)}>Edit</Button>
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <Button variant="ghost" icon={FileCheck} className="flex-1"
+                    onClick={() => window.open(`/print?quiz=${quiz.id}&answers=1`, "_blank")}>
+                    Answer key
+                  </Button>
+                  <Button variant="ghost" icon={FileText} className="flex-1"
+                    onClick={() => window.open(`/print?quiz=${quiz.id}&answers=0`, "_blank")}>
+                    Blank paper
+                  </Button>
                 </div>
               </Card>
             ))}
