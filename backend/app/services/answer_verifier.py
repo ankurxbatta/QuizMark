@@ -374,10 +374,209 @@ async def verify_mcq_options(questions: list[dict]) -> list[dict]:
     return questions
 
 
+# ── Numeric correctness for objective (mcq / true_false) questions ──────────────
+# The stored correct_answer for an objective question is treated as ground truth
+# by the deterministic marking fast path. When the question involves a
+# computation (e.g. a Poisson/binomial probability), the LLM that generated it
+# may have picked / asserted the wrong value. We reuse the extract+evaluate
+# mechanism — the number is always produced by Python, never by the LLM — to find
+# the correct option (MCQ) or the correct boolean (true_false).
+
+_MCQ_EXTRACT_PROMPT = """You are checking the numeric correctness of a multiple-choice statistics exam question.
+
+Question stem:
+{stem}
+
+Options:
+{options_block}
+
+If answering this question requires computing a single numeric value, extract the calculation as a pure Python arithmetic expression. You may use: + - * / ** ( ) and the functions comb(n, k), factorial(n), exp(x), sqrt(x), log(x), and the constants pi, e.
+
+Examples:
+  Poisson P(X=3), lambda=10  → "10**3 * exp(-10) / factorial(3)"
+  Geometric first success on 5th trial, p=0.01  → "(1 - 0.01)**4 * 0.01"
+  Binomial P(X=12), n=20, p=0.35  → "comb(20, 12) * 0.35**12 * 0.65**8"
+
+Respond ONLY as valid JSON:
+{{"has_computation": <bool>, "expression": <string or null>}}
+
+Set has_computation to false if the question is conceptual / has no single computable numeric answer.
+"""
+
+_TF_EXTRACT_PROMPT = """You are checking the numeric correctness of a True/False statistics exam statement.
+
+Statement:
+{statement}
+
+If deciding whether the statement is True or False requires computing a numeric value and comparing it to a threshold, extract BOTH the computed quantity as a pure Python arithmetic expression AND the comparison the statement asserts. You may use: + - * / ** ( ) and the functions comb(n, k), factorial(n), exp(x), sqrt(x), log(x), and the constants pi, e.
+
+The comparison operator is one of: "lt", "le", "gt", "ge", "eq" — describing what the STATEMENT claims about (computed_value OPERATOR threshold).
+
+Examples:
+  "P(X=3) for lambda=5 is greater than 0.1"
+    → expression: "5**3 * exp(-5) / factorial(3)", operator: "gt", threshold: 0.1
+  "The variance 2*3 equals 5"
+    → expression: "2*3", operator: "eq", threshold: 5
+
+Respond ONLY as valid JSON:
+{{"has_computation": <bool>, "expression": <string or null>, "operator": <string or null>, "threshold": <number or null>}}
+
+Set has_computation to false if the statement makes no computable numeric claim.
+"""
+
+# Pull the first numeric value out of an option's text (handles plain decimals,
+# scientific notation, and a leading approximation/equals sign).
+_OPTION_NUMBER = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def _option_value(text: str) -> float | None:
+    match = _OPTION_NUMBER.search(text or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _within_tol(a: float, b: float) -> bool:
+    denom = max(abs(b), 1e-12)
+    return abs(a - b) / denom <= RELATIVE_TOLERANCE
+
+
+def _format_value(value: float) -> str:
+    """Format a computed value compactly (3-4 sig figs, no trailing zeros)."""
+    text = f"{float(f'{value:.4g}'):g}"
+    return text
+
+
+async def _verify_mcq_numeric_one(question: dict) -> None:
+    from app.services.question_generator import _MCQ_LETTERS, _split_mcq_text
+
+    stem, options = _split_mcq_text(question.get("question_text", ""))
+    correct = (question.get("correct_answer") or "").strip().upper()
+    if not stem or correct not in options or len(options) < 3:
+        return
+
+    raw = await llm_service.generate(_MCQ_EXTRACT_PROMPT.format(
+        stem=stem, options_block=_options_block(options),
+    ))
+    verdict = _parse_json(raw)
+    if not verdict or not verdict.get("has_computation"):
+        return
+    computed = evaluate_expression(verdict.get("expression") or "")
+    if computed is None:
+        return
+
+    # Map each option to its numeric value.
+    option_values = {l: _option_value(t) for l, t in options.items()}
+    matches = [l for l, v in option_values.items() if v is not None and _within_tol(v, computed)]
+
+    if matches:
+        # Prefer the option whose value is closest to the computed value.
+        best = min(matches, key=lambda l: abs(option_values[l] - computed))
+        if best != correct:
+            logger.info(
+                "[VERIFY-NUM-MCQ] %r: correct_answer %s → %s (computed %s)",
+                stem[:80], correct, best, computed,
+            )
+            question["correct_answer"] = best
+        question["model_answer"] = f"{best}. {options[best]}"
+        return
+
+    # No option matches the computed value — overwrite the currently-marked
+    # option's text with the correct value so exactly one option is right and
+    # correct_answer keeps pointing at it.
+    new_text = _format_value(computed)
+    if option_values.get(correct) is not None and _within_tol(option_values[correct], computed):
+        return  # already correct (shouldn't reach here, but be safe)
+    logger.info(
+        "[VERIFY-NUM-MCQ] %r: no option matched computed %s — rewriting option %s",
+        stem[:80], computed, correct,
+    )
+    options[correct] = new_text
+    present = [l for l in _MCQ_LETTERS if l in options]
+    question["question_text"] = "\n".join(
+        [stem, *(f"{letter}. {options[letter]}" for letter in present)]
+    )
+    question["model_answer"] = f"{correct}. {new_text}"
+
+
+_TF_OPS = {
+    "lt": lambda a, b: a < b,
+    "le": lambda a, b: a <= b,
+    "gt": lambda a, b: a > b,
+    "ge": lambda a, b: a >= b,
+    "eq": lambda a, b: _within_tol(a, b),
+}
+
+
+async def _verify_tf_numeric_one(question: dict) -> None:
+    statement = question.get("question_text", "")
+    if not statement:
+        return
+    raw = await llm_service.generate(_TF_EXTRACT_PROMPT.format(statement=statement))
+    verdict = _parse_json(raw)
+    if not verdict or not verdict.get("has_computation"):
+        return
+    computed = evaluate_expression(verdict.get("expression") or "")
+    operator = (verdict.get("operator") or "").strip().lower()
+    threshold = verdict.get("threshold")
+    if computed is None or operator not in _TF_OPS or threshold is None:
+        return
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        return
+
+    truth = "True" if _TF_OPS[operator](computed, threshold) else "False"
+    current = (question.get("correct_answer") or "").strip().title()
+    if current == truth:
+        return
+    logger.info(
+        "[VERIFY-NUM-TF] %r: correct_answer %s → %s (computed %s %s %s)",
+        statement[:80], current or "<unset>", truth, computed, operator, threshold,
+    )
+    question["correct_answer"] = truth
+    # Make the model answer consistent with the corrected key.
+    question["model_answer"] = (
+        f"{truth}. The computed value is {_format_value(computed)}."
+    )
+
+
+async def verify_objective_numeric(questions: list[dict]) -> list[dict]:
+    """Recompute numeric answers for objective (mcq / true_false) questions and
+    fix any wrong correct_answer / option text. Non-fatal."""
+    targets = [
+        q for q in questions
+        if q.get("question_type") in ("mcq", "true_false")
+    ]
+    if not targets:
+        return questions
+    logger.info(f"[VERIFY-NUM] checking {len(targets)} objective questions for numeric correctness")
+    semaphore = asyncio.Semaphore(3)
+
+    async def _bounded(q: dict) -> None:
+        async with semaphore:
+            try:
+                if q.get("question_type") == "mcq":
+                    await _verify_mcq_numeric_one(q)
+                else:
+                    await _verify_tf_numeric_one(q)
+            except Exception as exc:
+                logger.warning(f"[VERIFY-NUM] check failed (non-fatal): {exc}")
+
+    await asyncio.gather(*[_bounded(q) for q in targets])
+    return questions
+
+
 async def verify_generated_questions(questions: list[dict]) -> list[dict]:
     """All post-generation quality passes: numeric recomputation + MCQ ambiguity
     + math formatting (bare expressions → $-delimited LaTeX for KaTeX)."""
     await verify_numeric_model_answers(questions)
+    # Fix numerically-wrong objective answers before the ambiguity pass, so the
+    # ambiguity judge / distractor rewrites see the corrected correct option.
+    await verify_objective_numeric(questions)
     await verify_mcq_options(questions)
     from app.services.math_format import latexify_questions
     await latexify_questions(questions)

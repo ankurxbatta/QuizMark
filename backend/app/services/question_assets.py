@@ -60,6 +60,19 @@ Respond with ONLY the image-generation prompt text (under 700 characters)."""
 _BLANK_CELL = "?"
 
 
+_MATH_SPAN_RE = re.compile(r"(\$\$.+?\$\$|\\\[.+?\\\]|\\\(.+?\\\)|\$[^$\n]+?\$)", re.DOTALL)
+
+
+def _escape_preserving_math(text: str) -> str:
+    """HTML-escape cell text but leave LaTeX math spans ($...$, \\(...\\), etc.)
+    verbatim, so the frontend can render them with KaTeX instead of receiving
+    mangled delimiters."""
+    parts = _MATH_SPAN_RE.split(text)
+    # split() with one capture group yields: text, math, text, math, ... so the
+    # odd indices are the math spans to keep untouched.
+    return "".join(p if i % 2 else html.escape(p) for i, p in enumerate(parts))
+
+
 def render_table_html(md: str) -> tuple[str, int]:
     """Convert a markdown/pipe table to clean minimal HTML.
 
@@ -109,7 +122,7 @@ def render_table_html(md: str) -> tuple[str, int]:
         out: list[str] = []
         for c in padded:
             if c:
-                out.append(f"<{tag}>{html.escape(c)}</{tag}>")
+                out.append(f"<{tag}>{_escape_preserving_math(c)}</{tag}>")
             elif tag == "td":
                 n_blanks += 1
                 out.append(f"<{tag}>{_BLANK_CELL}</{tag}>")

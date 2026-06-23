@@ -540,6 +540,8 @@ async def generate_from_book(
     count_per_chapter: int = Query(10, ge=1, le=50),
     chapter_nums: Optional[str] = Query(None, description="Comma-separated chapter numbers, e.g. '1,3,5'. Omit for all chapters."),
     difficulty: str = Query("all", enum=["all", "easy", "medium", "hard"]),
+    require_table: bool = Query(False, description="If true, every question must be built around a real data table from the chapter."),
+    require_figure: bool = Query(False, description="If true, every question must be built around a real figure/graph from the chapter."),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
@@ -580,7 +582,7 @@ async def generate_from_book(
         "created_at": now,
     }
     await db["ingest_jobs"].insert_one(job_doc)
-    generate_from_book_task.delay(job_id, book_id, question_type, count_per_chapter, chapter_list, difficulty)
+    generate_from_book_task.delay(job_id, book_id, question_type, count_per_chapter, chapter_list, difficulty, require_table, require_figure)
 
     return {
         "job_id": job_id,

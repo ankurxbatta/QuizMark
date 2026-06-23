@@ -254,9 +254,13 @@ _BLOOM_LEVEL_INSTRUCTIONS: dict[str, str] = {
         "a specific technique is appropriate or inappropriate for a given situation."
     ),
     "L5": (
-        "BLOOM'S L5 — EVALUATE ONLY: Every question must ask students to JUSTIFY a statistical "
-        "decision, CRITIQUE a flawed approach, ASSESS the validity of a conclusion, or "
-        "RECOMMEND a method with reasoned justification. Expect paragraph-length answers."
+        "BLOOM'S L5 — EVALUATE ONLY: Every question must require genuine higher-order work and "
+        "must NOT be answerable by a single recalled fact or one isolated computation. Each "
+        "question must do at least one of: (a) chain TWO or more dependent computation steps; "
+        "(b) COMBINE two or more distinct concepts or formulas; or (c) JUSTIFY a statistical "
+        "decision, CRITIQUE a flawed approach, ASSESS the validity of a conclusion, or RECOMMEND "
+        "a method with reasoned justification. Never restate a recall or single-step apply "
+        "question. Expect multi-step reasoning and paragraph-length answers."
     ),
 }
 
@@ -362,6 +366,7 @@ async def generate_targeted_bloom_questions(
     book_id: Optional[str] = None,
     chapter_num: Optional[int] = None,
     seed_exercises: Optional[list[dict]] = None,
+    asset_directive: str = "",
 ) -> list[dict]:
     """
     Generate `count` questions locked to a single Bloom's level.
@@ -383,6 +388,8 @@ async def generate_targeted_bloom_questions(
     # Pick the best chunk (highest teaching density) as the focal context
     best = max(chunks, key=_score_chunk)
     content = best.to_prompt_block()
+    if asset_directive:
+        content += f"\n\n{asset_directive}"
 
     formulas_block = await _specialist_context(best, bloom_level, book_id, chapter_num)
     seed_exercises_block = _render_seed_exercises_block(seed_exercises)
@@ -405,11 +412,12 @@ async def generate_targeted_bloom_questions(
         questions = []
 
     # Force correct bloom_level and metadata
+    _generic_topics = ("Unknown", "Statistics", "", "chapter/concept area", "chapter or concept area")
     for q in questions:
         q["bloom_level"] = bloom_level
         diff = {"L1": "easy", "L2": "easy", "L3": "medium", "L4": "medium", "L5": "hard"}
         q["difficulty"] = diff.get(bloom_level, "medium")
-        if not q.get("topic_tag"):
+        if not q.get("topic_tag") or q["topic_tag"] in _generic_topics:
             q["topic_tag"] = best.topic_tag
         q["_source_chunk"] = best.label
         q["_page_range"] = f"{best.page_start}-{best.page_end}"
@@ -605,9 +613,39 @@ def _select_chunks(
 
 
 _DIFFICULTY_INSTRUCTION = {
-    "easy":   "DIFFICULTY REQUIREMENT: ALL questions must be EASY (Bloom's L1–L2) — recall of a single definition, term, or fact directly stated in the source. No calculation or multi-step reasoning.",
-    "medium": "DIFFICULTY REQUIREMENT: ALL questions must be MEDIUM (Bloom's L3–L4) — apply a formula, interpret a statistical result, or reason through a scenario. Not pure recall.",
-    "hard":   "DIFFICULTY REQUIREMENT: ALL questions must be HARD (Bloom's L5) — require multi-step calculation, comparison of two+ concepts, or critical evaluation of a method or result.",
+    "easy": (
+        "DIFFICULTY REQUIREMENT — EASY (Bloom's L1–L2). Each question must test a SINGLE "
+        "recalled fact, definition, symbol, or formula NAME directly stated in the source, "
+        "answerable in exactly ONE step. STRICTLY FORBIDDEN: any calculation, any "
+        "interpretation of a result, any applied scenario, any multi-part reasoning. "
+        "The answer is a single recalled item, nothing more.\n"
+        "  GOOD (easy): \"State the formula for the mean of a binomial distribution.\"\n"
+        "  BAD  (too hard for easy): \"A factory has p=0.2 over 50 trials — compute the expected number of defects.\""
+    ),
+    "medium": (
+        "DIFFICULTY REQUIREMENT — MEDIUM (Bloom's L3–L4). Each question must require APPLYING "
+        "ONE formula or method to a given scenario/dataset, OR INTERPRETING a single given "
+        "result — exactly ONE main computation or one act of interpretation. It must NOT be "
+        "answerable by pure recall of a fact (that would be easy), and it must NOT require "
+        "chaining several computations or combining multiple distinct concepts (that would be hard).\n"
+        "  GOOD (medium): \"Given mean=4 for a Poisson process, compute P(X=2).\"\n"
+        "  BAD  (too easy): \"What does lambda represent in the Poisson distribution?\""
+    ),
+    "hard": (
+        "DIFFICULTY REQUIREMENT — HARD (Bloom's L5). Each question MUST demand genuine "
+        "higher-order work and MUST NOT be answerable without multi-step reasoning. It must "
+        "do AT LEAST ONE of: (a) require TWO or more chained computation steps where a later "
+        "step depends on an earlier result; (b) COMBINE two or more distinct concepts/formulas; "
+        "or (c) EVALUATE, JUSTIFY, or CRITIQUE a method, assumption, or conclusion with reasoned "
+        "argument. STRICTLY FORBIDDEN: any question answerable by a single recalled fact, a "
+        "one-line lookup, or a single isolated computation; and you must NOT restate, reword, "
+        "or trivially extend an easy or medium question. If a question can be answered correctly "
+        "in one step, it is NOT acceptable as hard.\n"
+        "  GOOD (hard): \"A sample of 60 has mean 4.1 defects; first compute the Poisson "
+        "probability of 0 defects, then evaluate whether the Poisson model is justified for this "
+        "process and explain why.\"\n"
+        "  BAD  (recall masquerading as hard): \"True/False: the area under a pdf equals 1.\""
+    ),
 }
 
 
@@ -621,6 +659,39 @@ def _render_seed_exercises_block(seed_exercises: Optional[list[dict]]) -> str:
     except Exception:
         return ""
     return (block + "\n") if block else ""
+
+
+def _is_trivial_recall(question_text: str, bloom_level: str = "") -> bool:
+    """Conservative heuristic: True only when a question is clearly pure recall.
+
+    Used to drop/down-rank items emitted under difficulty="hard" that collapse to
+    a one-line lookup. Deliberately strict (all conditions must hold) so genuine
+    hard questions are never discarded:
+      - very short stem (few words), AND
+      - no digit anywhere (no numeric scenario/computation), AND
+      - no scenario/applied-reasoning cue verbs, AND
+      - bloom_level would be L1 (or unset/recall).
+    """
+    text = (question_text or "").strip()
+    if not text:
+        return True  # an empty hard question is never useful
+    words = re.findall(r"[A-Za-z]+", text)
+    if len(words) > 14:
+        return False  # long enough to plausibly carry real reasoning
+    if any(ch.isdigit() for ch in text):
+        return False  # has numbers → likely a computation/scenario
+    lowered = text.lower()
+    scenario_cues = (
+        "compute", "calculate", "evaluate", "justify", "compare", "explain why",
+        "derive", "assess", "critique", "recommend", "determine", "given", "suppose",
+        "if ", "estimate", "analyse", "analyze", "show that", "prove", "find the",
+    )
+    if any(cue in lowered for cue in scenario_cues):
+        return False
+    bloom = str(bloom_level or "").upper()
+    if bloom and bloom != "L1":
+        return False
+    return True
 
 
 def _build_uniqueness_block(existing_questions: list[str]) -> str:
@@ -638,12 +709,15 @@ async def _generate_from_chunk(
     difficulty: str = "all",
     existing_questions: Optional[list[str]] = None,
     seed_exercises: Optional[list[dict]] = None,
+    asset_directive: str = "",
 ) -> list[dict]:
     """Single-stage generation with Bloom's Taxonomy distribution and uniqueness enforcement."""
     diff_note = _DIFFICULTY_INSTRUCTION.get(difficulty, "")
     content = chunk.to_prompt_block()
     if diff_note:
         content += f"\n\n{diff_note}"
+    if asset_directive:
+        content += f"\n\n{asset_directive}"
 
     blooms_guide = _BLOOMS_GUIDE.format(count=questions_per_chunk)
     uniqueness_block = _build_uniqueness_block(existing_questions or [])
@@ -672,16 +746,34 @@ async def _generate_from_chunk(
             questions_per_chunk,
             topic_tag=chunk.topic_tag,
             key_terms=chunk.key_terms,
+            difficulty=difficulty,
         )
 
-    # Enforce requested difficulty on all generated questions
+    # Enforce requested difficulty on all generated questions — and keep
+    # bloom_level inside that difficulty's band so we never emit an internally
+    # inconsistent item (e.g. difficulty=hard with bloom_level=L1).
     if difficulty in ("easy", "medium", "hard"):
+        band = {"easy": {"L1", "L2"}, "medium": {"L3", "L4"}, "hard": {"L5"}}[difficulty]
+        default_bloom = {"easy": "L2", "medium": "L3", "hard": "L5"}[difficulty]
         for q in questions:
             q["difficulty"] = difficulty
+            if str(q.get("bloom_level", "")).upper() not in band:
+                q["bloom_level"] = default_bloom
+
+        # Conservative guard: for HARD output, drop items that are clearly
+        # trivial recall (a short, number-free, scenario-free stem). Only drop
+        # when at least one genuine hard question survives, so we never empty
+        # the result set just because the heuristic flagged everything.
+        if difficulty == "hard":
+            kept = [q for q in questions if not _is_trivial_recall(q.get("question_text", ""), q.get("bloom_level", ""))]
+            if kept and len(kept) < len(questions):
+                logger.info(f"[GEN] hard guard dropped {len(questions) - len(kept)} trivial-recall question(s)")
+                questions = kept
 
     # Stamp correct metadata from the chunk
+    _generic_topics = ("Unknown", "Statistics", "", "chapter/concept area", "chapter or concept area")
     for q in questions:
-        if not q.get("topic_tag") or q["topic_tag"] in ("Unknown", "Statistics", ""):
+        if not q.get("topic_tag") or q["topic_tag"] in _generic_topics:
             q["topic_tag"] = chunk.topic_tag
         q["_source_chunk"] = chunk.label
         q["_page_range"] = f"{chunk.page_start}-{chunk.page_end}"
@@ -701,6 +793,7 @@ async def generate_questions_from_chunks(
     difficulty: str = "all",
     existing_questions: Optional[list[str]] = None,
     seed_exercises: Optional[list[dict]] = None,
+    asset_directive: str = "",
 ) -> list[dict]:
     """
     Generate `count` questions from a list of TextChunk objects.
@@ -738,6 +831,7 @@ async def generate_questions_from_chunks(
                 difficulty=difficulty,
                 existing_questions=existing_questions,
                 seed_exercises=seed_exercises,
+                asset_directive=asset_directive,
             )
 
     results = await asyncio.gather(*[_bounded(c) for c in selected])
@@ -923,8 +1017,9 @@ def _candidate_sentences(text: str, limit: int = 24) -> list[str]:
         sentences.append(sentence)
         if len(sentences) >= limit:
             break
-    if not sentences and cleaned:
-        sentences.append(cleaned[:280].strip())
+    # No last-resort append of raw text: a junk chunk (e.g. a stray page number
+    # like "80.") must yield NO candidate so the fallback skips it rather than
+    # fabricating a meaningless question.
     return sentences
 
 
@@ -987,6 +1082,7 @@ def _fallback_questions_from_text(
     count: int,
     topic_tag: str,
     key_terms: Optional[list[str]] = None,
+    difficulty: str = "easy",
 ) -> list[dict]:
     sentences = _candidate_sentences(content)
     if not sentences:
@@ -1035,7 +1131,7 @@ def _fallback_questions_from_text(
                 "rubric": rubric,
                 "max_marks": 2,
                 "topic_tag": topic_tag,
-                "difficulty": "easy",
+                "difficulty": difficulty if difficulty in ("easy", "medium", "hard") else "easy",
             }
         )
 
@@ -1334,6 +1430,28 @@ def _normalise_mcq(q: dict, raw_question_text) -> None:
     q["rubric"] = q.get("rubric") or "Full marks: selects the correct option."
 
 
+def _derive_true_false_key(model_answer: str) -> str:
+    """Always return a usable True/False answer key (title-case).
+
+    Marking compares this structured key directly (rag_pipeline fast path); a
+    true_false question with no key is routed to manual review instead of being
+    auto-marked. Prefer an explicit "true"/"false" token in the model answer,
+    then fall back to affirmation/negation cues, and finally default to "True".
+    """
+    text = (model_answer or "")
+    tf = re.search(r"\b(true|false)\b", text, re.IGNORECASE)
+    if tf:
+        return tf.group(1).title()
+    # No literal true/false — infer from the prose's stance.
+    if re.search(r"\b(incorrect|not\s+correct|false\b|wrong|does\s+not|doesn't|isn't|"
+                 r"is\s+not|no,)\b", text, re.IGNORECASE):
+        return "False"
+    if re.search(r"\b(correct|yes|right|holds|valid|accurate|supported)\b", text, re.IGNORECASE):
+        return "True"
+    # Nothing to go on — default to a definite key so marking stays deterministic.
+    return "True"
+
+
 def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]:
     """Filter out incomplete or malformed question dicts."""
     valid = []
@@ -1370,9 +1488,7 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
         if q["question_type"] == "mcq":
             _normalise_mcq(q, raw_question_text)
         elif q["question_type"] == "true_false":
-            tf = re.search(r"\b(true|false)\b", q["model_answer"], re.IGNORECASE)
-            if tf:
-                q["correct_answer"] = tf.group(1).title()
+            q["correct_answer"] = _derive_true_false_key(q["model_answer"])
         # Normalise max_marks
         try:
             q["max_marks"] = float(q["max_marks"])

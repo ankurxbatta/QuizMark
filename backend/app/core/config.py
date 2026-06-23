@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 200                 # recursive splitter overlap (chars)
     SEMANTIC_CHUNK_RATIO: float = 0.2        # share of chunks re-split semantically
     SEMANTIC_MIN_CHARS: int = 1500           # only chunks this long are candidates
-    INGEST_VISION_CONCURRENCY: int = 6       # parallel vision API calls per pass
+    INGEST_VISION_CONCURRENCY: int = 10      # parallel vision API calls per pass (higher = faster ingest)
     ENABLE_CHUNK_VALIDATION: bool = True     # LLM math repair before DB insert
     VALIDATION_CONCURRENCY: int = 4          # parallel validation LLM calls
     GEMINI_EMBEDDING_DELAY_SECONDS: float = 0.5
@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = 100
 
     # ── Resumable page-by-page ingestion ──────────────────────────────────────
-    INGEST_PAGE_WINDOW: int = 6
+    INGEST_PAGE_WINDOW: int = 4               # smaller window → more frequent progress/heartbeat updates
     INGEST_TIME_BUDGET_SECONDS: int = 1500
 
     # ── Specialist RAG indexes (MULTI_RAG_DESIGN) ──────────────────────────────

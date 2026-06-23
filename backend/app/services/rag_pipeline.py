@@ -144,6 +144,8 @@ async def _retrieve_context(
     question_text: str,
     rubric: str,
     k: int,
+    book_id: str | None = None,
+    chapter_num: int | None = None,
 ) -> str:
     """
     Build marking context from two MongoDB sources using multi-query retrieval.
@@ -152,6 +154,11 @@ async def _retrieve_context(
       - Generate 3 concept-level queries from the question + rubric
       - Embed each query and search in parallel
       - Deduplicate results → richer, more complete textbook coverage
+
+    Retrieval is scoped to the question's own book/chapter so the marker checks
+    the student against the right material — but if that scope yields nothing
+    (e.g. legacy questions with no chapter_num) we fall back to an unscoped
+    search rather than mark with no context at all.
     """
     parts: list[str] = []
 
@@ -161,19 +168,27 @@ async def _retrieve_context(
         *[slm_service.embed(q) for q in concept_queries]
     )
     k_per_query = max(2, k // len(concept_embeddings))
-    raw_batches = await asyncio.gather(
-        *[vector_search(emb, k=k_per_query) for emb in concept_embeddings]
-    )
+    chapter_filter = {"chapter_num": chapter_num} if chapter_num is not None else None
 
-    # Deduplicate chunks by _id
-    seen_ids: set[str] = set()
-    chunks: list[dict] = []
-    for batch in raw_batches:
-        for chunk in batch:
-            cid = chunk.get("_id", "")
-            if cid not in seen_ids:
-                seen_ids.add(cid)
-                chunks.append(chunk)
+    async def _search_all(bid, flt):
+        batches = await asyncio.gather(
+            *[vector_search(emb, k=k_per_query, book_id=bid, filters=flt)
+              for emb in concept_embeddings]
+        )
+        seen: set[str] = set()
+        out: list[dict] = []
+        for batch in batches:
+            for ch in batch:
+                cid = ch.get("_id", "")
+                if cid not in seen:
+                    seen.add(cid)
+                    out.append(ch)
+        return out
+
+    chunks = await _search_all(book_id, chapter_filter)
+    if not chunks and (book_id or chapter_filter):
+        # scoped search came back empty — widen rather than mark blind
+        chunks = await _search_all(None, None)
 
     for i, chunk in enumerate(chunks[:k], 1):
         section = f"{chunk.get('chapter_title', '')} — {chunk.get('section_title', '')}"
@@ -203,7 +218,9 @@ async def _retrieve_context(
     # + rubric, and the already-computed concept embedding is reused. The marker
     # gets the canonical formula (or figure/table) to check the student against.
     specialist_block = await _specialist_marking_context(
-        question_text, rubric, concept_embeddings[0] if concept_embeddings else answer_emb
+        question_text, rubric,
+        concept_embeddings[0] if concept_embeddings else answer_emb,
+        book_id=book_id, chapter_num=chapter_num,
     )
     if specialist_block:
         parts.append(specialist_block)
@@ -215,8 +232,15 @@ async def _specialist_marking_context(
     question_text: str,
     rubric: str,
     query_emb: list[float],
+    book_id: str | None = None,
+    chapter_num: int | None = None,
 ) -> str:
-    """Heuristic-routed specialist context for marking. '' when nothing applies."""
+    """Heuristic-routed specialist context for marking. '' when nothing applies.
+
+    Scoped to the question's own book/chapter so the marker compares against the
+    canonical formula/figure/table from the right chapter, not a same-named one
+    elsewhere in the book.
+    """
     from app.services.retrieval_router import (
         INTENT_COMPUTATIONAL,
         INTENT_VISUAL,
@@ -228,18 +252,21 @@ async def _specialist_marking_context(
         intent = classify_intent(f"{question_text} {rubric}")
         if intent == INTENT_COMPUTATIONAL and settings.MATH_INDEX_ENABLED:
             from app.services.math_index import render_formulas_block, retrieve_formulas
-            block = render_formulas_block(await retrieve_formulas(query_emb, k=3))
+            block = render_formulas_block(
+                await retrieve_formulas(query_emb, book_id=book_id, chapter_num=chapter_num, k=3))
             if block:
                 blocks.append(block)
         elif intent == INTENT_VISUAL:
             if settings.FIGURE_INDEX_ENABLED:
                 from app.services.figure_index import render_figures_block, retrieve_figures
-                block = render_figures_block(await retrieve_figures(query_emb, k=2))
+                block = render_figures_block(
+                    await retrieve_figures(query_emb, book_id=book_id, chapter_num=chapter_num, k=2))
                 if block:
                     blocks.append(block)
             if settings.TABLE_INDEX_ENABLED:
                 from app.services.table_index import render_tables_block, retrieve_tables
-                block = render_tables_block(await retrieve_tables(query_emb, k=2))
+                block = render_tables_block(
+                    await retrieve_tables(query_emb, book_id=book_id, chapter_num=chapter_num, k=2))
                 if block:
                     blocks.append(block)
     except Exception as exc:
@@ -328,6 +355,8 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
         question_text=question["question_text"],
         rubric=question["rubric"],
         k=k,
+        book_id=question.get("book_id"),
+        chapter_num=question.get("chapter_num"),
     )
 
     prompt = _MARKING_PROMPT.format(

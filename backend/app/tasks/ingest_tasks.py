@@ -428,6 +428,8 @@ async def _generate_chapter(
     count_per_chapter: int,
     difficulty: str,
     existing_questions: list[str],
+    require_table: bool = False,
+    require_figure: bool = False,
 ) -> tuple[list[dict], list[list[float]]]:
     """
     Run one chapter's orchestration → normalise → batch-embed.
@@ -443,6 +445,8 @@ async def _generate_chapter(
             difficulty=difficulty,
             existing_questions=existing_questions,
             chapter_num=chapter_num,
+            require_table=require_table,
+            require_figure=require_figure,
         )
     except Exception as exc:
         logger.warning(f"orchestrate Chapter {chapter_num} failed: {exc}")
@@ -504,6 +508,8 @@ async def _run_chapters_parallel(
     existing_q_texts: list[str],
     chapter_failures: list[str],
     chapter_meta: dict | None = None,  # {ch_num: {"chapter_title", "topic_tag"}} for from-book path
+    require_table: bool = False,
+    require_figure: bool = False,
 ) -> int:
     """
     Generate questions across many chapters concurrently, then cross-dedup by
@@ -522,6 +528,8 @@ async def _run_chapters_parallel(
                 count_per_chapter=count_per_chapter,
                 difficulty=difficulty,
                 existing_questions=list(existing_q_texts),  # snapshot per chapter
+                require_table=require_table,
+                require_figure=require_figure,
             )
 
     tasks = []
@@ -725,12 +733,12 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
 
 
 @celery_app.task(bind=True, queue="gen_tasks", max_retries=0, soft_time_limit=1800, time_limit=2100)
-def generate_from_book_task(self, job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all"):
+def generate_from_book_task(self, job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all", require_table: bool = False, require_figure: bool = False):
     """Generate questions from chunks already stored in MongoDB (no PDF re-upload needed)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(_run_generate_from_book(job_id, book_id, question_type, count_per_chapter, chapter_nums, difficulty))
+        loop.run_until_complete(_run_generate_from_book(job_id, book_id, question_type, count_per_chapter, chapter_nums, difficulty, require_table, require_figure))
     except SoftTimeLimitExceeded:
         loop.run_until_complete(_mark_failed(job_id, "Task timed out after 30 minutes."))
     except Exception as exc:
@@ -739,7 +747,7 @@ def generate_from_book_task(self, job_id: str, book_id: str, question_type: str,
         loop.close()
 
 
-async def _run_generate_from_book(job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all"):
+async def _run_generate_from_book(job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all", require_table: bool = False, require_figure: bool = False):
     db = get_mongo_db()
     now = datetime.now(timezone.utc)
     await db["ingest_jobs"].update_one(
@@ -806,6 +814,8 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         existing_q_texts=existing_q_texts,
         chapter_failures=chapter_failures,
         chapter_meta=chapter_meta_map,
+        require_table=require_table,
+        require_figure=require_figure,
     )
 
     if total_created == 0:

@@ -162,7 +162,13 @@ async def _semantic_stage(ctx: dict) -> dict:
 
     out = []
     for c in chunks:
-        if id(c) not in selected:
+        # Skip splitting chunks that carry figure/math regions: rects are
+        # page-level and can't be re-assigned to a sub-chunk, so splitting would
+        # pin a figure/formula's vision description to the wrong sub-chunk
+        # (mis-attribution). Keeping such chunks whole keeps each figure/formula
+        # with the text it belongs to.
+        if id(c) not in selected \
+                or getattr(c, "figure_rects", None) or getattr(c, "math_rects", None):
             out.append(c)
             continue
         try:
@@ -172,16 +178,11 @@ async def _semantic_stage(ctx: dict) -> dict:
         if len(parts) <= 1:
             out.append(c)
             continue
-        for i, part in enumerate(parts):
+        for part in parts:
             sub = dataclasses.replace(c, text=part)
             sub.image_texts = list(c.image_texts)
             sub.table_texts = list(c.table_texts)
             sub.key_terms = list(c.key_terms)
-            if i > 0:
-                # Rects stay on the first sub-chunk only, so each figure or
-                # formula region is sent to the vision model exactly once.
-                sub.figure_rects = []
-                sub.math_rects = []
             out.append(sub)
     ctx["chunks"] = out
     return ctx

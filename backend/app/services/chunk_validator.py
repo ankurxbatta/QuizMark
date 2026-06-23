@@ -103,7 +103,10 @@ def dedupe_chunk_content(chunk) -> None:
             mtok = _tokens(math_text)
             if mtok:
                 coverage = sum(1 for t in mtok if t in base) / len(mtok)
-                if coverage >= 0.85:
+                # Only drop when almost entirely redundant (raised 0.85 → 0.92) so
+                # vision-transcribed LaTeX that merely shares variable names with
+                # nearby prose is preserved rather than blanked.
+                if coverage >= 0.92:
                     chunk.math_text = ""
     except Exception as exc:
         logger.debug(f"dedupe_chunk_content skipped: {exc}")

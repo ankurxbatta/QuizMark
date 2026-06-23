@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 # "Example 1.12" / "EXAMPLE 4.3" — heading for a worked example.
 _EXAMPLE_RE = re.compile(r"^\s*(?:EXAMPLE|Example)\s+(\d+\.\d+)\s*$")
+# "Try It 1.12" / "TRY IT 4.3" / "Try It" — practice box that follows an Example.
+_TRYIT_RE = re.compile(r"^\s*(?:TRY\s*IT|Try\s*It)\s*(\d+\.\d+)?\s*$")
 # "Solution 1.12" / "Solution" — start of a worked example's solution.
 _SOLUTION_RE = re.compile(r"^\s*(?:SOLUTION|Solution)\s*(\d+\.\d+)?\s*$")
 # A numbered exercise item: "1.", "23." at line start.
@@ -61,6 +63,7 @@ _WORD_NUM = {
 _KIND_HOMEWORK = "homework"
 _KIND_PRACTICE = "practice"
 _KIND_EXAMPLE = "example"
+_KIND_TRYIT = "try_it"
 
 
 def _normalise(text: str) -> str:
@@ -83,17 +86,25 @@ def _looks_like_junk(text: str) -> bool:
     return False
 
 
-def split_exercises(chunk_text: str, table_texts: list, image_texts: list) -> list[dict]:
+def split_exercises(
+    chunk_text: str,
+    table_texts: list,
+    image_texts: list,
+    math_text: str = "",
+) -> list[dict]:
     """
     Parse one stored chunk's prose into structured exercise dicts.
 
     Returns a list of dicts with keys:
       stem, options (list[str]), solution (str), exercise_kind, inferred_qtype,
-      table_markdown, figure_desc, source_label.
+      table_markdown, figure_desc, math_text, source_label.
+
+    Embedded tables / figures / formulas live at the chunk level (we have no
+    per-exercise PDF coordinates here), so we attach the chunk's full table,
+    figure and formula context to every exercise mined from it and let the
+    embedding + generation prompt sort out relevance (recall-first design).
     """
     lines = (chunk_text or "").splitlines()
-    table_md = (table_texts or [None])[0] or "" if table_texts else ""
-    figure_desc = (image_texts or [None])[0] or "" if image_texts else ""
 
     out: list[dict] = []
 
@@ -127,13 +138,15 @@ def split_exercises(chunk_text: str, table_texts: list, image_texts: list) -> li
             label_num = m_ex.group(1)
             i += 1
             body: list[str] = []
-            while i < n and not _EXAMPLE_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]):
+            while i < n and not _EXAMPLE_RE.match(lines[i]) \
+                    and not _TRYIT_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]):
                 body.append(lines[i].strip())
                 i += 1
             solution_lines: list[str] = []
             if i < n and _SOLUTION_RE.match(lines[i]):
                 i += 1
-                while i < n and not _EXAMPLE_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]):
+                while i < n and not _EXAMPLE_RE.match(lines[i]) \
+                        and not _TRYIT_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]):
                     if re.match(r"^\s*(HOMEWORK|PRACTICE)\b", lines[i]):
                         break
                     solution_lines.append(lines[i].strip())
@@ -145,7 +158,38 @@ def split_exercises(chunk_text: str, table_texts: list, image_texts: list) -> li
                 out.append(_make_entry(
                     stem=stem, options=options, solution=solution,
                     kind=_KIND_EXAMPLE, label=f"Example {label_num}",
-                    table_md=table_md, figure_desc=figure_desc,
+                    table_texts=table_texts, image_texts=image_texts, math_text=math_text,
+                ))
+            continue
+
+        # ── "Try It" practice box (follows an Example) ─────────────────────────
+        m_try = _TRYIT_RE.match(raw)
+        if m_try:
+            label_num = m_try.group(1)
+            i += 1
+            body = []
+            while i < n and not _EXAMPLE_RE.match(lines[i]) \
+                    and not _TRYIT_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]) \
+                    and not re.match(r"^\s*(HOMEWORK|PRACTICE)\b", lines[i]):
+                body.append(lines[i].strip())
+                i += 1
+            solution_lines = []
+            if i < n and _SOLUTION_RE.match(lines[i]):
+                i += 1
+                while i < n and not _EXAMPLE_RE.match(lines[i]) \
+                        and not _TRYIT_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]) \
+                        and not re.match(r"^\s*(HOMEWORK|PRACTICE)\b", lines[i]):
+                    solution_lines.append(lines[i].strip())
+                    i += 1
+            stem = re.sub(r"\s+", " ", " ".join(b for b in body if b)).strip()
+            solution = re.sub(r"\s+", " ", " ".join(s for s in solution_lines if s)).strip()
+            options = _scan_options(body)
+            label = f"Try It {label_num}" if label_num else "Try It"
+            if not _looks_like_junk(stem):
+                out.append(_make_entry(
+                    stem=stem, options=options, solution=solution,
+                    kind=_KIND_TRYIT, label=label,
+                    table_texts=table_texts, image_texts=image_texts, math_text=math_text,
                 ))
             continue
 
@@ -178,7 +222,7 @@ def split_exercises(chunk_text: str, table_texts: list, image_texts: list) -> li
             pending_opt: str | None = None
             while i < n:
                 nxt = lines[i]
-                if _NUM_ITEM_RE.match(nxt) or _EXAMPLE_RE.match(nxt) \
+                if _NUM_ITEM_RE.match(nxt) or _EXAMPLE_RE.match(nxt) or _TRYIT_RE.match(nxt) \
                         or re.match(r"^\s*(HOMEWORK|PRACTICE)\b", nxt) \
                         or _SECTION_HEAD_RE.match(nxt) or _GROUP_STEM_RE.search(nxt.strip()):
                     break
@@ -206,7 +250,7 @@ def split_exercises(chunk_text: str, table_texts: list, image_texts: list) -> li
                 out.append(_make_entry(
                     stem=stem, options=options, solution="",
                     kind=mode, label=label,
-                    table_md=table_md, figure_desc=figure_desc,
+                    table_texts=table_texts, image_texts=image_texts, math_text=math_text,
                 ))
             continue
 
@@ -234,20 +278,20 @@ def _scan_options(body_lines: list[str]) -> list[str]:
 
 def _make_entry(
     *, stem: str, options: list[str], solution: str, kind: str, label: str,
-    table_md: str, figure_desc: str,
+    table_texts: list, image_texts: list, math_text: str = "",
 ) -> dict:
-    lower = stem.lower()
-    references_table = bool(re.search(r"\btable\b", lower))
-    references_figure = bool(re.search(r"\b(figure|graph|chart|histogram|plot)\b", lower))
     inferred = "mcq" if len(options) >= 2 else "short_answer"
+    table_md = "\n\n".join(t for t in (table_texts or []) if t).strip()
+    figure_desc = "\n".join(d for d in (image_texts or []) if d).strip()
     return {
         "stem": stem,
         "options": options,
         "solution": solution,
         "exercise_kind": kind,
         "inferred_qtype": inferred,
-        "table_markdown": table_md if (references_table and table_md) else "",
-        "figure_desc": figure_desc if (references_figure and figure_desc) else "",
+        "table_markdown": table_md,
+        "figure_desc": figure_desc,
+        "math_text": (math_text or "").strip(),
         "source_label": label,
     }
 
@@ -263,7 +307,15 @@ def embedding_text(entry: dict) -> str:
     parts = [entry.get("source_label") or "", entry.get("stem") or ""]
     if entry.get("options"):
         parts.append("options: " + " | ".join(entry["options"][:6]))
-    return " — ".join(p for p in parts if p)[:1500]
+    # Include embedded formulas / table / figure so an exercise is retrievable on
+    # the maths, tabular data and chart it actually depends on (not just prose).
+    if entry.get("math_text"):
+        parts.append("formulas: " + entry["math_text"][:600])
+    if entry.get("table_markdown"):
+        parts.append("table: " + entry["table_markdown"][:600])
+    if entry.get("figure_desc"):
+        parts.append("figure: " + entry["figure_desc"][:400])
+    return " — ".join(p for p in parts if p)[:2200]
 
 
 # ── Builder (runs on worker-clean / deepsearch queue) ──────────────────────────
@@ -286,7 +338,7 @@ async def build_exercise_index(book_id: str) -> dict:
         chunks_col = await _get_collection(CHUNKS_COLLECTION)
         cursor = chunks_col.find(
             {"book_id": book_id},
-            {"text": 1, "table_texts": 1, "image_texts": 1, "book_hash": 1,
+            {"text": 1, "table_texts": 1, "image_texts": 1, "math_text": 1, "book_hash": 1,
              "chapter_num": 1, "chapter_title": 1, "section_title": 1, "page_start": 1},
         )
 
@@ -298,6 +350,7 @@ async def build_exercise_index(book_id: str) -> dict:
                 chunk.get("text", ""),
                 chunk.get("table_texts", []),
                 chunk.get("image_texts", []),
+                chunk.get("math_text", ""),
             )
             for ex in exercises:
                 doc_id = exercise_doc_id(chunk.get("book_hash") or book_id, chunk_id, ex["stem"])
@@ -348,6 +401,7 @@ async def build_exercise_index(book_id: str) -> dict:
                 "inferred_qtype": e["inferred_qtype"],
                 "table_markdown": e["table_markdown"][:6000],
                 "figure_desc": e["figure_desc"][:2000],
+                "math_text": e.get("math_text", "")[:2000],
                 "source_label": e["source_label"],
                 "embedding": emb, "created_at": datetime.now(timezone.utc),
             }
@@ -382,14 +436,29 @@ async def retrieve_exercises(
     book_id: str | None = None,
     chapter_num: int | None = None,
     k: int = 4,
+    preferred_kinds: list[str] | None = None,
 ) -> list[dict]:
+    """
+    Vector-search the chapter's real exercises.
+
+    When `preferred_kinds` is given (difficulty-aware grounding), over-fetch and
+    stably re-rank so exercises of the preferred kinds (e.g. worked examples for
+    an easy request, homework/practice for a hard one) surface first, without
+    requiring exercise_kind to be a vector-index filter field.
+    """
     if not settings.EXERCISE_INDEX_ENABLED:
         return []
     filters = {"chapter_num": chapter_num} if chapter_num is not None else None
-    return await vector_search(
-        query_embedding, k=k, book_id=book_id, filters=filters,
+    fetch_k = max(k * 3, k) if preferred_kinds else k
+    results = await vector_search(
+        query_embedding, k=fetch_k, book_id=book_id, filters=filters,
         collection_name=EXERCISE_COLLECTION, index_name=EXERCISE_INDEX_NAME,
     )
+    if preferred_kinds:
+        pref = set(preferred_kinds)
+        # stable sort keeps vector-similarity order within each group
+        results.sort(key=lambda d: 0 if d.get("exercise_kind") in pref else 1)
+    return results[:k]
 
 
 def render_exercises_block(exercises: list[dict]) -> str:
@@ -410,6 +479,12 @@ def render_exercises_block(exercises: list[dict]) -> str:
         lines.append(f"- [{label}] {stem}")
         for opt, letter in zip(e.get("options", [])[:6], "abcdef"):
             lines.append(f"    {letter}. {opt[:200]}")
+        if e.get("math_text"):
+            lines.append(f"    Formulas: {e['math_text'][:300]}")
+        if e.get("table_markdown"):
+            lines.append(f"    Table:\n{e['table_markdown'][:600]}")
+        if e.get("figure_desc"):
+            lines.append(f"    Figure: {e['figure_desc'][:300]}")
         if e.get("solution"):
             lines.append(f"    Solution: {e['solution'][:300]}")
     return "\n".join(lines)

@@ -62,6 +62,26 @@ _BLOOMS_RETRIEVAL_SUFFIX: dict[str, str] = {
     "L5": "evaluate justify critique assess statistical decision",
 }
 
+# When an instructor pins an explicit difficulty, it becomes a HARD constraint:
+# Bloom's rebalancing is suppressed and every question stays in this band.
+_DIFFICULTY_BLOOMS: dict[str, list[str]] = {
+    "easy": ["L1", "L2"],
+    "medium": ["L3", "L4"],
+    "hard": ["L5"],
+}
+# Single Bloom's level to lock targeted gap-fill to, per explicit difficulty.
+_DIFFICULTY_PRIMARY_BLOOM: dict[str, str] = {
+    "easy": "L2", "medium": "L3", "hard": "L5",
+}
+# Difficulty-aware grounding: which real-exercise kinds to surface first.
+# Worked examples (and the short Try-It practice boxes) anchor easy/medium
+# questions; homework/practice problems anchor the harder ones.
+_DIFFICULTY_EXERCISE_KINDS: dict[str, list[str]] = {
+    "easy": ["example", "try_it"],
+    "medium": ["example", "try_it", "homework", "practice"],
+    "hard": ["homework", "practice"],
+}
+
 
 # ── Coverage audit ─────────────────────────────────────────────────────────────
 
@@ -143,10 +163,14 @@ async def _retrieve_seed_exercises(
     chapter_topic: str,
     book_id: Optional[str],
     chapter_num: Optional[int],
+    difficulty: str = "all",
 ) -> list[dict]:
     """
     Retrieve real exercises from this exact chapter ONCE so generation rounds can
     reuse them as seeds. Degrades to [] when the index is disabled/empty/failing.
+
+    When an explicit difficulty is set, bias the seeds toward the exercise kinds
+    that best anchor that band (worked examples for easy, homework for hard).
     """
     from app.core.config import settings
     if not settings.EXERCISE_INDEX_ENABLED:
@@ -155,12 +179,56 @@ async def _retrieve_seed_exercises(
         from app.services.exercise_index import retrieve_exercises
         from app.services.llm_service import slm_service
         q_emb = await slm_service.embed(chapter_topic)
+        preferred_kinds = _DIFFICULTY_EXERCISE_KINDS.get(difficulty)
         return await retrieve_exercises(
             q_emb, book_id=book_id, chapter_num=chapter_num, k=6,
+            preferred_kinds=preferred_kinds,
         )
     except Exception as exc:
         logger.debug(f"[ORCH] seed exercise retrieval skipped: {exc}")
         return []
+
+
+async def _build_asset_directive(
+    require_table: bool,
+    require_figure: bool,
+    book_id: Optional[str],
+    chapter_num: Optional[int],
+    chapter_topic: str,
+) -> str:
+    """Build a prompt directive (with real chapter tables/figures) that forces
+    every generated question to be based on a table and/or figure. '' if not
+    requested or nothing retrievable."""
+    if not (require_table or require_figure):
+        return ""
+    from app.core.config import settings
+    from app.services.llm_service import slm_service
+    blocks: list[str] = []
+    try:
+        emb = await slm_service.embed(chapter_topic)
+        if require_table and settings.TABLE_INDEX_ENABLED:
+            from app.services.table_index import retrieve_tables, render_tables_block
+            b = render_tables_block(await retrieve_tables(emb, book_id=book_id, chapter_num=chapter_num, k=3))
+            if b:
+                blocks.append(b)
+        if require_figure and settings.FIGURE_INDEX_ENABLED:
+            from app.services.figure_index import retrieve_figures, render_figures_block
+            b = render_figures_block(await retrieve_figures(emb, book_id=book_id, chapter_num=chapter_num, k=3))
+            if b:
+                blocks.append(b)
+    except Exception as exc:
+        logger.debug(f"[ORCH] asset directive retrieval skipped: {exc}")
+    want = " and ".join(w for w, c in [("a real data TABLE", require_table),
+                                       ("a real FIGURE/GRAPH", require_figure)] if c)
+    directive = (
+        f"ASSET REQUIREMENT: EVERY question MUST be built around {want} from the chapter. "
+        "Reproduce the relevant table inside question_text as a markdown table (with all correct values), "
+        "or explicitly reference the figure, and require the student to read/interpret it to answer. "
+        "Do NOT write questions that ignore the table/figure."
+    )
+    if blocks:
+        directive += "\n\n" + "\n\n".join(blocks)
+    return directive
 
 
 # ── Main orchestrator ──────────────────────────────────────────────────────────
@@ -173,6 +241,8 @@ async def orchestrate_question_bank(
     difficulty: str = "all",
     existing_questions: Optional[list[str]] = None,
     chapter_num: Optional[int] = None,
+    require_table: bool = False,
+    require_figure: bool = False,
 ) -> list[dict]:
     """
     3-round agentic question bank generation for one chapter/topic.
@@ -189,7 +259,13 @@ async def orchestrate_question_bank(
         Validated list of question dicts, len <= count.
     """
     existing_questions = list(existing_questions or [])
-    logger.info(f"[ORCH] Starting 3-round orchestration for '{chapter_topic}' | target={count}")
+    # An explicit easy/medium/hard request is a HARD constraint: we suppress
+    # Bloom's-distribution rebalancing and keep every question in that band.
+    explicit_difficulty = difficulty in ("easy", "medium", "hard")
+    logger.info(
+        f"[ORCH] Starting 3-round orchestration for '{chapter_topic}' | target={count} "
+        f"| difficulty={difficulty}{' (locked)' if explicit_difficulty else ''}"
+    )
 
     # ── Round 0: "Read the chapter carefully" → extract key concepts ──────────
     seed_raw = await deep_retrieve_for_generation(
@@ -201,6 +277,14 @@ async def orchestrate_question_bank(
     )
     if chapter_concepts:
         logger.info(f"[ORCH] Round 0 — concepts: {chapter_concepts}")
+
+    # Optional table/figure requirement: build a directive (with real chapter
+    # tables/figures) that forces every generated question to be built around them.
+    asset_directive = await _build_asset_directive(
+        require_table, require_figure, book_id, chapter_num, chapter_topic,
+    )
+    if asset_directive:
+        logger.info(f"[ORCH] asset requirement active (table={require_table}, figure={require_figure})")
 
     # ── Round 1: Broad DeepSearch retrieval + initial generation ──────────────
     r1_target = max(int(count * 0.75), count)  # slight overgenerate to allow trimming
@@ -224,7 +308,9 @@ async def orchestrate_question_bank(
         return []
 
     # Retrieve real chapter exercises ONCE (cheap, reused across all rounds).
-    seed_exercises = await _retrieve_seed_exercises(chapter_topic, book_id, chapter_num)
+    seed_exercises = await _retrieve_seed_exercises(
+        chapter_topic, book_id, chapter_num, difficulty=difficulty,
+    )
     if seed_exercises:
         logger.info(f"[ORCH] Round 1 — {len(seed_exercises)} seed exercises retrieved")
 
@@ -235,6 +321,7 @@ async def orchestrate_question_bank(
         difficulty=difficulty,
         existing_questions=existing_questions,
         seed_exercises=seed_exercises,
+        asset_directive=asset_directive,
     )
     logger.info(f"[ORCH] Round 1 — generated {len(questions)} questions")
 
@@ -242,8 +329,19 @@ async def orchestrate_question_bank(
     seen_texts = list(existing_questions) + [q["question_text"] for q in questions]
 
     # ── Round 2: Coverage audit → gap-fill per missing Bloom's level ──────────
-    gaps = _audit_bloom_gaps(questions, target_count=count)
-    logger.info(f"[ORCH] Round 2 — {len(gaps)} Bloom's gaps: {[g['bloom_level'] for g in gaps]}")
+    if explicit_difficulty:
+        # Difficulty is locked → no Bloom's rebalancing. Only fill a raw count
+        # shortfall, and keep it inside the requested band's primary level.
+        primary = _DIFFICULTY_PRIMARY_BLOOM[difficulty]
+        shortfall = count - len(questions)
+        gaps = (
+            [{"bloom_level": primary, "needed": shortfall,
+              "retrieval_suffix": _BLOOMS_RETRIEVAL_SUFFIX[primary]}]
+            if shortfall > 0 else []
+        )
+    else:
+        gaps = _audit_bloom_gaps(questions, target_count=count)
+    logger.info(f"[ORCH] Round 2 — {len(gaps)} gaps: {[g['bloom_level'] for g in gaps]}")
 
     # Process each gap sequentially so each gap's output feeds the next's context.
     # Gap-filling is enrichment — a failure (e.g. a transient embed error during
@@ -277,6 +375,7 @@ async def orchestrate_question_bank(
                 book_id=book_id,
                 chapter_num=chapter_num,
                 seed_exercises=seed_exercises,
+                asset_directive=asset_directive,
             )
         except Exception as exc:
             logger.warning(f"[ORCH] Round 2 — {bloom_level} gap fill failed (non-fatal): {exc}")
@@ -302,15 +401,20 @@ async def orchestrate_question_bank(
                     cc_chunks = [DbChunk(doc) for doc in raw_cc]
                     if not cc_chunks:
                         continue
+                    cc_bloom = (
+                        _DIFFICULTY_PRIMARY_BLOOM[difficulty]
+                        if explicit_difficulty else "L3"
+                    )
                     cc_qs = await generate_targeted_bloom_questions(
                         chunks=cc_chunks,
                         question_type=question_type,
                         count=1,
-                        bloom_level="L3",  # default — apply/analyse most uncovered concepts
+                        bloom_level=cc_bloom,  # locked to band when difficulty is explicit
                         existing_questions=seen_texts,
                         book_id=book_id,
                         chapter_num=chapter_num,
                         seed_exercises=seed_exercises,
+                        asset_directive=asset_directive,
                     )
                 except Exception as exc:
                     logger.warning(f"[ORCH] Round 2b — concept {concept!r} fill failed (non-fatal): {exc}")
@@ -321,7 +425,11 @@ async def orchestrate_question_bank(
 
     # ── Round 3: Dedup + balance + top-up if still short ─────────────────────
     questions = _dedup_by_prefix(questions)
-    questions = _balance_bloom_distribution(questions, target_count=count)
+    if explicit_difficulty:
+        # Difficulty locked → no Bloom's trimming; just cap to the requested count.
+        questions = questions[:count]
+    else:
+        questions = _balance_bloom_distribution(questions, target_count=count)
     logger.info(f"[ORCH] After Round 3 dedup/balance — {len(questions)} questions")
 
     # Top-up: if we're more than 20% below target, do one more small pass
@@ -335,6 +443,7 @@ async def orchestrate_question_bank(
             difficulty=difficulty,
             existing_questions=seen_texts,
             seed_exercises=seed_exercises,
+            asset_directive=asset_directive,
         )
         questions.extend(topup)
         questions = _dedup_by_prefix(questions)

@@ -145,11 +145,17 @@ def _extract_page_data(page, doc, ocr_available: bool) -> dict:
             rows = tbl.extract()  # list[list[str|None]]
             if not rows or len(rows) < 2:
                 continue
-            # Skip sparse tables — they're usually OpenStax coloured formatting boxes,
-            # not real data tables (real tables have ≥30% of cells filled).
+            # Skip very sparse grids — usually OpenStax coloured formatting boxes,
+            # not real data tables. Threshold loosened to 0.2 so genuine data
+            # tables that have some blank cells (e.g. probability distributions,
+            # fill-in templates) are kept rather than dropped.
             total_cells = sum(len(r) for r in rows)
             filled_cells = sum(1 for r in rows for c in r if (c or "").strip())
-            if total_cells > 0 and filled_cells / total_cells < 0.3:
+            if total_cells > 0 and filled_cells / total_cells < 0.2:
+                logger.debug(
+                    f"Dropping sparse grid on page {page.number + 1}: "
+                    f"{filled_cells}/{total_cells} cells filled"
+                )
                 continue
             md_rows = []
             for row in rows:
@@ -618,8 +624,22 @@ async def describe_graph_chunks(
                 if delay:
                     await _asyncio.sleep(delay)
 
-                # Context prompt explicitly asks for description
-                full_prompt = f"{context}\n\nPlease describe this chart/figure in detail."
+                # Classify-then-act: many OpenStax "Try It" / Example / Solution
+                # boxes are vector-drawn regions (not real text in the PDF layer).
+                # Describe genuine data visuals, but TRANSCRIBE text-bearing boxes
+                # verbatim so the exercise miner and retrieval get the real content.
+                full_prompt = (
+                    "You are processing a region clipped from a statistics textbook page. "
+                    "Decide what it is and respond accordingly:\n"
+                    "- If it is a DATA VISUAL (chart, graph, plot, histogram, diagram), reply with "
+                    "'CHART:' followed by a detailed description of what it shows.\n"
+                    "- If it is TEXT (a worked Example, a 'Try It' practice box, an exercise or "
+                    "problem, a Solution, a definition, or a table of values), reply with 'TEXT:' "
+                    "followed by an EXACT VERBATIM transcription of every word and number. Preserve "
+                    "headings exactly as written, each on its own line (e.g. 'Try It 4.4', "
+                    "'Example 4.6', 'Solution'). Do NOT summarise or paraphrase.\n"
+                    f"\nContext (for your understanding only, do not echo it): {context}"
+                )
                 description = await smart_describe_image(img_bytes, context=full_prompt)
 
                 # Store in cache (fire-and-forget)
@@ -662,10 +682,26 @@ async def describe_graph_chunks(
         return_exceptions=True,
     )
 
+    import re as _re
+    folded_text = 0
     for (chunk_idx, _, _), desc in zip(chunk_fig_map, descriptions):
-        if isinstance(desc, str) and desc:
-            chunks[chunk_idx].image_texts.append(desc)
+        if not (isinstance(desc, str) and desc.strip()):
+            continue
+        d = desc.strip()
+        if d[:5].lower().startswith("text:"):
+            transcription = d[5:].strip()
+            if transcription:
+                # text-bearing region (Try It / Example / Solution / problem) →
+                # fold the verbatim transcription into the text layer so the
+                # exercise miner and vector retrieval treat it as real content.
+                chunks[chunk_idx].text = (chunks[chunk_idx].text or "").rstrip() + "\n\n" + transcription
+                folded_text += 1
+        else:
+            cleaned = _re.sub(r"^\s*(chart:|no_chart\b:?)\s*", "", d, flags=_re.IGNORECASE).strip() or d
+            chunks[chunk_idx].image_texts.append(cleaned)
             chunks[chunk_idx].has_images = True
+    if folded_text:
+        logger.info(f"describe_graph_chunks: folded {folded_text} text-bearing regions into the text layer")
 
     doc.close()
     logger.info(
