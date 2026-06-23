@@ -897,8 +897,15 @@ async def list_assessment_questions(
         return [_q_out(d) for d in docs]
 
     student_id = claims["sub"]
+    # A student sees questions assigned directly (legacy) OR via any assigned quiz.
+    from app.api.v1.quizzes import student_quiz_question_ids
+    quiz_ids = await student_quiz_question_ids(db, student_id)
+    query = {"$or": [
+        {"assigned_student_ids": student_id},
+        {"_id": {"$in": list(quiz_ids)}},
+    ]}
     doc = await db["questions"].find(
-        {"assigned_student_ids": student_id}, {"embedding": 0}
+        query, {"embedding": 0}
     ).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
     return [_q_out(d) for d in doc]
 

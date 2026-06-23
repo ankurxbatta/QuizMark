@@ -61,7 +61,9 @@ async def submit_answer(
     if not question:
         raise HTTPException(404, "Question not found")
 
-    if user_id not in question.get("assigned_student_ids", []):
+    from app.api.v1.quizzes import student_quiz_question_ids
+    via_quiz = question_id in await student_quiz_question_ids(db, user_id)
+    if not via_quiz and user_id not in question.get("assigned_student_ids", []):
         raise HTTPException(403, "This question is not assigned to you")
 
     existing = await db["submissions"].find_one(

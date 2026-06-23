@@ -2,7 +2,7 @@ import asyncio
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import auth, questions, submissions, marking, export, analytics
+from app.api.v1 import auth, questions, submissions, marking, export, analytics, quizzes
 from app.api.v1 import admin as admin_v1
 from app.core.config import settings
 from app.core.database import get_mongo_db
@@ -30,6 +30,7 @@ app.add_middleware(
 app.include_router(auth.router,        prefix="/api/v1/auth",        tags=["auth"])
 app.include_router(questions.router,   prefix="/api/v1/questions",   tags=["questions"])
 app.include_router(submissions.router, prefix="/api/v1/submissions",  tags=["submissions"])
+app.include_router(quizzes.router,     prefix="/api/v1/quizzes",     tags=["quizzes"])
 app.include_router(marking.router,     prefix="/api/v1/marking",     tags=["marking"])
 app.include_router(export.router,      prefix="/api/v1/export",      tags=["export"])
 app.include_router(analytics.router,   prefix="/api/v1/analytics",   tags=["analytics"])

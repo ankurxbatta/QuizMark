@@ -69,6 +69,44 @@ class QuestionAssigneeOut(BaseModel):
     student_ids: list[str] = Field(default_factory=list)
 
 
+class QuizCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    question_ids: list[str] = Field(default_factory=list)
+
+
+class QuizUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    question_ids: Optional[list[str]] = None
+
+
+class QuizOut(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    question_ids: list[str] = Field(default_factory=list)
+    question_count: int = 0
+    assigned_student_ids: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class QuizWithQuestions(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    questions: list[AssessmentQuestionOut] = Field(default_factory=list)
+
+
+class QuizAssigneeUpdate(BaseModel):
+    student_ids: list[str] = Field(default_factory=list)
+
+
+class QuizAssigneeOut(BaseModel):
+    quiz_id: str
+    student_ids: list[str] = Field(default_factory=list)
+
+
 class QuestionGenerateResponse(BaseModel):
     generated: int
     source_file: str
