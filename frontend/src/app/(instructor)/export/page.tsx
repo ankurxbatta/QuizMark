@@ -21,7 +21,7 @@ export default function ExportPage() {
   return (
     <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700">Export Data</h1>
+        <h1 className="text-xl font-bold text-blue-700">Export Data</h1>
         <p className="text-xs text-gray-400 mt-0.5">Download results and audit logs as CSV</p>
       </header>
       <div className="max-w-3xl mx-auto px-8 py-10 space-y-5">
@@ -32,7 +32,7 @@ export default function ExportPage() {
               <p className="text-sm text-gray-500 mt-1">{description}</p>
             </div>
             <a href={url} download={filename}
-              className="flex items-center gap-2 bg-indigo-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 whitespace-nowrap">
+              className="flex items-center gap-2 bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 whitespace-nowrap">
               <Download size={16} /> Download CSV
             </a>
           </div>

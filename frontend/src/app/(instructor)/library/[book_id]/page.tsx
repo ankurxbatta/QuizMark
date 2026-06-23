@@ -49,7 +49,7 @@ function ProgressBar({ pct, label }: { pct: number; label: string }) {
       </div>
       <div className="w-full bg-gray-100 rounded-full h-2">
         <div
-          className="bg-indigo-500 h-2 rounded-full transition-all duration-700"
+          className="bg-blue-500 h-2 rounded-full transition-all duration-700"
           style={{ width: `${Math.min(pct, 100)}%` }}
         />
       </div>
@@ -90,7 +90,7 @@ function JobCard({ job, onDismiss }: { job: Job; onDismiss: (id: string) => void
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           {(job.status === "queued" || job.status === "processing") && (
-            <Loader2 size={16} className="animate-spin text-indigo-500 shrink-0" />
+            <Loader2 size={16} className="animate-spin text-blue-500 shrink-0" />
           )}
           {job.status === "done" && <CheckCircle size={16} className="text-green-500 shrink-0" />}
           {job.status === "failed" && <ServerCrash size={16} className="text-red-500 shrink-0" />}
@@ -318,13 +318,13 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
       <header className="bg-white border-b px-8 py-4 shadow-sm">
         <button
           onClick={() => router.push("/library")}
-          className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-indigo-600 mb-2 transition-colors"
+          className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-blue-600 mb-2 transition-colors"
         >
           <ArrowLeft size={14} /> Library
         </button>
         <div className="flex items-start gap-3">
-          <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center shrink-0">
-            <BookOpen size={20} className="text-indigo-600" />
+          <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0">
+            <BookOpen size={20} className="text-blue-600" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-gray-900">{book.display_name}</h1>
@@ -337,7 +337,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
 
         {/* Stats row */}
         <div className="flex flex-wrap gap-3">
-          <Stat icon={Layers}     value={book.total_chunks}   label="chunks"   colour="bg-indigo-50 text-indigo-700" />
+          <Stat icon={Layers}     value={book.total_chunks}   label="chunks"   colour="bg-blue-50 text-blue-700" />
           <Stat icon={Database}   value={book.total_chapters} label="chapters" colour="bg-slate-100 text-slate-600"  />
           {book.with_tables > 0 && <Stat icon={Table2}       value={book.with_tables} label="tables"   colour="bg-blue-50 text-blue-700"   />}
           {book.with_math   > 0 && <Stat icon={FlaskConical} value={book.with_math}   label="formulas" colour="bg-purple-50 text-purple-700" />}
@@ -357,7 +357,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
               <h2 className="font-semibold text-gray-800 text-sm">Chapters</h2>
               <button
                 onClick={toggleAll}
-                className="text-xs text-indigo-500 hover:text-indigo-700"
+                className="text-xs text-blue-500 hover:text-blue-700"
               >
                 {selectedChapters.size === book.chapters.length ? "Deselect all" : "Select all"}
               </button>
@@ -369,14 +369,14 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
                 <label
                   key={ch.num}
                   className={`flex items-center gap-3 py-2.5 cursor-pointer hover:bg-gray-50 transition-colors rounded-lg px-1 -mx-1 ${
-                    selectedChapters.has(ch.num) ? "bg-indigo-50/60" : ""
+                    selectedChapters.has(ch.num) ? "bg-blue-50/60" : ""
                   }`}
                 >
                   <input
                     type="checkbox"
                     checked={selectedChapters.has(ch.num)}
                     onChange={() => toggleChapter(ch.num)}
-                    className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
                   />
                   <span className="text-xs text-gray-400 w-6 text-right shrink-0">{ch.num}.</span>
                   <span className="text-sm text-gray-700 leading-tight">{ch.title}</span>
@@ -439,22 +439,22 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
                 <input
                   type="number" min={1} max={50} value={count}
                   onChange={(e) => setCount(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
               </div>
 
               {/* Summary */}
-              <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-sm text-indigo-700 space-y-1">
+              <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-sm text-blue-700 space-y-1">
                 <p className="font-medium">
                   ~{estimated} questions from {activeChapters.length} chapter{activeChapters.length !== 1 ? "s" : ""}
                 </p>
                 {activeChapters.length < book.chapters.length && (
-                  <p className="text-xs text-indigo-500">
+                  <p className="text-xs text-blue-500">
                     Selected: {activeChapters.map((c) => `Ch ${c.num}`).join(", ")}
                   </p>
                 )}
                 {difficulty !== "all" && (
-                  <p className="text-xs text-indigo-500 capitalize">Difficulty: {difficulty}</p>
+                  <p className="text-xs text-blue-500 capitalize">Difficulty: {difficulty}</p>
                 )}
               </div>
 
@@ -467,7 +467,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
               <button
                 onClick={handleGenerate}
                 disabled={submitting || selectedChapters.size === 0}
-                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
+                className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
               >
                 {submitting
                   ? <><Loader2 size={17} className="animate-spin" /> Queuing job…</>
@@ -511,10 +511,10 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
             {/* Quick nav to Q&A bank */}
             <a
               href="/questions"
-              className="flex items-center justify-between bg-white border rounded-xl px-5 py-4 hover:border-indigo-300 hover:shadow-sm transition-all text-sm text-gray-600 hover:text-indigo-700"
+              className="flex items-center justify-between bg-white border rounded-xl px-5 py-4 hover:border-blue-300 hover:shadow-sm transition-all text-sm text-gray-600 hover:text-blue-700"
             >
               <span className="flex items-center gap-2">
-                <BookOpen size={16} className="text-indigo-400" />
+                <BookOpen size={16} className="text-blue-400" />
                 View Q&amp;A Bank
               </span>
               <ChevronRight size={15} />

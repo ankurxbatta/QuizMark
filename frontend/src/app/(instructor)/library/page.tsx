@@ -80,11 +80,11 @@ function BookCard({ book, onDelete }: { book: Book; onDelete: (bookId: string) =
   return (
     <div
       onClick={() => router.push(`/library/${encodeURIComponent(book.book_id)}`)}
-      className="bg-white rounded-xl border shadow-sm p-6 text-left w-full hover:border-indigo-400 hover:shadow-md transition-all group cursor-pointer"
+      className="bg-white rounded-xl border shadow-sm p-6 text-left w-full hover:border-blue-400 hover:shadow-md transition-all group cursor-pointer"
     >
       <div className="flex items-start gap-3">
-        <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center shrink-0 group-hover:bg-indigo-200 transition-colors">
-          <BookOpen size={20} className="text-indigo-600" />
+        <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0 group-hover:bg-blue-200 transition-colors">
+          <BookOpen size={20} className="text-blue-600" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
@@ -102,7 +102,7 @@ function BookCard({ book, onDelete }: { book: Book; onDelete: (bookId: string) =
                   ? <Loader2 size={14} className="animate-spin" />
                   : <Trash2 size={14} />}
               </button>
-              <ChevronRight size={16} className="text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              <ChevronRight size={16} className="text-gray-400 group-hover:text-blue-500 transition-colors" />
             </div>
           </div>
           <p className="text-xs text-gray-400 mt-0.5 font-mono truncate">{book.book_id}</p>
@@ -115,7 +115,7 @@ function BookCard({ book, onDelete }: { book: Book; onDelete: (bookId: string) =
       </div>
 
       <div className="flex flex-wrap gap-2 mt-4">
-        <Stat icon={Layers}     value={book.total_chunks}   label="chunks"   colour="bg-indigo-50 text-indigo-700" />
+        <Stat icon={Layers}     value={book.total_chunks}   label="chunks"   colour="bg-blue-50 text-blue-700" />
         <Stat icon={Database}   value={book.total_chapters} label="chapters" colour="bg-slate-100 text-slate-600"  />
         {book.with_tables > 0 && <Stat icon={Table2}       value={book.with_tables} label="tables"   colour="bg-blue-50 text-blue-700"   />}
         {book.with_math   > 0 && <Stat icon={FlaskConical} value={book.with_math}   label="formulas" colour="bg-purple-50 text-purple-700" />}
@@ -218,7 +218,7 @@ export default function LibraryPage() {
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-8 py-4 shadow-sm flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-indigo-700 flex items-center gap-2">
+          <h1 className="text-xl font-bold text-blue-700 flex items-center gap-2">
             <Database size={20} /> Book Library
           </h1>
           <p className="text-xs text-gray-400 mt-0.5">

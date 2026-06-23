@@ -51,9 +51,9 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-blue-100">
       <div className="bg-white rounded-2xl shadow-xl p-10 w-full max-w-md">
-        <h1 className="text-3xl font-bold text-indigo-700 mb-1">QuizMark</h1>
+        <h1 className="text-3xl font-bold text-blue-700 mb-1">QuizMark</h1>
         <p className="text-gray-500 mb-8 text-sm">
           {mode === "register" ? "Create a student account" : "AI-Powered Quiz & Marking Platform"}
         </p>
@@ -66,7 +66,7 @@ export default function LoginPage() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
 
@@ -77,7 +77,7 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
 
@@ -86,7 +86,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full inline-flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-60"
+            className="w-full inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-60"
           >
             {mode === "register" ? <UserPlus size={17} /> : <LogIn size={17} />}
             {loading ? (mode === "register" ? "Creating account…" : "Signing in…") : (mode === "register" ? "Register" : "Sign In")}
@@ -99,7 +99,7 @@ export default function LoginPage() {
             setMode(mode === "login" ? "register" : "login");
             setError("");
           }}
-          className="mt-5 w-full inline-flex items-center justify-center gap-2 border border-indigo-200 text-indigo-700 font-semibold py-2.5 rounded-lg hover:bg-indigo-50 transition-colors"
+          className="mt-5 w-full inline-flex items-center justify-center gap-2 border border-blue-200 text-blue-700 font-semibold py-2.5 rounded-lg hover:bg-blue-50 transition-colors"
         >
           {mode === "login" ? <UserPlus size={17} /> : <LogIn size={17} />}
           {mode === "login" ? "Register as Student" : "Back to Sign In"}

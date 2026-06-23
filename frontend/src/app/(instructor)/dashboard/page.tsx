@@ -43,7 +43,7 @@ export default function InstructorDashboard() {
   }, []);
 
   const cards = [
-    { label: "Q&A Bank",        value: stats.total_questions,        icon: Database,    href: "/questions",           color: "bg-indigo-50 text-indigo-700" },
+    { label: "Q&A Bank",        value: stats.total_questions,        icon: Database,    href: "/questions",           color: "bg-blue-50 text-blue-700" },
     { label: "Pending Marking", value: stats.pending_marking,        icon: Clock,       href: "/marking",             color: "bg-yellow-50 text-yellow-700" },
     { label: "Flagged Reviews", value: stats.flagged,                icon: Flag,        href: "/marking?tab=flagged", color: "bg-red-50 text-red-700" },
     { label: "Last Backup",     value: stats.last_backup || "Never", icon: CheckSquare, href: "#",                    color: "bg-green-50 text-green-700" },
@@ -61,7 +61,7 @@ export default function InstructorDashboard() {
   return (
     <div className="bg-gray-50 min-h-screen">
       <header className="bg-white border-b px-8 py-4 shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700">Dashboard</h1>
+        <h1 className="text-xl font-bold text-blue-700">Dashboard</h1>
         <p className="text-xs text-gray-400 mt-0.5">AI-powered marking · Gemini RAG pipeline</p>
       </header>
 
@@ -93,8 +93,8 @@ export default function InstructorDashboard() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {quickActions.map(({ label, icon: Icon, href, desc }) => (
               <Link key={label} href={href}
-                className="bg-white rounded-xl border border-gray-200 px-5 py-4 flex items-start gap-4 hover:border-indigo-400 hover:shadow-sm transition-all">
-                <span className="bg-indigo-100 text-indigo-600 p-2 rounded-lg shrink-0 mt-0.5">
+                className="bg-white rounded-xl border border-gray-200 px-5 py-4 flex items-start gap-4 hover:border-blue-400 hover:shadow-sm transition-all">
+                <span className="bg-blue-100 text-blue-600 p-2 rounded-lg shrink-0 mt-0.5">
                   <Icon size={18} />
                 </span>
                 <div>

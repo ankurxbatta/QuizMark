@@ -101,8 +101,8 @@ export default function Select({
           "transition-colors cursor-pointer outline-none",
           "shadow-none",
           open
-            ? "border-indigo-500 ring-2 ring-indigo-500 ring-offset-0"
-            : "border-gray-300 hover:border-indigo-400",
+            ? "border-blue-500 ring-2 ring-blue-500 ring-offset-0"
+            : "border-gray-300 hover:border-blue-400",
           disabled ? "opacity-60 cursor-not-allowed" : "",
         ]
           .filter(Boolean)
@@ -111,7 +111,7 @@ export default function Select({
         <span className="truncate">{selected?.label ?? "Select…"}</span>
         <ChevronDown
           size={15}
-          className={`shrink-0 text-indigo-500 transition-transform duration-150 ${
+          className={`shrink-0 text-blue-500 transition-transform duration-150 ${
             open ? "rotate-180" : ""
           }`}
         />
@@ -121,7 +121,7 @@ export default function Select({
       {open && (
         <ul
           role="listbox"
-          className="absolute z-50 mt-1 w-full bg-white border border-indigo-200 rounded-xl shadow-lg py-1 overflow-auto max-h-60"
+          className="absolute z-50 mt-1 w-full bg-white border border-blue-200 rounded-xl shadow-lg py-1 overflow-auto max-h-60"
         >
           {options.map((opt) => {
             const isSelected = opt.value === value;
@@ -139,12 +139,12 @@ export default function Select({
                   "px-3 py-2 text-sm cursor-pointer select-none",
                   "transition-colors",
                   isSelected
-                    ? "bg-indigo-50 text-indigo-700 font-medium"
-                    : "text-gray-700 hover:bg-indigo-50 hover:text-indigo-700",
+                    ? "bg-blue-50 text-blue-700 font-medium"
+                    : "text-gray-700 hover:bg-blue-50 hover:text-blue-700",
                 ].join(" ")}
               >
                 <span className="truncate">{opt.label}</span>
-                {isSelected && <Check size={14} className="shrink-0 text-indigo-500" />}
+                {isSelected && <Check size={14} className="shrink-0 text-blue-500" />}
               </li>
             );
           })}

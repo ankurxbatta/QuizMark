@@ -78,12 +78,12 @@ export default function MarkingPage() {
   return (
     <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center gap-6 shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700">Marking Review</h1>
+        <h1 className="text-xl font-bold text-blue-700">Marking Review</h1>
         <div className="flex gap-2">
           {(["all", "flagged"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                tab === t ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                tab === t ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
               }`}>
               {t === "flagged" ? <><Flag size={13} className="inline mr-1" />Requires Review</> : "All Submissions"}
             </button>
@@ -145,7 +145,7 @@ export default function MarkingPage() {
                   <button
                     onClick={() => handleRetry(s.id)}
                     disabled={retrying.includes(s.id)}
-                    className="text-xs text-indigo-600 hover:text-indigo-700 disabled:opacity-60"
+                    className="text-xs text-blue-600 hover:text-blue-700 disabled:opacity-60"
                   >
                     {retrying.includes(s.id) ? "Retrying AI…" : "Retry AI Marking"}
                   </button>
@@ -169,7 +169,7 @@ export default function MarkingPage() {
                     className="border border-gray-300 rounded-lg px-3 py-2 text-sm" />
                   <button onClick={() => handleOverride(s.id)}
                     disabled={saving.includes(s.id)}
-                    className="bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-indigo-700 disabled:opacity-60">
+                    className="bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-60">
                     {saving.includes(s.id) ? "Saving…" : "Save Override"}
                   </button>
                 </div>

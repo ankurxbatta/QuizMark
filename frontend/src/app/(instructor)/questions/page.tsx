@@ -158,12 +158,12 @@ export default function QuestionsPage() {
     <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
         <div>
-          <h1 className="text-xl font-bold text-indigo-700">Q&amp;A Bank</h1>
+          <h1 className="text-xl font-bold text-blue-700">Q&amp;A Bank</h1>
           <p className="text-xs text-gray-400 mt-0.5">{students.length} registered student{students.length !== 1 ? "s" : ""}</p>
         </div>
         <div className="flex items-center gap-3">
           <button onClick={() => { setForm(EMPTY); setEditId(null); setEditAssets(undefined); setShowForm(true); }}
-            className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700">
+            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700">
             <Plus size={16} /> Add Question
           </button>
         </div>
@@ -171,7 +171,7 @@ export default function QuestionsPage() {
 
       <div className="max-w-6xl mx-auto px-8 py-8">
         {showForm && (
-          <div className="bg-white rounded-xl border border-indigo-200 shadow-sm p-6 mb-8 space-y-4">
+          <div className="bg-white rounded-xl border border-blue-200 shadow-sm p-6 mb-8 space-y-4">
             <h2 className="font-semibold text-gray-700">{editId ? "Edit Question" : "New Question"}</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {(["question_text", "model_answer", "rubric"] as const).map((f) => (
@@ -179,7 +179,7 @@ export default function QuestionsPage() {
                   <label className="text-xs font-medium text-gray-500 uppercase">{f.replace(/_/g, " ")}</label>
                   <textarea rows={3} value={(form as any)[f]}
                     onChange={(e) => setForm({ ...form, [f]: e.target.value })}
-                    className="w-full mt-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                    className="w-full mt-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
               ))}
               <div>
@@ -232,7 +232,7 @@ export default function QuestionsPage() {
             )}
             <div className="flex gap-3">
               <button onClick={save} disabled={loading}
-                className="bg-indigo-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-60">
+                className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-60">
                 {loading ? "Saving…" : editId ? "Update" : "Create"}
               </button>
               <button onClick={() => setShowForm(false)}
@@ -242,7 +242,7 @@ export default function QuestionsPage() {
         )}
 
         {activeQuestion && (
-          <div className="bg-white rounded-xl border border-indigo-200 shadow-sm p-6 mb-8">
+          <div className="bg-white rounded-xl border border-blue-200 shadow-sm p-6 mb-8">
             <div className="flex items-start justify-between gap-4 mb-5">
               <div>
                 <h2 className="font-semibold text-gray-800">Assign Students</h2>
@@ -268,7 +268,7 @@ export default function QuestionsPage() {
                     key={student.id}
                     className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-sm cursor-pointer transition-colors ${
                       selectedStudentIds.includes(student.id)
-                        ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                        ? "border-blue-300 bg-blue-50 text-blue-800"
                         : "border-gray-200 hover:border-gray-300 text-gray-700"
                     }`}
                   >
@@ -276,7 +276,7 @@ export default function QuestionsPage() {
                       type="checkbox"
                       checked={selectedStudentIds.includes(student.id)}
                       onChange={() => toggleStudent(student.id)}
-                      className="accent-indigo-600"
+                      className="accent-blue-600"
                     />
                     <span className="truncate">{student.username}</span>
                   </label>
@@ -290,7 +290,7 @@ export default function QuestionsPage() {
               <button
                 onClick={saveVisibility}
                 disabled={assigning}
-                className="inline-flex items-center gap-2 bg-indigo-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-60"
+                className="inline-flex items-center gap-2 bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-60"
               >
                 <Check size={16} /> {assigning ? "Saving…" : "Save Assignments"}
               </button>
@@ -319,7 +319,7 @@ export default function QuestionsPage() {
                   <td className="px-4 py-3 max-w-xs align-top">
                     <div className="truncate"><MathText text={q.question_text} /></div>
                     {q.assets && q.assets.length > 0 && (
-                      <span className="mt-1 inline-block text-xs text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
+                      <span className="mt-1 inline-block text-xs text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">
                         {q.assets[0].kind === "table" ? "Table attached" : "Figure attached"}
                       </span>
                     )}
@@ -338,7 +338,7 @@ export default function QuestionsPage() {
                         className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">
                         <Users size={14} /> Assign Students
                       </button>
-                      <button onClick={() => startEdit(q)} className="text-indigo-500 hover:text-indigo-700" aria-label="Edit question"><Pencil size={15} /></button>
+                      <button onClick={() => startEdit(q)} className="text-blue-500 hover:text-blue-700" aria-label="Edit question"><Pencil size={15} /></button>
                       <button onClick={() => del(q.id)} className="text-red-400 hover:text-red-600" aria-label="Delete question"><Trash2 size={15} /></button>
                     </div>
                   </td>

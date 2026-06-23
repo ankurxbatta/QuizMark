@@ -40,7 +40,7 @@ function ProgressBar({ pct, label }: { pct: number; label: string }) {
       </div>
       <div className="w-full bg-gray-100 rounded-full h-2">
         <div
-          className="bg-indigo-500 h-2 rounded-full transition-all duration-700"
+          className="bg-blue-500 h-2 rounded-full transition-all duration-700"
           style={{ width: `${Math.min(pct, 100)}%` }}
         />
       </div>
@@ -224,7 +224,7 @@ export default function GeneratePage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-8 py-4 shadow-sm">
-        <h1 className="text-xl font-bold text-indigo-700 flex items-center gap-2">
+        <h1 className="text-xl font-bold text-blue-700 flex items-center gap-2">
           <Library size={20} /> Add Book to Library
         </h1>
         <p className="text-xs text-gray-400 mt-0.5">
@@ -243,7 +243,7 @@ export default function GeneratePage() {
             } ${
               file
                 ? "border-red-400 bg-red-50"
-                : "border-gray-300 hover:border-indigo-300 hover:bg-indigo-50/30"
+                : "border-gray-300 hover:border-blue-300 hover:bg-blue-50/30"
             }`}
           >
             {file ? (
@@ -263,8 +263,8 @@ export default function GeneratePage() {
               </div>
             ) : (
               <div className="flex flex-col items-center gap-3">
-                <div className="w-14 h-14 bg-indigo-50 rounded-full flex items-center justify-center">
-                  <Upload size={24} className="text-indigo-400" />
+                <div className="w-14 h-14 bg-blue-50 rounded-full flex items-center justify-center">
+                  <Upload size={24} className="text-blue-400" />
                 </div>
                 <div>
                   <p className="text-gray-700 font-medium">
@@ -287,7 +287,7 @@ export default function GeneratePage() {
           <button
             onClick={handleUpload}
             disabled={!file || isUploading}
-            className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm"
+            className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm"
           >
             {isUploading ? <><Loader2 size={17} className="animate-spin" /> Uploading...</> : <><BookOpen size={17} /> Add to Library</>}
           </button>
@@ -334,7 +334,7 @@ export default function GeneratePage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-3">
                     {job.status === "processing" || job.status === "queued" ? (
-                      <Loader2 size={22} className="animate-spin text-indigo-500 shrink-0" />
+                      <Loader2 size={22} className="animate-spin text-blue-500 shrink-0" />
                     ) : job.status === "done" ? (
                       <CheckCircle size={22} className="text-green-500 shrink-0" />
                     ) : (
@@ -351,7 +351,7 @@ export default function GeneratePage() {
                     {job.status === "done" && (
                       <button
                         onClick={() => router.push("/library")}
-                        className="text-sm font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-4 py-2 rounded-lg"
+                        className="text-sm font-medium text-blue-600 hover:text-blue-800 bg-blue-50 px-4 py-2 rounded-lg"
                       >
                         View Library <ArrowRight size={16} className="inline ml-1" />
                       </button>
@@ -381,7 +381,7 @@ export default function GeneratePage() {
 
                 {/* Resumed banner */}
                 {job.resumed && job.resumed_from_page != null && job.resumed_from_page > 0 && (
-                  <p className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-2 rounded-lg">
+                  <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 px-3 py-2 rounded-lg">
                     Resuming from page {job.resumed_from_page + 1}.
                   </p>
                 )}

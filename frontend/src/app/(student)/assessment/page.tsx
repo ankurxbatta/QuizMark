@@ -202,7 +202,7 @@ function ResultsView({
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
         <div>
-          <h1 className="text-xl font-bold text-indigo-700">Your Results</h1>
+          <h1 className="text-xl font-bold text-blue-700">Your Results</h1>
           <p className="text-xs text-gray-400 mt-0.5">
             {allMarked
               ? `${results.length} question${results.length !== 1 ? "s" : ""} marked`
@@ -234,7 +234,7 @@ function ResultsView({
 
         {/* Pending banner */}
         {!allMarked && (
-          <div className="flex items-center gap-3 bg-indigo-50 border border-indigo-200 rounded-xl px-5 py-4 text-sm text-indigo-700">
+          <div className="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-5 py-4 text-sm text-blue-700">
             <Loader2 size={16} className="animate-spin shrink-0" />
             AI is marking your answers — this usually takes 5–20 seconds. Results will appear below automatically.
           </div>
@@ -261,7 +261,7 @@ function ResultsView({
                 className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-gray-50 transition-colors"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <span className="text-xs font-bold text-indigo-500 uppercase shrink-0">
+                  <span className="text-xs font-bold text-blue-500 uppercase shrink-0">
                     Q{i + 1}
                   </span>
                   <MathText
@@ -329,7 +329,7 @@ function ResultsView({
                         </div>
                       )}
                       {result.override_mark !== null && result.override_mark !== undefined && (
-                        <div className="text-xs text-indigo-600 bg-indigo-50 rounded-lg px-3 py-2">
+                        <div className="text-xs text-blue-600 bg-blue-50 rounded-lg px-3 py-2">
                           This mark was reviewed and updated by your instructor.
                         </div>
                       )}
@@ -428,7 +428,7 @@ export default function AssessmentPage() {
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
         <div>
-          <h1 className="text-xl font-bold text-indigo-700">Assessment</h1>
+          <h1 className="text-xl font-bold text-blue-700">Assessment</h1>
           <p className="text-xs text-gray-400 mt-0.5">
             {questions.length} question{questions.length !== 1 ? "s" : ""}
           </p>
@@ -457,7 +457,7 @@ export default function AssessmentPage() {
             <div key={q.id} className="bg-white rounded-xl border shadow-sm p-6 space-y-3">
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-indigo-500 uppercase">Q{i + 1}</span>
+                  <span className="text-xs font-bold text-blue-500 uppercase">Q{i + 1}</span>
                   {q.topic_tag && (
                     <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
                       {q.topic_tag}
@@ -496,7 +496,7 @@ export default function AssessmentPage() {
                             key={letter}
                             className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
                               answers[q.id] === letter
-                                ? "border-indigo-400 bg-indigo-50"
+                                ? "border-blue-400 bg-blue-50"
                                 : "border-gray-200 hover:border-gray-300"
                             }`}
                           >
@@ -507,7 +507,7 @@ export default function AssessmentPage() {
                               checked={answers[q.id] === letter}
                               onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
                               required
-                              className="mt-0.5 accent-indigo-600"
+                              className="mt-0.5 accent-blue-600"
                             />
                             <span className="text-sm text-gray-700">
                               <span className="font-semibold">{letter}.</span>{" "}
@@ -527,7 +527,7 @@ export default function AssessmentPage() {
                           value={answers[q.id] || ""}
                           onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
                           required
-                          className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                         />
                       </>
                     )}
@@ -542,7 +542,7 @@ export default function AssessmentPage() {
                         key={opt}
                         className={`flex items-center gap-2 flex-1 justify-center py-3 rounded-lg border cursor-pointer transition-colors ${
                           answers[q.id] === opt
-                            ? "border-indigo-400 bg-indigo-50 text-indigo-700 font-semibold"
+                            ? "border-blue-400 bg-blue-50 text-blue-700 font-semibold"
                             : "border-gray-200 hover:border-gray-300 text-gray-700"
                         }`}
                       >
@@ -569,7 +569,7 @@ export default function AssessmentPage() {
                     value={answers[q.id] || ""}
                     onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
                     required
-                    className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
                 </div>
               )}
@@ -584,7 +584,7 @@ export default function AssessmentPage() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors"
               >
                 {submitting ? "Submitting…" : "Submit Assessment"}
               </button>

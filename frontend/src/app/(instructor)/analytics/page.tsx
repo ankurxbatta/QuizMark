@@ -129,12 +129,12 @@ export default function AnalyticsPage() {
     <div className="bg-gray-50">
       <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
         <div>
-          <h1 className="text-xl font-bold text-indigo-700">Analytics</h1>
+          <h1 className="text-xl font-bold text-blue-700">Analytics</h1>
           <p className="text-xs text-gray-400 mt-0.5">Hybrid SLM + RAG + LLM marking performance</p>
         </div>
         <button
           onClick={load}
-          className="flex items-center gap-2 text-sm text-gray-500 hover:text-indigo-600 border rounded-lg px-3 py-1.5 hover:border-indigo-300 transition-colors"
+          className="flex items-center gap-2 text-sm text-gray-500 hover:text-blue-600 border rounded-lg px-3 py-1.5 hover:border-blue-300 transition-colors"
         >
           <RefreshCw size={14} /> Refresh
         </button>
@@ -149,7 +149,7 @@ export default function AnalyticsPage() {
           {pipeline && (
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               {[
-                { label: "Total marked", value: pipeline.total_marked, icon: BarChart2, color: "text-indigo-600" },
+                { label: "Total marked", value: pipeline.total_marked, icon: BarChart2, color: "text-blue-600" },
                 { label: "Avg confidence", value: `${(pipeline.overall_avg_confidence * 100).toFixed(1)}%`, icon: TrendingUp, color: "text-green-600" },
                 { label: "Flagged rate", value: `${pipeline.flagged_rate}%`, icon: AlertTriangle, color: "text-amber-600" },
                 { label: "Override rate", value: `${pipeline.override_rate}%`, icon: Zap, color: "text-blue-600" },
