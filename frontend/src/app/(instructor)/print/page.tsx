@@ -51,7 +51,7 @@ export default function PrintPage() {
       const params = new URLSearchParams(window.location.search);
       const withAns = params.get("answers") === "1";
       setAnswers(withAns);
-      const { data: all } = await api.get<Question[]>("/questions/?limit=500");
+      const { data: all } = await api.get<Question[]>("/questions/?limit=200");
       const byId = new Map(all.map((q) => [q.id, q]));
       const quizId = params.get("quiz");
       let qs: Question[];
@@ -65,7 +65,8 @@ export default function PrintPage() {
       }
       setQuestions(qs);
     } catch (e: any) {
-      setErr(e?.response?.data?.detail || "Failed to load questions.");
+      const d = e?.response?.data?.detail;
+      setErr(typeof d === "string" ? d : "Failed to load questions.");
     } finally { setLoading(false); }
   }, []);
 
