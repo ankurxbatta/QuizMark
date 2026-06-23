@@ -54,17 +54,27 @@ Respond with ONLY the image-generation prompt text (under 700 characters)."""
 
 # ── Markdown table → HTML (deterministic) ───────────────────────────────────────
 
-def markdown_table_to_html(md: str) -> str:
+# Placeholder shown for a blank body cell — a value the exercise asks the
+# student to find (e.g. a missing probability), so it reads as intentional
+# rather than as a broken empty cell.
+_BLANK_CELL = "?"
+
+
+def render_table_html(md: str) -> tuple[str, int]:
     """Convert a markdown/pipe table to clean minimal HTML.
 
     First parsed row becomes <th>. Cell content is HTML-escaped. Tolerant of the
     loosely-formatted tables in this book: rows may be plain whitespace-separated
     lines without pipes. If no grid can be parsed, the raw text is wrapped in
     <pre> rather than dropped.
+
+    Returns (html, n_blanks) where n_blanks counts the body cells rendered as the
+    "?" placeholder — so callers can flag/annotate a table that has gaps rather
+    than letting a missing value read as a silently incomplete table.
     """
     text = (md or "").strip()
     if not text:
-        return ""
+        return "", 0
 
     rows: list[list[str]] = []
     for line in text.splitlines():
@@ -88,19 +98,24 @@ def markdown_table_to_html(md: str) -> str:
     # Need at least a header + one data row, with some multi-column structure.
     usable = [r for r in rows if r]
     if len(usable) < 2 or max((len(r) for r in usable), default=0) < 2:
-        return f"<pre>{html.escape(text)}</pre>"
+        return f"<pre>{html.escape(text)}</pre>", 0
 
     ncols = max(len(r) for r in usable)
+    n_blanks = 0
 
     def _cells(cells: list[str], tag: str) -> str:
+        nonlocal n_blanks
         padded = list(cells) + [""] * (ncols - len(cells))
-        # A blank body cell is usually a value the exercise asks the student to
-        # find (e.g. a missing probability) — show "?" so it reads as intentional
-        # rather than as a broken empty cell.
-        placeholder = "?" if tag == "td" else ""
-        return "".join(
-            f"<{tag}>{html.escape(c) if c else placeholder}</{tag}>" for c in padded
-        )
+        out: list[str] = []
+        for c in padded:
+            if c:
+                out.append(f"<{tag}>{html.escape(c)}</{tag}>")
+            elif tag == "td":
+                n_blanks += 1
+                out.append(f"<{tag}>{_BLANK_CELL}</{tag}>")
+            else:
+                out.append(f"<{tag}></{tag}>")
+        return "".join(out)
 
     head = usable[0]
     body = usable[1:]
@@ -108,18 +123,39 @@ def markdown_table_to_html(md: str) -> str:
     for r in body:
         parts.extend(["<tr>", _cells(r, "td"), "</tr>"])
     parts.extend(["</tbody>", "</table>"])
-    return "".join(parts)
+    return "".join(parts), n_blanks
+
+
+def markdown_table_to_html(md: str) -> str:
+    """Convert a markdown/pipe table to clean minimal HTML (html only)."""
+    return render_table_html(md)[0]
 
 
 # ── Asset builders ──────────────────────────────────────────────────────────────
 
 async def build_table_asset(table_markdown: str, caption: str = "") -> dict:
-    """Build a deterministic table asset from stored markdown."""
+    """Build a deterministic table asset from stored markdown.
+
+    Source textbook tables are sometimes "find the missing value" exercises with
+    a blank cell (e.g. a probability distribution where one P(x) is left out so it
+    can be computed from the constraint that the values sum to 1). Such a cell is
+    rendered as "?". When that happens we append a one-line note to the caption so
+    the gap reads as a deliberate prompt to the student, not an incomplete table.
+    """
+    table_html, n_blanks = render_table_html(table_markdown)
+    caption = caption or ""
+    if n_blanks:
+        note = (
+            'Find the value(s) shown as "?".'
+            if "?" not in caption
+            else ""
+        )
+        caption = (f"{caption} — {note}".strip(" —") if note else caption)
     return {
         "kind": "table",
         "caption": caption,
         "alt_text": caption or "Data table",
-        "table_html": markdown_table_to_html(table_markdown),
+        "table_html": table_html,
         "image_id": None,
         "source_page": None,
     }

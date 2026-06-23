@@ -302,6 +302,7 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
 - Model answer: "True" or "False" + 1–2 sentence justification.
 
 ━━━ ALL TYPES ━━━
+- If you reproduce a data table in a question, every cell must hold its correct value. Only ever leave a cell blank if THIS question explicitly asks the student to compute that exact value — and then the stem must name it. Never emit a silently incomplete table.
 - Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - max_marks: L1=2, L2=2, L3=4, L4=6, L5=8
 - difficulty: easy (L1–L2) | medium (L3–L4) | hard (L5)
@@ -515,6 +516,7 @@ Good examples:
   • "True or False: Increasing sample size while holding all else constant produces a wider confidence interval."
 
 ━━━ ALL TYPES ━━━
+- If you reproduce a data table in a question, every cell must hold its correct value. Only ever leave a cell blank if THIS question explicitly asks the student to compute that exact value — and then the stem must name it. Never emit a silently incomplete table.
 - Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - Spread questions across different concepts in the source.
 - max_marks: 2–8 depending on complexity (L1=2, L2=2, L3=4, L4=6, L5=8).

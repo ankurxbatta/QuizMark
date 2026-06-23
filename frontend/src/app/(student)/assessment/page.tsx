@@ -264,9 +264,10 @@ function ResultsView({
                   <span className="text-xs font-bold text-indigo-500 uppercase shrink-0">
                     Q{i + 1}
                   </span>
-                  <p className="text-sm text-gray-700 truncate">
-                    {result?.question_text ?? question?.question_text ?? "—"}
-                  </p>
+                  <MathText
+                    text={result?.question_text ?? question?.question_text ?? "—"}
+                    className="text-sm text-gray-700 truncate block"
+                  />
                 </div>
                 <div className="flex items-center gap-3 shrink-0 ml-4">
                   {result?.is_flagged && (
