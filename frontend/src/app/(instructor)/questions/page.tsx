@@ -69,6 +69,7 @@ export default function QuestionsPage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [form, setForm] = useState(EMPTY);
   const [editId, setEditId] = useState<string | null>(null);
+  const [editAssets, setEditAssets] = useState<QuestionAsset[] | undefined>(undefined);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [activeQuestion, setActiveQuestion] = useState<Question | null>(null);
@@ -94,7 +95,7 @@ export default function QuestionsPage() {
       } else {
         await api.post("/questions/", form);
       }
-      setForm(EMPTY); setEditId(null); setShowForm(false);
+      setForm(EMPTY); setEditId(null); setEditAssets(undefined); setShowForm(false);
       load();
     } finally { setLoading(false); }
   };
@@ -107,7 +108,7 @@ export default function QuestionsPage() {
 
   const startEdit = (q: Question) => {
     const { id, assigned_student_ids, assets, ...rest } = q;
-    setForm(rest); setEditId(id); setShowForm(true);
+    setForm(rest); setEditId(id); setEditAssets(assets); setShowForm(true);
   };
 
   const openVisibility = async (q: Question) => {
@@ -161,7 +162,7 @@ export default function QuestionsPage() {
           <p className="text-xs text-gray-400 mt-0.5">{students.length} registered student{students.length !== 1 ? "s" : ""}</p>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => { setForm(EMPTY); setEditId(null); setShowForm(true); }}
+          <button onClick={() => { setForm(EMPTY); setEditId(null); setEditAssets(undefined); setShowForm(true); }}
             className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700">
             <Plus size={16} /> Add Question
           </button>
@@ -218,6 +219,17 @@ export default function QuestionsPage() {
                 />
               </div>
             </div>
+            {editAssets && editAssets.length > 0 && (
+              <div className="border-t pt-4">
+                <label className="text-xs font-medium text-gray-500 uppercase">
+                  Attached {editAssets[0].kind === "table" ? "Table" : "Figure"} (read-only)
+                </label>
+                <p className="text-xs text-gray-400 mt-0.5 mb-2">
+                  This data is shown to students with the question. Edit the question text above to reference it.
+                </p>
+                <QuestionAssets assets={editAssets} />
+              </div>
+            )}
             <div className="flex gap-3">
               <button onClick={save} disabled={loading}
                 className="bg-indigo-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-60">

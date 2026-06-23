@@ -1067,6 +1067,11 @@ def _stringify_llm_value(value) -> str:
 
 _MCQ_LETTERS = ("A", "B", "C", "D")
 _MCQ_OPTION_MARKER = re.compile(r"^\s*(?:option\s*)?([A-D])[\).:\-]\s+", re.IGNORECASE | re.MULTILINE)
+# Inline-capable marker: matches "A." / "A)" anywhere as long as the letter is not
+# part of a word/number (so "grade A." inside prose only matches when it actually
+# starts an A→B→C run). Used to find the real options even when the model emits
+# them inline on the stem line.
+_MCQ_INLINE_MARKER = re.compile(r"(?<![A-Za-z0-9])(?:option\s+)?([A-D])[\).:\-]\s+", re.IGNORECASE)
 
 
 def _clean_option_text(value) -> str:
@@ -1075,26 +1080,66 @@ def _clean_option_text(value) -> str:
     return text
 
 
+def _first_option_run(markers: list[tuple[str, int, int]]) -> list[tuple[str, int, int]] | None:
+    """Return the first contiguous A→B→C(→D) marker run.
+
+    The model sometimes appends a SECOND option block to ``question_text`` — an
+    answer key, or the model answer re-listed with the correct letter annotated
+    ("B. … is the correct expression"). Both start by repeating "A"/"B", which
+    breaks the strictly-increasing sequence, so taking only the first ordered run
+    keeps the genuine options and discards the leaked answer block. Requiring at
+    least A, B and C in order guards against a stray "A." in prose.
+    """
+    for i, (letter, _s, _e) in enumerate(markers):
+        if letter != "A":
+            continue
+        run = [markers[i]]
+        for nxt in markers[i + 1:]:
+            if len(run) < 4 and nxt[0] == _MCQ_LETTERS[len(run)]:
+                run.append(nxt)
+            else:
+                break
+        if len(run) >= 3:
+            return run
+    return None
+
+
 def _split_mcq_text(value) -> tuple[str, dict[str, str]]:
     """
     Split an MCQ string into stem and A-D options.
-    Handles options on separate lines, with a fallback for "Options: A..." text.
+    Prefers the first inline A→B→C(→D) run (so options the model wrote inline on
+    the stem line are found and any trailing answer-key block is ignored), with a
+    fallback for "Options: A..." text.
     """
     text = _stringify_llm_value(value)
     if not text:
         return "", {}
 
+    markers = [(m.group(1).upper(), m.start(), m.end()) for m in _MCQ_INLINE_MARKER.finditer(text)]
+    run = _first_option_run(markers)
+    if run:
+        stem = re.sub(r"\s*(?:options|choices|answers)\s*[:\-]?\s*$", "", text[:run[0][1]], flags=re.IGNORECASE)
+        stem = _normalise_text(stem)
+        # The genuine options end where the marker after the run begins (the start
+        # of any trailing duplicate/answer block), or at end of text.
+        last_idx = markers.index(run[-1])
+        run_end = markers[last_idx + 1][1] if last_idx + 1 < len(markers) else len(text)
+        options: dict[str, str] = {}
+        for idx, (letter, _s, mend) in enumerate(run):
+            end = run[idx + 1][1] if idx + 1 < len(run) else run_end
+            options[letter] = _clean_option_text(text[mend:end])
+        return stem, options
+
+    # Fallback: "Options: A) …" label form (no clean inline run found).
+    option_label = re.search(r"\b(?:options|choices|answers)\s*[:\-]\s*", text, re.IGNORECASE)
+    matches: list = []
     scan_offset = 0
-    scan_text = text
-    matches = list(_MCQ_OPTION_MARKER.finditer(scan_text))
-    option_label = None
+    if option_label:
+        scan_offset = option_label.end()
+        matches = list(_MCQ_INLINE_MARKER.finditer(text[scan_offset:]))
     if not matches:
-        option_label = re.search(r"\b(?:options|choices|answers)\s*[:\-]\s*", text, re.IGNORECASE)
-        if option_label:
-            scan_offset = option_label.end()
-            scan_text = text[scan_offset:]
-            inline_pattern = re.compile(r"(?<![A-Za-z0-9])(?:option\s*)?([A-D])[\).:\-]\s+", re.IGNORECASE)
-            matches = list(inline_pattern.finditer(scan_text))
+        matches = list(_MCQ_OPTION_MARKER.finditer(text))
+        scan_offset = 0
     if not matches:
         return _normalise_text(text), {}
 
@@ -1103,13 +1148,13 @@ def _split_mcq_text(value) -> tuple[str, dict[str, str]]:
     stem = re.sub(r"(?:options|choices|answers)\s*[:\-]?\s*$", "", stem, flags=re.IGNORECASE)
     stem = _normalise_text(stem)
 
-    options: dict[str, str] = {}
+    options = {}
     for i, match in enumerate(matches):
         letter = match.group(1).upper()
         start = scan_offset + match.end()
         end = scan_offset + matches[i + 1].start() if i + 1 < len(matches) else len(text)
         option_text = _clean_option_text(text[start:end])
-        if option_text and letter in _MCQ_LETTERS:
+        if option_text and letter in _MCQ_LETTERS and letter not in options:
             options[letter] = option_text
     return stem, options
 
