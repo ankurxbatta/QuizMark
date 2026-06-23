@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "@/lib/api";
 import { Flag, CheckCircle } from "lucide-react";
+import MathText from "@/components/MathText";
 
 interface Submission {
   id: string;
@@ -115,7 +116,7 @@ export default function MarkingPage() {
               <div className="bg-gray-50 rounded-lg p-4 space-y-3">
                 <div>
                   <p className="text-xs font-medium text-gray-500 mb-1">Question</p>
-                  <p className="text-sm text-gray-700">{s.question_text || "—"}</p>
+                  <MathText className="text-sm text-gray-700" text={s.question_text || "—"} />
                   <div className="mt-2 text-xs text-gray-500 flex flex-wrap gap-3">
                     {s.question_type && (
                       <span className="capitalize">{s.question_type.replace("_", " ")}</span>
@@ -125,7 +126,7 @@ export default function MarkingPage() {
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-500 mb-1">Student Answer</p>
-                  <p className="text-sm text-gray-700">{s.answer_text}</p>
+                  <MathText className="text-sm text-gray-700" text={s.answer_text} />
                 </div>
               </div>
 
@@ -136,7 +137,7 @@ export default function MarkingPage() {
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-500 mb-1">Auto Feedback</p>
-                  <p className="text-gray-600">{s.auto_feedback || "—"}</p>
+                  <MathText className="text-gray-600" text={s.auto_feedback || "—"} />
                 </div>
               </div>
 

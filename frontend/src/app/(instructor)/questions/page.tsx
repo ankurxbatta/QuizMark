@@ -4,6 +4,7 @@ import api, { API_URL } from "@/lib/api";
 import Cookies from "js-cookie";
 import Select from "@/components/Select";
 import MathText from "@/components/MathText";
+import TableWithMath from "@/components/TableWithMath";
 import { Check, Pencil, Plus, Trash2, Users, X } from "lucide-react";
 
 interface QuestionAsset {
@@ -35,9 +36,9 @@ function QuestionAssets({ assets }: { assets?: QuestionAsset[] }) {
       {assets.map((asset, idx) => (
         <div key={idx} className="space-y-1">
           {asset.table_html ? (
-            <div
+            <TableWithMath
+              html={asset.table_html}
               className="overflow-x-auto border rounded-lg [&_table]:w-full [&_table]:text-xs [&_th]:border [&_th]:border-gray-200 [&_th]:bg-gray-50 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-gray-200 [&_td]:px-2 [&_td]:py-1"
-              dangerouslySetInnerHTML={{ __html: asset.table_html }}
             />
           ) : asset.image_id ? (
             <img
@@ -246,7 +247,10 @@ export default function QuestionsPage() {
             <div className="flex items-start justify-between gap-4 mb-5">
               <div>
                 <h2 className="font-semibold text-gray-800">Assign Students</h2>
-                <p className="text-sm text-gray-500 mt-1 line-clamp-2">{activeQuestion.question_text}</p>
+                <MathText
+                  text={activeQuestion.question_text}
+                  className="text-sm text-gray-500 mt-1 line-clamp-2 block"
+                />
               </div>
               <button
                 onClick={() => setActiveQuestion(null)}

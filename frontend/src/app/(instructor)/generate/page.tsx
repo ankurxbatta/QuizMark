@@ -9,9 +9,13 @@ import {
   BookOpen, Library, ArrowRight, ServerCrash
 } from "lucide-react";
 
-// SSE fallback polling: every 5s, give up after 10 minutes
+// SSE fallback polling: poll every 5s. Instead of a fixed total-time cap (which
+// falsely marked long-but-healthy ingests as "Failed"), we only declare a job
+// stalled when it makes NO forward progress (heartbeat + pages stop advancing)
+// for FALLBACK_STALE_MS. A long ingest that keeps progressing never fails.
 const FALLBACK_POLL_MS = 5_000;
-const FALLBACK_POLL_MAX_MS = 10 * 60 * 1000;
+const FALLBACK_STALE_MS = 12 * 60 * 1000;          // no progress this long → stalled
+const FALLBACK_POLL_ABS_MAX_MS = 6 * 60 * 60 * 1000; // safety net: stop polling after 6h (does not mark failed)
 
 interface JobStatus {
   job_id: string;
@@ -25,6 +29,7 @@ interface JobStatus {
   current_chapter_title: string | null;
   progress_message: string | null;
   progress_percent?: number;
+  last_heartbeat_at?: string | null;
   resumed?: boolean;
   resumed_from_page?: number | null;
   already_ingested?: boolean;
@@ -97,22 +102,38 @@ export default function GeneratePage() {
     // every 5s until the job finishes, 404s, or the time cap is hit.
     const startPolling = (jobId: string) => {
       const startedAt = Date.now();
+      let lastProgressAt = Date.now();
+      let lastSig = "";
       const timer = setInterval(async () => {
-        if (Date.now() - startedAt > FALLBACK_POLL_MAX_MS) {
+        // Absolute safety net so the interval can't run forever — does NOT mark failed.
+        if (Date.now() - startedAt > FALLBACK_POLL_ABS_MAX_MS) {
           clearInterval(timer);
-          failJob(jobId, "Lost connection to job updates. Check the Library to see whether the book was added.");
           return;
         }
         try {
           const { data } = await api.get(`/questions/jobs/${jobId}`);
           applyUpdate(data);
-          if (data.status === "done" || data.status === "failed") clearInterval(timer);
+          if (data.status === "done" || data.status === "failed") {
+            clearInterval(timer);
+            return;
+          }
+          // Forward-progress signature: as long as the heartbeat, pages, chapters
+          // or status keep advancing, the job is alive — keep polling indefinitely.
+          const sig = `${data.last_heartbeat_at ?? ""}|${data.pages_done ?? ""}|${data.chapters_done ?? ""}|${data.status}`;
+          if (sig !== lastSig) {
+            lastSig = sig;
+            lastProgressAt = Date.now();
+          } else if (Date.now() - lastProgressAt > FALLBACK_STALE_MS) {
+            // Genuinely stalled: no progress for FALLBACK_STALE_MS.
+            clearInterval(timer);
+            failJob(jobId, "No progress for several minutes — the job may have stalled. Check the Library to see whether the book was added.");
+          }
         } catch (err: any) {
           if (err?.response?.status === 404) {
             clearInterval(timer);
             failJob(jobId, "Job no longer exists on the server.");
           }
-          // Other errors (network, 5xx): keep polling until the cap
+          // Other errors (network, 5xx): transient — keep polling, do not fail.
         }
       }, FALLBACK_POLL_MS);
       pollTimers.push(timer);

@@ -13,6 +13,7 @@ import {
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
 import MathText from "@/components/MathText";
+import TableWithMath from "@/components/TableWithMath";
 import { Button, PageHeader, Card, EmptyState, Badge } from "@/components/ui";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -76,9 +77,9 @@ function QuestionAssets({ assets }: { assets?: QuestionAsset[] }) {
       {assets.map((asset, idx) => (
         <div key={idx} className="space-y-1.5">
           {asset.table_html ? (
-            <div
+            <TableWithMath
+              html={asset.table_html}
               className="overflow-x-auto border border-slate-200 rounded-lg [&_table]:w-full [&_table]:text-sm [&_th]:border [&_th]:border-slate-200 [&_th]:bg-slate-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-slate-200 [&_td]:px-3 [&_td]:py-2"
-              dangerouslySetInnerHTML={{ __html: asset.table_html }}
             />
           ) : asset.image_id ? (
             <img
@@ -310,9 +311,16 @@ function ResultsView({
                   {/* Your answer */}
                   <div>
                     <p className="text-xs font-semibold text-slate-400 uppercase mb-1">Your answer</p>
-                    <p className="text-sm text-slate-700 whitespace-pre-wrap">
-                      {studentAnswer || <span className="italic text-slate-400">No answer recorded</span>}
-                    </p>
+                    {studentAnswer ? (
+                      <MathText
+                        text={studentAnswer}
+                        className="text-sm text-slate-700 whitespace-pre-wrap block"
+                      />
+                    ) : (
+                      <p className="text-sm text-slate-700">
+                        <span className="italic text-slate-400">No answer recorded</span>
+                      </p>
+                    )}
                   </div>
 
                   {/* Mark + feedback */}
