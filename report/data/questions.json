@@ -1,0 +1,37 @@
+[
+  {
+    "difficulty": "easy",
+    "bloom_level": "L1",
+    "chapter_num": 4,
+    "qtype": "short_answer",
+    "book_id": "Test_ch4-5"
+  },
+  {
+    "difficulty": "easy",
+    "bloom_level": "L2",
+    "chapter_num": 4,
+    "qtype": "short_answer",
+    "book_id": "Test_ch4-5"
+  },
+  {
+    "difficulty": "easy",
+    "bloom_level": "L1",
+    "chapter_num": 4,
+    "qtype": "short_answer",
+    "book_id": "Test_ch4-5"
+  },
+  {
+    "difficulty": "easy",
+    "bloom_level": "L1",
+    "chapter_num": 4,
+    "qtype": "short_answer",
+    "book_id": "Test_ch4-5"
+  },
+  {
+    "difficulty": "easy",
+    "bloom_level": "L2",
+    "chapter_num": 4,
+    "qtype": "short_answer",
+    "book_id": "Test_ch4-5"
+  }
+]

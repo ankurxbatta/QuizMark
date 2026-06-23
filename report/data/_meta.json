@@ -1,0 +1,21 @@
+{
+  "book_id": "Test_ch4-5",
+  "db_name": "marking_tools",
+  "expected_chapters": [
+    4,
+    5
+  ],
+  "exported_at": "2026-06-23T09:01:03.426841+00:00",
+  "transport": "pymongo",
+  "counts": {
+    "pdf_chunks": 132,
+    "book_exercises": 38,
+    "questions": 5,
+    "math_index": 286,
+    "table_index": 7,
+    "figure_index": 76
+  },
+  "n_chunks_exported": 132,
+  "n_exercises_exported": 38,
+  "n_questions_exported": 5
+}
