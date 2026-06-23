@@ -194,3 +194,13 @@ figures and tables in its context with no added LLM or embedding calls.
 | Variable | Default | Description |
 |---|---|---|
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated list of allowed frontend origins. Add your production domain here. |
+
+---
+
+## Frontend Dependencies
+
+The frontend renders math in question and answer text with **KaTeX**. The
+`katex` package (and `@types/katex`) are listed in `frontend/package.json` and
+installed during the Docker build — no `.env` configuration needed. Generated
+question text is delimited as `$...$` LaTeX by the backend's math-formatting
+pass; existing questions can be backfilled via `POST /admin/questions/latexify`.

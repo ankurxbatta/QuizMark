@@ -138,6 +138,76 @@ Delete a question.
 
 ---
 
+## Quizzes
+
+A quiz is a titled bundle of questions and the **unit of assignment**: an
+instructor groups questions into a quiz and assigns the quiz to students. A
+student's assessment is the union of all questions across the quizzes assigned
+to them. Legacy per-question assignment still works — a question is answerable
+if it is in an assigned quiz **or** assigned directly — so quizzes are fully
+backward-compatible with question banks built before they existed.
+
+### `GET /quizzes/mine`
+Student endpoint. Returns the quizzes assigned to the calling student, each with
+its questions populated in the quiz's stored order (answer keys omitted).
+```json
+[
+  {
+    "id": "...",
+    "title": "Probability — Week 3",
+    "description": "Conditional probability practice",
+    "questions": [ { "id": "...", "question_text": "...", "question_type": "mcq", "max_marks": 1, "assets": [] } ]
+  }
+]
+```
+
+### `POST /quizzes`
+Create a quiz. Instructor only. `question_ids` are de-duplicated, order-preserved,
+and validated (unknown ids → `400`).
+```json
+{ "title": "Probability — Week 3", "description": "optional", "question_ids": ["...", "..."] }
+```
+Returns the created quiz (`201`):
+```json
+{
+  "id": "...",
+  "title": "Probability — Week 3",
+  "description": "optional",
+  "question_ids": ["...", "..."],
+  "question_count": 2,
+  "assigned_student_ids": [],
+  "created_at": "2026-06-22T10:00:00Z"
+}
+```
+
+### `GET /quizzes`
+List all quizzes (newest first). Instructor only.
+
+### `GET /quizzes/{quiz_id}`
+Single quiz detail. Instructor only.
+
+### `PUT /quizzes/{quiz_id}`
+Update `title`, `description`, and/or `question_ids` (any subset). Instructor
+only. Re-supplying `question_ids` replaces the set (re-validated and re-ordered).
+
+### `DELETE /quizzes/{quiz_id}`
+Delete a quiz (`204`). Instructor only.
+
+### `GET /quizzes/{quiz_id}/assignees`
+List the student ids the quiz is assigned to. Instructor only.
+```json
+{ "quiz_id": "...", "student_ids": ["...", "..."] }
+```
+
+### `PUT /quizzes/{quiz_id}/assignees`
+Replace the quiz's assignee list. Instructor only. Each id must be an existing
+student account (unknown ids → `400`).
+```json
+{ "student_ids": ["...", "..."] }
+```
+
+---
+
 ## Submissions and Marking
 
 ### `POST /submissions`
@@ -253,6 +323,13 @@ Build (or rebuild) specialist indexes for every ingested book.
 
 ### `GET /admin/index/status`
 Per-book build status and document counts for the specialist indexes.
+
+### `POST /admin/questions/latexify`
+Backfill: wrap bare math in already-stored questions as `$`-delimited LaTeX so
+the frontend can render it with KaTeX. Formats questions generated before the
+math-rendering pass existed. Optionally scope to one book with `?book_id=…`;
+omit to backfill every stored question. Non-fatal — questions that fail
+formatting are left untouched.
 
 ---
 

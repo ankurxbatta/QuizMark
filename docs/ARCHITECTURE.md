@@ -32,6 +32,22 @@ routing, orchestration rounds, verification), see
 
 ---
 
+## Frontend
+
+The Next.js 15 app is split into two route groups: `(instructor)` (dashboard,
+library, generate, questions, quizzes, marking, analytics, export) and
+`(student)` (assessment). It uses **Plus Jakarta Sans** via `next/font` and a
+professional design system — a blue primary with a green call-to-action accent,
+defined in `tailwind.config.ts`. Shared UI primitives live in
+`components/ui.tsx`; math in question and answer text is rendered with KaTeX
+through `components/MathText.tsx`.
+
+Instructors get a **Quizzes** nav entry and page for bundling questions into
+named quizzes and assigning them to students. The question edit form shows a
+read-only preview of any data table or figure attached to a question.
+
+---
+
 ## Container Map
 
 | Container | Port | Role |
@@ -168,6 +184,12 @@ Instructor requests generation
 
   Cross-chapter dedup → bulk insert into MongoDB questions collection
 
+  Generated text emits inline LaTeX ($...$); a post-generation latexify pass
+  (math_format.py) wraps any remaining bare math so the frontend can render it
+  with KaTeX. The frontend renders question/answer text through a MathText
+  component, and an admin backfill endpoint can latexify questions created
+  before this pass existed.
+
   MCQ and True/False questions are stored with a structured `correct_answer`
   key (the letter A–D, or "True"/"False") extracted at generation time.
   If fewer questions than requested survive dedup/validation, the job's done
@@ -238,11 +260,13 @@ Both OpenAI and Anthropic produce 768-dim embeddings via `dimensions=768`, keepi
 | `users` | Instructor and student accounts |
 | `pdf_chunks` | Textbook content with 768-dim embeddings |
 | `questions` | Generated question bank (incl. `correct_answer` key for MCQ/TF) |
+| `quizzes` | Named bundles of questions; the unit of assignment to students (`question_ids` order-preserved, `assigned_student_ids`) |
 | `submissions` | Student answers and marking results (unique per student+question) |
 | `ingest_jobs` | Job progress and status |
 | `ingest_checkpoints` | Resumable ingestion state (keyed by PDF SHA-256 hash) |
 | `math_index` / `figure_index` / `table_index` | Specialist RAG indexes |
 | `index_build_jobs` | Specialist index build status + progress |
+| `latex_cache` | Cached LaTeX conversions for the math-formatting pass (keyed by content hash) |
 | `audit_logs` | Login and action history |
 
 All vector indexes use cosine similarity (768 dimensions). Collections and

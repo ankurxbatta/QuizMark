@@ -84,7 +84,9 @@ figures/tables — `_specialist_context`).
 `_normalise_mcq` rebuilds MCQs as stem + A–D options, extracts the
 `correct_answer` letter, and tags any placeholder-filled options with
 `_generic_distractors` for Round 4 to replace. True/False answers get
-`correct_answer` parsed from the model answer.
+`correct_answer` parsed from the model answer. `_split_mcq_text` takes only the
+**first contiguous A→B→C(→D) marker run**, so an answer-key block embedded after
+the options cannot leak its letters into the parsed options.
 
 ---
 

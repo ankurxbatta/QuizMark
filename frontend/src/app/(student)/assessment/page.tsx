@@ -1,18 +1,19 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import api, { API_URL } from "@/lib/api";
 import {
   CheckCircle,
-  Clock,
   LogOut,
   Loader2,
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  ClipboardList,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
 import MathText from "@/components/MathText";
+import { Button, PageHeader, Card, EmptyState, Badge } from "@/components/ui";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,21 @@ interface Question {
   topic_tag?: string;
   difficulty?: string;
   assets?: QuestionAsset[];
+}
+
+interface Quiz {
+  id: string;
+  title: string;
+  description?: string | null;
+  questions: Question[];
+}
+
+/** A titled group of questions rendered as one section in the form. */
+interface Section {
+  id: string;
+  title: string;
+  description?: string | null;
+  questions: Question[];
 }
 
 interface SubmissionResult {
@@ -61,18 +77,18 @@ function QuestionAssets({ assets }: { assets?: QuestionAsset[] }) {
         <div key={idx} className="space-y-1.5">
           {asset.table_html ? (
             <div
-              className="overflow-x-auto border rounded-lg [&_table]:w-full [&_table]:text-sm [&_th]:border [&_th]:border-gray-200 [&_th]:bg-gray-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-gray-200 [&_td]:px-3 [&_td]:py-2"
+              className="overflow-x-auto border border-slate-200 rounded-lg [&_table]:w-full [&_table]:text-sm [&_th]:border [&_th]:border-slate-200 [&_th]:bg-slate-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-slate-200 [&_td]:px-3 [&_td]:py-2"
               dangerouslySetInnerHTML={{ __html: asset.table_html }}
             />
           ) : asset.image_id ? (
             <img
               src={`${API_URL}/api/v1/questions/assets/${asset.image_id}?token=${Cookies.get("token") || ""}`}
               alt={asset.alt_text || "Figure"}
-              className="rounded border max-h-80"
+              className="rounded border border-slate-200 max-h-80"
             />
           ) : null}
           {asset.caption && (
-            <p className="text-xs text-gray-400 italic">{asset.caption}</p>
+            <p className="text-xs text-slate-400 italic">{asset.caption}</p>
           )}
         </div>
       ))}
@@ -132,7 +148,7 @@ function cleanFeedback(feedback: string | null): string {
 }
 
 function markColor(mark: number, max: number): string {
-  if (max === 0) return "text-gray-500";
+  if (max === 0) return "text-slate-500";
   const pct = mark / max;
   if (pct >= 0.75) return "text-emerald-600";
   if (pct >= 0.5) return "text-amber-600";
@@ -199,42 +215,39 @@ function ResultsView({
   const questionMap = Object.fromEntries(questions.map((q) => [q.id, q]));
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
-        <div>
-          <h1 className="text-xl font-bold text-blue-700">Your Results</h1>
-          <p className="text-xs text-gray-400 mt-0.5">
-            {allMarked
-              ? `${results.length} question${results.length !== 1 ? "s" : ""} marked`
-              : `Marking ${pendingCount} answer${pendingCount !== 1 ? "s" : ""}…`}
-          </p>
-        </div>
-        <button
-          onClick={onSignOut}
-          className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-red-500 transition-colors"
-        >
-          <LogOut size={15} /> Sign out
-        </button>
-      </header>
+    <div className="min-h-screen bg-slate-50">
+      <PageHeader
+        title="Your Results"
+        subtitle={
+          allMarked
+            ? `${results.length} question${results.length !== 1 ? "s" : ""} marked`
+            : `Marking ${pendingCount} answer${pendingCount !== 1 ? "s" : ""}…`
+        }
+        actions={
+          <Button variant="danger" icon={LogOut} onClick={onSignOut}>
+            Sign out
+          </Button>
+        }
+      />
 
       <main className="max-w-3xl mx-auto px-8 py-10 space-y-6">
         {/* Score card */}
         {allMarked && results.length > 0 && (
-          <div className="bg-white rounded-2xl border shadow-sm p-8 text-center">
-            <p className="text-sm font-medium text-gray-500 mb-1">Total Score</p>
+          <Card className="p-8 text-center">
+            <p className="text-sm font-medium text-slate-500 mb-1">Total Score</p>
             <p className={`text-5xl font-bold mb-1 ${markColor(totalEarned, totalAvailable)}`}>
               {totalEarned % 1 === 0 ? totalEarned : totalEarned.toFixed(1)}
-              <span className="text-2xl text-gray-400 font-normal">
+              <span className="text-2xl text-slate-400 font-normal">
                 /{totalAvailable}
               </span>
             </p>
-            <p className="text-gray-400 text-sm">{pct}%</p>
-          </div>
+            <p className="text-slate-400 text-sm">{pct}%</p>
+          </Card>
         )}
 
         {/* Pending banner */}
         {!allMarked && (
-          <div className="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-5 py-4 text-sm text-blue-700">
+          <div className="flex items-center gap-3 bg-brand-50 border border-brand-200 rounded-xl px-5 py-4 text-sm text-brand-700">
             <Loader2 size={16} className="animate-spin shrink-0" />
             AI is marking your answers — this usually takes 5–20 seconds. Results will appear below automatically.
           </div>
@@ -253,30 +266,30 @@ function ResultsView({
           const studentAnswer = result?.answer_text ?? answers[question?.id ?? ""] ?? "";
 
           return (
-            <div key={sid} className="bg-white rounded-xl border shadow-sm overflow-hidden">
+            <Card key={sid} className="overflow-hidden">
               {/* Header row */}
               <button
                 type="button"
                 onClick={() => setExpanded((e) => ({ ...e, [sid]: !isOpen }))}
-                className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-gray-50 transition-colors"
+                className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-slate-50 transition-colors duration-150"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <span className="text-xs font-bold text-blue-500 uppercase shrink-0">
+                  <span className="text-xs font-bold text-brand-600 uppercase shrink-0">
                     Q{i + 1}
                   </span>
                   <MathText
                     text={result?.question_text ?? question?.question_text ?? "—"}
-                    className="text-sm text-gray-700 truncate block"
+                    className="text-sm text-slate-700 truncate block"
                   />
                 </div>
                 <div className="flex items-center gap-3 shrink-0 ml-4">
                   {result?.is_flagged && (
-                    <span className="flex items-center gap-1 text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
+                    <Badge tone="amber">
                       <AlertTriangle size={11} /> Under review
-                    </span>
+                    </Badge>
                   )}
                   {!result?.is_marked ? (
-                    <span className="flex items-center gap-1.5 text-xs text-gray-400">
+                    <span className="flex items-center gap-1.5 text-xs text-slate-400">
                       <Loader2 size={12} className="animate-spin" /> Marking…
                     </span>
                   ) : displayMark !== null && result?.max_marks ? (
@@ -284,21 +297,21 @@ function ResultsView({
                       {displayMark % 1 === 0 ? displayMark : displayMark.toFixed(1)}/{result.max_marks}
                     </span>
                   ) : null}
-                  {isOpen ? <ChevronUp size={15} className="text-gray-400" /> : <ChevronDown size={15} className="text-gray-400" />}
+                  {isOpen ? <ChevronUp size={15} className="text-slate-400" /> : <ChevronDown size={15} className="text-slate-400" />}
                 </div>
               </button>
 
               {/* Expanded detail */}
               {isOpen && (
-                <div className="border-t px-6 py-5 space-y-4 bg-gray-50">
+                <div className="border-t border-slate-200 px-6 py-5 space-y-4 bg-slate-50">
                   {/* Attached assets (table / figure) */}
                   <QuestionAssets assets={result?.assets ?? question?.assets} />
 
                   {/* Your answer */}
                   <div>
-                    <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Your answer</p>
-                    <p className="text-sm text-gray-700 whitespace-pre-wrap">
-                      {studentAnswer || <span className="italic text-gray-400">No answer recorded</span>}
+                    <p className="text-xs font-semibold text-slate-400 uppercase mb-1">Your answer</p>
+                    <p className="text-sm text-slate-700 whitespace-pre-wrap">
+                      {studentAnswer || <span className="italic text-slate-400">No answer recorded</span>}
                     </p>
                   </div>
 
@@ -308,7 +321,7 @@ function ResultsView({
                       <div className="flex items-center gap-3">
                         <CheckCircle size={16} className="text-emerald-500 shrink-0" />
                         <div>
-                          <p className="text-xs font-semibold text-gray-400 uppercase">Mark</p>
+                          <p className="text-xs font-semibold text-slate-400 uppercase">Mark</p>
                           <p className={`text-lg font-bold ${markColor(displayMark ?? 0, result.max_marks ?? 1)}`}>
                             {displayMark !== null
                               ? `${displayMark % 1 === 0 ? displayMark : displayMark.toFixed(1)} / ${result.max_marks}`
@@ -318,8 +331,8 @@ function ResultsView({
                       </div>
                       {displayFeedback && (
                         <div>
-                          <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Feedback</p>
-                          <MathText text={displayFeedback} className="text-sm text-gray-700 leading-relaxed block" />
+                          <p className="text-xs font-semibold text-slate-400 uppercase mb-1">Feedback</p>
+                          <MathText text={displayFeedback} className="text-sm text-slate-700 leading-relaxed block" />
                         </div>
                       )}
                       {result.is_flagged && (
@@ -329,19 +342,19 @@ function ResultsView({
                         </div>
                       )}
                       {result.override_mark !== null && result.override_mark !== undefined && (
-                        <div className="text-xs text-blue-600 bg-blue-50 rounded-lg px-3 py-2">
+                        <div className="text-xs text-brand-700 bg-brand-50 rounded-lg px-3 py-2">
                           This mark was reviewed and updated by your instructor.
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-sm text-gray-400">
+                    <div className="flex items-center gap-2 text-sm text-slate-400">
                       <Loader2 size={14} className="animate-spin" /> Marking in progress…
                     </div>
                   )}
                 </div>
               )}
-            </div>
+            </Card>
           );
         })}
       </main>
@@ -352,11 +365,16 @@ function ResultsView({
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function AssessmentPage() {
+  // Sections drive the grouped form layout. `questions` is the flat union of
+  // every section's questions (quiz order preserved) and is what the submit
+  // flow + ResultsView operate on — keeping that contract unchanged.
+  const [sections, setSections] = useState<Section[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submissionIds, setSubmissionIds] = useState<string[]>([]);
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const router = useRouter();
 
@@ -367,28 +385,78 @@ export default function AssessmentPage() {
   };
 
   useEffect(() => {
-    // Load assigned questions alongside existing submissions so a reload
-    // after submitting shows results instead of a blank, resubmittable form.
+    // Load quizzes (each a titled section) plus any directly-assigned legacy
+    // questions, alongside existing submissions so a reload after submitting
+    // shows results instead of a blank, resubmittable form.
     Promise.all([
-      api.get<Question[]>("/questions/assessment"),
+      api.get<Quiz[]>("/quizzes/mine").catch(() => ({ data: [] as Quiz[] })),
+      api.get<Question[]>("/questions/assessment").catch(() => ({ data: [] as Question[] })),
       api.get<SubmissionResult[]>("/submissions/my").catch(() => ({ data: [] as SubmissionResult[] })),
     ])
-      .then(([qRes, sRes]) => {
-        const assigned = qRes.data;
-        const mySubs = sRes.data.filter((s) => assigned.some((q) => q.id === s.question_id));
-        const answeredIds = new Set(mySubs.map((s) => s.question_id));
-        const unanswered = assigned.filter((q) => !answeredIds.has(q.id));
+      .then(([quizRes, qRes, sRes]) => {
+        const quizzes = quizRes.data ?? [];
+        const directlyAssigned = qRes.data ?? [];
 
-        if (assigned.length > 0 && unanswered.length === 0) {
-          setQuestions(assigned);
+        // Build sections: one per quiz, then a legacy "Assigned questions"
+        // section for any directly-assigned question not already in a quiz.
+        const seen = new Set<string>();
+        const builtSections: Section[] = [];
+
+        for (const quiz of quizzes) {
+          const qs = quiz.questions ?? [];
+          for (const q of qs) seen.add(q.id);
+          // Keep zero-question quizzes so the student still sees the section.
+          builtSections.push({
+            id: quiz.id,
+            title: quiz.title,
+            description: quiz.description,
+            questions: qs,
+          });
+        }
+
+        const legacy = directlyAssigned.filter((q) => !seen.has(q.id));
+        if (legacy.length > 0) {
+          builtSections.push({
+            id: "__legacy__",
+            title: "Assigned questions",
+            description: null,
+            questions: legacy,
+          });
+        }
+
+        // Flat union across all sections (preserves quiz/section order).
+        const allQuestions = builtSections.flatMap((s) => s.questions);
+
+        const mySubs = sRes.data.filter((s) =>
+          allQuestions.some((q) => q.id === s.question_id)
+        );
+        const answeredIds = new Set(mySubs.map((s) => s.question_id));
+        const unansweredCount = allQuestions.filter((q) => !answeredIds.has(q.id)).length;
+
+        // If everything assigned has already been answered, jump straight to
+        // results (matches the prior reload-after-submit behavior).
+        if (allQuestions.length > 0 && unansweredCount === 0) {
+          setQuestions(allQuestions);
           setSubmissionIds(mySubs.map((s) => s.id));
           setSubmitted(true);
         } else {
-          setQuestions(unanswered);
+          // Drop already-answered questions from the live form, then prune
+          // any section left empty so we don't show stale headers.
+          const filtered = builtSections
+            .map((s) => ({ ...s, questions: s.questions.filter((q) => !answeredIds.has(q.id)) }))
+            .filter((s) => s.questions.length > 0);
+          setSections(filtered);
+          setQuestions(filtered.flatMap((s) => s.questions));
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
+
+  const answeredCount = useMemo(
+    () => questions.filter((q) => (answers[q.id] ?? "").trim().length > 0).length,
+    [questions, answers]
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -424,173 +492,201 @@ export default function AssessmentPage() {
     );
   }
 
+  // Continuous question numbering across all sections.
+  let qNumber = 0;
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b px-8 py-4 flex items-center justify-between shadow-sm">
-        <div>
-          <h1 className="text-xl font-bold text-blue-700">Assessment</h1>
-          <p className="text-xs text-gray-400 mt-0.5">
-            {questions.length} question{questions.length !== 1 ? "s" : ""}
-          </p>
-        </div>
-        <div className="flex items-center gap-4">
-          <span className="flex items-center gap-1.5 text-sm text-gray-500">
-            <Clock size={15} /> {questions.length} questions
-          </span>
-          <button
-            onClick={signOut}
-            className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-red-500 transition-colors"
-          >
-            <LogOut size={15} /> Sign out
-          </button>
-        </div>
-      </header>
+    <div className="min-h-screen bg-slate-50">
+      <PageHeader
+        title="Assessment"
+        subtitle={
+          questions.length > 0
+            ? `${answeredCount} of ${questions.length} answered`
+            : "Your assigned work"
+        }
+        actions={
+          <Button variant="danger" icon={LogOut} onClick={signOut}>
+            Sign out
+          </Button>
+        }
+      />
 
       <main className="max-w-3xl mx-auto px-8 py-10">
-        {questions.length === 0 && (
-          <div className="text-center text-gray-400 py-20">
-            No questions assigned yet. Please check back later.
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 text-sm text-slate-400 py-20">
+            <Loader2 size={16} className="animate-spin" /> Loading your assessment…
           </div>
-        )}
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {questions.map((q, i) => (
-            <div key={q.id} className="bg-white rounded-xl border shadow-sm p-6 space-y-3">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-blue-500 uppercase">Q{i + 1}</span>
-                  {q.topic_tag && (
-                    <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
-                      {q.topic_tag}
-                    </span>
+        ) : questions.length === 0 ? (
+          <Card>
+            <EmptyState
+              icon={ClipboardList}
+              title="Nothing to do right now"
+              hint="No quizzes or questions have been assigned to you yet. Please check back later."
+            />
+          </Card>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-10">
+            {sections.map((section) => (
+              <section key={section.id} className="space-y-4">
+                {/* Section heading */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-lg font-bold text-slate-900 tracking-tight">
+                      {section.title}
+                    </h2>
+                    <Badge tone="blue">
+                      {section.questions.length} question
+                      {section.questions.length !== 1 ? "s" : ""}
+                    </Badge>
+                  </div>
+                  {section.description && (
+                    <p className="text-sm text-slate-500">{section.description}</p>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
-                  {q.difficulty && (
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                      q.difficulty === "hard"
-                        ? "bg-red-50 text-red-600"
-                        : q.difficulty === "medium"
-                        ? "bg-amber-50 text-amber-600"
-                        : "bg-green-50 text-green-600"
-                    }`}>
-                      {q.difficulty}
-                    </span>
-                  )}
-                  <span className="text-xs text-gray-400">
-                    {q.max_marks} mark{q.max_marks !== 1 ? "s" : ""}
-                  </span>
-                </div>
-              </div>
 
-              <QuestionAssets assets={q.assets} />
-
-              {q.question_type === "mcq" ? (() => {
-                const { stem, options } = extractMcqParts(q.question_text);
-                return (
-                  <div className="space-y-3">
-                    <MathText text={stem || q.question_text} className="text-gray-800 font-medium block" />
-                    {options.length > 0 ? (
-                      <div className="space-y-2">
-                        {options.map(({ letter, text: optText }) => (
-                          <label
-                            key={letter}
-                            className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                              answers[q.id] === letter
-                                ? "border-blue-400 bg-blue-50"
-                                : "border-gray-200 hover:border-gray-300"
-                            }`}
-                          >
-                            <input
-                              type="radio"
-                              name={`q-${q.id}`}
-                              value={letter}
-                              checked={answers[q.id] === letter}
-                              onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                              required
-                              className="mt-0.5 accent-blue-600"
-                            />
-                            <span className="text-sm text-gray-700">
-                              <span className="font-semibold">{letter}.</span>{" "}
-                              <MathText text={optText} />
-                            </span>
-                          </label>
-                        ))}
+                {section.questions.map((q) => {
+                  qNumber += 1;
+                  const i = qNumber - 1;
+                  return (
+                    <Card key={q.id} className="p-6 space-y-3">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-brand-600 uppercase">Q{i + 1}</span>
+                          {q.topic_tag && <Badge tone="slate">{q.topic_tag}</Badge>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {q.difficulty && (
+                            <Badge
+                              tone={
+                                q.difficulty === "hard"
+                                  ? "rose"
+                                  : q.difficulty === "medium"
+                                  ? "amber"
+                                  : "green"
+                              }
+                            >
+                              {q.difficulty}
+                            </Badge>
+                          )}
+                          <span className="text-xs text-slate-400">
+                            {q.max_marks} mark{q.max_marks !== 1 ? "s" : ""}
+                          </span>
+                        </div>
                       </div>
-                    ) : (
-                      <>
-                        <p className="text-xs text-amber-600">
-                          Options could not be parsed — please write your answer below.
-                        </p>
-                        <textarea
-                          rows={3}
-                          placeholder="Your answer…"
-                          value={answers[q.id] || ""}
-                          onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                          required
-                          className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                        />
-                      </>
-                    )}
-                  </div>
-                );
-              })() : q.question_type === "true_false" ? (
-                <div className="space-y-3">
-                  <MathText text={q.question_text} className="text-gray-800 font-medium block" />
-                  <div className="flex gap-3">
-                    {(["True", "False"] as const).map((opt) => (
-                      <label
-                        key={opt}
-                        className={`flex items-center gap-2 flex-1 justify-center py-3 rounded-lg border cursor-pointer transition-colors ${
-                          answers[q.id] === opt
-                            ? "border-blue-400 bg-blue-50 text-blue-700 font-semibold"
-                            : "border-gray-200 hover:border-gray-300 text-gray-700"
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name={`q-${q.id}`}
-                          value={opt}
-                          checked={answers[q.id] === opt}
-                          onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                          required
-                          className="sr-only"
-                        />
-                        {opt}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <MathText text={q.question_text} className="text-gray-800 font-medium block" />
-                  <textarea
-                    rows={4}
-                    placeholder="Write your answer here…"
-                    value={answers[q.id] || ""}
-                    onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                    required
-                    className="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-              )}
-            </div>
-          ))}
 
-          {questions.length > 0 && (
+                      <QuestionAssets assets={q.assets} />
+
+                      {q.question_type === "mcq" ? (() => {
+                        const { stem, options } = extractMcqParts(q.question_text);
+                        return (
+                          <div className="space-y-3">
+                            <MathText text={stem || q.question_text} className="text-slate-800 font-medium block" />
+                            {options.length > 0 ? (
+                              <div className="space-y-2">
+                                {options.map(({ letter, text: optText }) => (
+                                  <label
+                                    key={letter}
+                                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors duration-150 ${
+                                      answers[q.id] === letter
+                                        ? "border-brand-400 bg-brand-50"
+                                        : "border-slate-200 hover:border-slate-300"
+                                    }`}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`q-${q.id}`}
+                                      value={letter}
+                                      checked={answers[q.id] === letter}
+                                      onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                                      required
+                                      className="mt-0.5 accent-brand-600"
+                                    />
+                                    <span className="text-sm text-slate-700">
+                                      <span className="font-semibold">{letter}.</span>{" "}
+                                      <MathText text={optText} />
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                            ) : (
+                              <>
+                                <p className="text-xs text-amber-600">
+                                  Options could not be parsed — please write your answer below.
+                                </p>
+                                <textarea
+                                  rows={3}
+                                  placeholder="Your answer…"
+                                  value={answers[q.id] || ""}
+                                  onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                                  required
+                                  className="w-full border border-slate-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-brand-500 focus:outline-none"
+                                />
+                              </>
+                            )}
+                          </div>
+                        );
+                      })() : q.question_type === "true_false" ? (
+                        <div className="space-y-3">
+                          <MathText text={q.question_text} className="text-slate-800 font-medium block" />
+                          <div className="flex gap-3">
+                            {(["True", "False"] as const).map((opt) => (
+                              <label
+                                key={opt}
+                                className={`flex items-center gap-2 flex-1 justify-center py-3 rounded-lg border cursor-pointer transition-colors duration-150 ${
+                                  answers[q.id] === opt
+                                    ? "border-brand-400 bg-brand-50 text-brand-700 font-semibold"
+                                    : "border-slate-200 hover:border-slate-300 text-slate-700"
+                                }`}
+                              >
+                                <input
+                                  type="radio"
+                                  name={`q-${q.id}`}
+                                  value={opt}
+                                  checked={answers[q.id] === opt}
+                                  onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                                  required
+                                  className="sr-only"
+                                />
+                                {opt}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <MathText text={q.question_text} className="text-slate-800 font-medium block" />
+                          <textarea
+                            rows={4}
+                            placeholder="Write your answer here…"
+                            value={answers[q.id] || ""}
+                            onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                            required
+                            className="w-full border border-slate-300 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-brand-500 focus:outline-none"
+                          />
+                        </div>
+                      )}
+                    </Card>
+                  );
+                })}
+              </section>
+            ))}
+
             <div className="space-y-3 pb-10">
               {error && (
-                <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>
+                <p className="text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{error}</p>
               )}
-              <button
+              <Button
                 type="submit"
+                variant="cta"
+                loading={submitting}
                 disabled={submitting}
-                className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors"
+                className="w-full py-3 rounded-xl"
               >
                 {submitting ? "Submitting…" : "Submit Assessment"}
-              </button>
+              </Button>
             </div>
-          )}
-        </form>
+          </form>
+        )}
       </main>
     </div>
   );

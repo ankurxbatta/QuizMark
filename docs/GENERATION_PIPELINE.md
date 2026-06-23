@@ -117,6 +117,19 @@ synonymous distractor would otherwise be wrongly given 0.
 
 All verification failures are non-fatal and keep the original question.
 
+*Math formatting* — generated text emits inline LaTeX (`$...$`). A
+post-generation latexify pass (`math_format.py`) wraps any remaining bare math
+(e.g. `P(x) = μ^x e^{-μ} / x!`) in `$`-delimiters and converts unicode/loose
+notation to real LaTeX commands, with an `unmangle_latex` repair step for
+malformed output; the frontend then renders it with KaTeX via the `MathText`
+component. The rewrite is translation-only and sanity-checked, so wording and
+numbers are preserved. Questions created before this pass can be reformatted via
+`POST /admin/questions/latexify`.
+
+*MCQ option parsing* — `_split_mcq_text` takes only the **first contiguous
+A→B→C(→D) marker run**, so an answer-key block embedded after the options can't
+leak its letters into the parsed options.
+
 If the final count is below the requested count, the job's completion message
 reports "Created N of M requested questions" so the shortfall is visible.
 
@@ -163,6 +176,13 @@ Each generated question includes:
   "source_page_range": "pp. 87-89"
 }
 ```
+
+A question may also carry **assets** (`assets[]`): a `table` (rendered as
+deterministic HTML from the source markdown) or a `figure` (an AI-generated
+chart redrawn from a stored figure description). When a source table is a
+"find-the-missing-value" exercise, the blank body cell renders as a `?`
+placeholder and a one-line note is appended to the caption, so the gap reads as
+a deliberate prompt rather than an incomplete table.
 
 ---
 

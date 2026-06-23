@@ -27,6 +27,8 @@ Open **http://localhost:3000** and log in with `admin` + the password you chose.
 - **Upload any PDF textbook** — chapters, sections, tables, math formulas, and charts are extracted and embedded into MongoDB
 - **Generate questions** (MCQ, short answer, true/false) using multi-round DeepSearch RAG: the system retrieves the most testable chunks, generates questions across all Bloom's taxonomy levels, then deduplicates
 - **Auto-mark student answers** — MCQ and True/False are marked instantly against a structured answer key stored at generation time (no model call); short answers use RAG-backed LLM marking checked against the source textbook, with calculations re-verified rather than trusting the model answer blindly
+- **Bundle questions into named quizzes** — group questions into a titled quiz and assign it to students as a unit; a student's assessment is the union of all their assigned quizzes (legacy per-question assignment still works)
+- **Rendered math and figures** — question and answer text renders LaTeX with KaTeX, and questions can carry data-table or AI-generated figure assets
 - **Resumable ingestion** — large PDFs (600+ pages) checkpoint every 6 pages; re-uploading the same PDF continues from where it stopped
 
 ---
@@ -35,7 +37,7 @@ Open **http://localhost:3000** and log in with `admin` + the password you chose.
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 15, TypeScript, Tailwind CSS |
+| Frontend | Next.js 15, TypeScript, Tailwind CSS (Plus Jakarta Sans, blue/green design system), KaTeX math rendering |
 | Backend API | FastAPI (Python 3.11) |
 | Ingestion pipeline | LangChain (LCEL chain: clean → chunk → validate → vision → embed) |
 | Database + vector store | MongoDB Atlas Local (768-dim cosine vector search) |

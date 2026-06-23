@@ -40,6 +40,12 @@ class QuestionOut(BaseModel):
     max_marks: float
     topic_tag: Optional[str] = None
     difficulty: Optional[Difficulty] = None
+    # Structured answer key for objective questions (MCQ letter / "True"|"False").
+    # Stored at generation time and used for deterministic marking — surface it so
+    # the instructor view can show and edit the key instead of guessing it's null.
+    correct_answer: Optional[str] = None
+    book_id: Optional[str] = None
+    chapter_num: Optional[int] = None
     source_page_range: Optional[str] = None
     source_chunk: Optional[str] = None
     assets: list[QuestionAsset] = Field(default_factory=list)
