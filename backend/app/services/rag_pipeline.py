@@ -68,18 +68,55 @@ Instructions:
 """
 
 
+def _sanitize_json_escapes(s: str) -> str:
+    """Escape stray backslashes that aren't a valid JSON escape. The marking LLM
+    frequently puts LaTeX (\\frac, \\sigma, \\(...) in the feedback string, whose
+    backslashes are invalid JSON escapes and make json.loads fail."""
+    return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", s)
+
+
+def _strip_controls(s: str) -> str:
+    return "".join(ch for ch in s if ch in "\n\r\t" or ord(ch) >= 32)
+
+
 def _parse_llm_json(raw: str, max_marks: float) -> dict:
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
+    """Parse the marker's JSON robustly. A correct answer must never be zeroed
+    just because the model wrapped its mark in slightly-malformed JSON (e.g. LaTeX
+    backslashes, trailing prose, control chars)."""
+    start = raw.find("{")
+    if start == -1:
         raise ValueError(f"LLM did not return parseable JSON. Raw: {raw[:300]}")
-    payload = match.group()
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError:
-        cleaned = "".join(
-            ch for ch in payload if ch == "\n" or ch == "\r" or ch == "\t" or ord(ch) >= 32
-        )
-        data = json.loads(cleaned)
+    snippet = raw[start:]
+
+    data = None
+    dec = json.JSONDecoder()
+    # raw_decode stops at the end of the first JSON object, tolerating any trailing
+    # prose. Try the snippet as-is, then with LaTeX backslashes escaped, then with
+    # control chars stripped.
+    for candidate in (snippet, _sanitize_json_escapes(snippet),
+                      _sanitize_json_escapes(_strip_controls(snippet))):
+        try:
+            data, _ = dec.raw_decode(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+
+    if data is None:
+        # Last resort: pull the fields out directly so a correct answer still
+        # scores instead of collapsing to 0 + "could not parse".
+        m_mark = re.search(r'"mark"\s*:\s*(-?[0-9]+(?:\.[0-9]+)?)', snippet)
+        if not m_mark:
+            raise ValueError(f"LLM did not return parseable JSON. Raw: {raw[:300]}")
+        m_fb = re.search(r'"feedback"\s*:\s*"((?:[^"\\]|\\.)*)"', snippet, re.DOTALL)
+        m_flag = re.search(r'"flagged"\s*:\s*(true|false)', snippet, re.IGNORECASE)
+        m_conf = re.search(r'"confidence"\s*:\s*([0-9]*\.?[0-9]+)', snippet)
+        data = {
+            "mark": float(m_mark.group(1)),
+            "feedback": (m_fb.group(1).replace('\\"', '"') if m_fb else ""),
+            "flagged": (m_flag.group(1).lower() == "true") if m_flag else False,
+            "confidence": float(m_conf.group(1)) if m_conf else 0.5,
+        }
+
     return {
         "mark": min(float(data.get("mark", 0)), max_marks),
         "feedback": str(data.get("feedback", "")),

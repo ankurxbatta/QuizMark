@@ -107,6 +107,29 @@ class FusedContext:
                 parts.append(block)
         return "\n\n".join(parts)
 
+    def specialist_block(self) -> str:
+        """Render ONLY the specialist (formula / figure / table) index blocks.
+
+        Used to inject the dedicated math/figure/table indexes into the mainline
+        (Round 1) generation prompt alongside the chunk text, so the repaired
+        LaTeX, real chart descriptions and table summaries are not left unused.
+        Returns "" when no specialist content was retrieved.
+        """
+        from app.services.figure_index import render_figures_block
+        from app.services.math_index import render_formulas_block
+        from app.services.table_index import render_tables_block
+
+        parts = [
+            block
+            for block in (
+                render_formulas_block(self.formulas),
+                render_tables_block(self.tables),
+                render_figures_block(self.figures),
+            )
+            if block
+        ]
+        return "\n\n".join(parts)
+
 
 # ── Cross-link expansion ───────────────────────────────────────────────────────
 
@@ -128,6 +151,20 @@ async def expand_to_parent_chunks(
             if not parent_id or parent_id in known_chunk_ids:
                 continue
             parent = await col.find_one({"_id": parent_id}, {"embedding": 0})
+            if not parent:
+                # Chunks ingested via the one-shot path keep a real ObjectId _id,
+                # while specialist indexes store parent_chunk_id as a string. Retry
+                # with the ObjectId form so cross-link expansion is not a silent
+                # no-op for those books.
+                try:
+                    from bson import ObjectId
+
+                    if ObjectId.is_valid(parent_id):
+                        parent = await col.find_one(
+                            {"_id": ObjectId(parent_id)}, {"embedding": 0}
+                        )
+                except Exception:
+                    parent = None
             if parent:
                 parent["_id"] = str(parent["_id"])
                 known_chunk_ids.add(parent_id)

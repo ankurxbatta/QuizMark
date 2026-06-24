@@ -325,21 +325,35 @@ async def attach_assets_to_questions(
     candidates = [
         q for q in questions
         if _ASSET_HINT_RE.search(q.get("question_text", "") or "")
-    ][:limit]
+    ]
     if not candidates:
         return questions
 
+    # Cap by SUCCESSFUL attachments, not by candidate slice: many candidates
+    # legitimately yield no asset (no real chart, image-gen disabled, embed
+    # fail), so slicing candidates first could attach zero even when later
+    # questions reference real tables. Process in bounded batches and stop once
+    # `limit` assets are actually attached.
     sem = asyncio.Semaphore(2)
+    attached = 0
 
-    async def _bounded(q: dict) -> None:
+    async def _try_attach(q: dict) -> bool:
         async with sem:
             try:
                 asset = await _build_one_asset(q, book_id, chapter_num)
             except Exception as exc:
                 logger.warning(f"[asset] build failed (non-fatal): {exc}")
                 asset = None
-            if asset:
-                q["assets"] = [asset]
+        if asset:
+            q["assets"] = [asset]
+            return True
+        return False
 
-    await asyncio.gather(*[_bounded(q) for q in candidates])
+    batch = max(1, limit)
+    for start in range(0, len(candidates), batch):
+        if attached >= limit:
+            break
+        window = candidates[start:start + batch]
+        results = await asyncio.gather(*[_try_attach(q) for q in window])
+        attached += sum(1 for ok in results if ok)
     return questions

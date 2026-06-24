@@ -145,7 +145,8 @@ async def deep_retrieve_for_generation(
     book_id: Optional[str] = None,
     chapter_num: Optional[int] = None,
     k: int = 12,
-) -> list[dict]:
+    return_context: bool = False,
+):
     """
     Multi-query vector search to find the best chunks for question generation.
 
@@ -157,9 +158,14 @@ async def deep_retrieve_for_generation(
         topic:    Chapter title or topic name.
         book_id:  Restrict to a specific ingested book (or None for all books).
         k:        Total distinct chunks to return.
+        return_context: when True also return the FusedContext so callers can
+                  inject the specialist (formula/figure/table) index blocks into
+                  the generation prompt — otherwise that retrieved content is
+                  computed but never used.
 
     Returns:
-        List of raw MongoDB chunk dicts ready for _DbChunk construction.
+        List of raw MongoDB chunk dicts ready for _DbChunk construction, or
+        ``(chunks, FusedContext)`` when ``return_context`` is set.
     """
     from app.services.retrieval_router import routed_retrieve
 
@@ -170,7 +176,10 @@ async def deep_retrieve_for_generation(
     # Phase 3): sub-queries about formulas/charts also hit the specialist
     # indexes, whose top hits pull their source chunks in via cross-links.
     fused = await routed_retrieve(queries, embeddings, book_id=book_id, chapter_num=chapter_num, k=k)
-    return fused.text_chunks[:k]
+    chunks = fused.text_chunks[:k]
+    if return_context:
+        return chunks, fused
+    return chunks
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,10 +719,16 @@ async def _generate_from_chunk(
     existing_questions: Optional[list[str]] = None,
     seed_exercises: Optional[list[dict]] = None,
     asset_directive: str = "",
+    extra_context: str = "",
 ) -> list[dict]:
     """Single-stage generation with Bloom's Taxonomy distribution and uniqueness enforcement."""
     diff_note = _DIFFICULTY_INSTRUCTION.get(difficulty, "")
     content = chunk.to_prompt_block()
+    if extra_context:
+        # Specialist-index context (repaired formulas, real figures/tables for
+        # this chapter) so mainline generation uses the dedicated indexes too,
+        # not just the chunk prose.
+        content += f"\n\n{extra_context}"
     if diff_note:
         content += f"\n\n{diff_note}"
     if asset_directive:
@@ -794,6 +809,7 @@ async def generate_questions_from_chunks(
     existing_questions: Optional[list[str]] = None,
     seed_exercises: Optional[list[dict]] = None,
     asset_directive: str = "",
+    extra_context: str = "",
 ) -> list[dict]:
     """
     Generate `count` questions from a list of TextChunk objects.
@@ -832,6 +848,7 @@ async def generate_questions_from_chunks(
                 existing_questions=existing_questions,
                 seed_exercises=seed_exercises,
                 asset_directive=asset_directive,
+                extra_context=extra_context,
             )
 
     results = await asyncio.gather(*[_bounded(c) for c in selected])
@@ -935,7 +952,21 @@ def _parse_json_array(raw: str) -> list[dict]:
     """Extract and parse the first JSON array from raw LLM output."""
     # Strip markdown code fences if present
     raw = re.sub(r"```(?:json)?", "", raw).strip()
-    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    start = raw.find("[")
+    if start == -1:
+        return []
+    # Decode the first well-formed JSON value starting at '['. raw_decode stops
+    # at the end of that value, so any trailing prose or a second bracketed block
+    # (e.g. an appended answer key) can't corrupt/truncate the question array the
+    # way a greedy ``\[.*\]`` match would.
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(raw[start:])
+        if isinstance(parsed, list):
+            return unmangle_latex(parsed)
+    except json.JSONDecodeError:
+        pass
+    # Fallback: greedy span + partial recovery for malformed/truncated output.
+    match = re.search(r"\[.*\]", raw[start:], re.DOTALL)
     if not match:
         return []
     try:

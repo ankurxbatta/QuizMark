@@ -109,12 +109,34 @@ _BOILERPLATE_RE = re.compile(
 )
 
 # ── Page-number / chapter-header noise ───────────────────────────────────────
+# NOTE: a bare standalone-number line is handled by _strip_isolated_page_numbers
+# (neighbour-aware) rather than here — blindly deleting every "^\d{1,4}$" line
+# destroys one-value-per-line statistical data (frequency columns, probability
+# values, answer lists) that the math/table indexes depend on.
 _PAGE_HEADER_RE = re.compile(
     r"^(?:\d{1,4}\s+)?Chapter\s+\d{1,2}\s*\|[^\n]{0,80}$|"
-    r"^[^\n]{0,80}\|\s*Chapter\s+\d{1,2}\s*(?:\d{1,4})?$|"
-    r"^\s*\d{1,4}\s*$",
+    r"^[^\n]{0,80}\|\s*Chapter\s+\d{1,2}\s*(?:\d{1,4})?$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+_BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
+
+
+def _strip_isolated_page_numbers(text: str) -> str:
+    """Drop a standalone 1–4 digit line ONLY when it is isolated by blank lines
+    (or document edges) — the typical page-number layout. A bare number that
+    sits next to other content lines is kept, since in a stats book it is far
+    more likely to be a data value in a column than a page number."""
+    lines = text.split("\n")
+    out: list[str] = []
+    for idx, line in enumerate(lines):
+        if _BARE_NUMBER_RE.match(line):
+            prev_blank = idx == 0 or not lines[idx - 1].strip()
+            next_blank = idx == len(lines) - 1 or not lines[idx + 1].strip()
+            if prev_blank and next_blank:
+                continue  # isolated → page number; drop it
+        out.append(line)
+    return "\n".join(out)
 
 # ── Table-pipe noise ─────────────────────────────────────────────────────────
 _TABLE_NOISE_RE = re.compile(r"^\s*[|\s]{3,}\s*$", re.MULTILINE)
@@ -169,6 +191,7 @@ def _clean(text: str) -> str:
     text = _BOILERPLATE_RE.sub("", text)
     # 10. Page headers/footers
     text = _PAGE_HEADER_RE.sub("", text)
+    text = _strip_isolated_page_numbers(text)
     # 11. Table pipe noise
     text = _TABLE_NOISE_RE.sub("", text)
     # 12. Deduplicate repeated lines

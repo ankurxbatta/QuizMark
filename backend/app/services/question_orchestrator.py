@@ -76,10 +76,14 @@ _DIFFICULTY_PRIMARY_BLOOM: dict[str, str] = {
 # Difficulty-aware grounding: which real-exercise kinds to surface first.
 # Worked examples (and the short Try-It practice boxes) anchor easy/medium
 # questions; homework/practice problems anchor the harder ones.
+# Note: these only RE-RANK retrieved exercises (retrieve_exercises does a stable
+# sort, not a filter), so no kind is ever excluded — they just bias which kinds
+# surface first for a given band. "activity"/collaborative tasks anchor the
+# applied middle band.
 _DIFFICULTY_EXERCISE_KINDS: dict[str, list[str]] = {
     "easy": ["example", "try_it"],
-    "medium": ["example", "try_it", "homework", "practice"],
-    "hard": ["homework", "practice"],
+    "medium": ["example", "try_it", "activity", "homework", "practice"],
+    "hard": ["homework", "practice", "activity"],
 }
 
 
@@ -287,7 +291,9 @@ async def orchestrate_question_bank(
         logger.info(f"[ORCH] asset requirement active (table={require_table}, figure={require_figure})")
 
     # ── Round 1: Broad DeepSearch retrieval + initial generation ──────────────
-    r1_target = max(int(count * 0.75), count)  # slight overgenerate to allow trimming
+    # Overgenerate so Round 3 dedup/balance/hard-guard trimming still lands at
+    # the requested count instead of consistently undershooting it.
+    r1_target = max(int(count * 1.2), count)
     logger.info(f"[ORCH] Round 1 — broad retrieval, target={r1_target}")
 
     # Concept-augmented topic gives retrieval extra signal
@@ -295,13 +301,20 @@ async def orchestrate_question_bank(
     if chapter_concepts:
         enriched_topic = f"{chapter_topic} | concepts: {', '.join(chapter_concepts)}"
 
-    raw_chunks_r1 = await deep_retrieve_for_generation(
+    raw_chunks_r1, fused_r1 = await deep_retrieve_for_generation(
         topic=enriched_topic,
         book_id=book_id,
         chapter_num=chapter_num,
         k=max(r1_target * 2, 12),
+        return_context=True,
     )
     chunks_r1 = [DbChunk(doc) for doc in raw_chunks_r1]
+    # Inject the dedicated math/figure/table indexes into mainline generation —
+    # otherwise Round 1 (the bulk of the bank) only ever sees chunk prose and the
+    # specialist indexes are retrieved but thrown away.
+    specialist_block = fused_r1.specialist_block()
+    if specialist_block:
+        logger.info("[ORCH] Round 1 — specialist index context attached")
 
     if not chunks_r1:
         logger.warning("[ORCH] Round 1 — no chunks retrieved, returning empty")
@@ -322,6 +335,7 @@ async def orchestrate_question_bank(
         existing_questions=existing_questions,
         seed_exercises=seed_exercises,
         asset_directive=asset_directive,
+        extra_context=specialist_block,
     )
     logger.info(f"[ORCH] Round 1 — generated {len(questions)} questions")
 
@@ -444,6 +458,7 @@ async def orchestrate_question_bank(
             existing_questions=seen_texts,
             seed_exercises=seed_exercises,
             asset_directive=asset_directive,
+            extra_context=specialist_block,
         )
         questions.extend(topup)
         questions = _dedup_by_prefix(questions)

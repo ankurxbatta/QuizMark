@@ -43,6 +43,16 @@ _EXAMPLE_RE = re.compile(r"^\s*(?:EXAMPLE|Example)\s+(\d+\.\d+)\s*$")
 _TRYIT_RE = re.compile(r"^\s*(?:TRY\s*IT|Try\s*It)\s*(\d+\.\d+)?\s*$")
 # "Solution 1.12" / "Solution" — start of a worked example's solution.
 _SOLUTION_RE = re.compile(r"^\s*(?:SOLUTION|Solution)\s*(\d+\.\d+)?\s*$")
+# Other labelled student-task boxes ("more" pedagogical content): collaborative
+# exercises, stats labs, activities, "Do This", "Try These", "Bringing It
+# Together". These carry real chapter tasks that would otherwise be lost as
+# anonymous prose. Heading-only line; the body follows.
+_ACTIVITY_RE = re.compile(
+    r"^\s*(?:COLLABORATIVE(?:\s+EXERCISE)?|STATS?\s+LAB|BRINGING\s+IT\s+TOGETHER"
+    r"|ACTIVITY|DO\s+THIS|THINK\s+ABOUT\s+IT|TRY\s+THESE|GROUP\s+PROJECT)\b"
+    r"\s*[:.]?\s*(.*)$",
+    re.IGNORECASE,
+)
 # A numbered exercise item: "1.", "23." at line start.
 _NUM_ITEM_RE = re.compile(r"^\s*(\d{1,3})\.\s*(.*)$")
 # An a/b/c/d option line (the option text usually follows on the next line(s)).
@@ -64,6 +74,7 @@ _KIND_HOMEWORK = "homework"
 _KIND_PRACTICE = "practice"
 _KIND_EXAMPLE = "example"
 _KIND_TRYIT = "try_it"
+_KIND_ACTIVITY = "activity"
 
 
 def _normalise(text: str) -> str:
@@ -193,6 +204,31 @@ def split_exercises(
                 ))
             continue
 
+        # ── Other labelled task box (activity / collaborative / lab / "more") ──
+        m_act = _ACTIVITY_RE.match(raw)
+        if m_act:
+            label_text = re.sub(r"\s+", " ", line).strip()[:60]
+            inline = (m_act.group(1) or "").strip()
+            i += 1
+            body = [inline] if inline else []
+            # Cap the body so a mis-detected heading can't swallow a whole page
+            # of prose into one giant "exercise".
+            while i < n and len(body) < 40 \
+                    and not _EXAMPLE_RE.match(lines[i]) and not _TRYIT_RE.match(lines[i]) \
+                    and not _ACTIVITY_RE.match(lines[i]) and not _SOLUTION_RE.match(lines[i]) \
+                    and not re.match(r"^\s*(HOMEWORK|PRACTICE)\b", lines[i]):
+                body.append(lines[i].strip())
+                i += 1
+            stem = re.sub(r"\s+", " ", " ".join(b for b in body if b)).strip()
+            options = _scan_options(body)
+            if not _looks_like_junk(stem):
+                out.append(_make_entry(
+                    stem=stem, options=options, solution="",
+                    kind=_KIND_ACTIVITY, label=label_text or "Activity",
+                    table_texts=table_texts, image_texts=image_texts, math_text=math_text,
+                ))
+            continue
+
         # Section heading inside a HOMEWORK/PRACTICE block resets group context
         if mode and _SECTION_HEAD_RE.match(raw):
             sm = re.match(r"^\s*(\d+\.\d+)\b", raw)
@@ -223,6 +259,7 @@ def split_exercises(
             while i < n:
                 nxt = lines[i]
                 if _NUM_ITEM_RE.match(nxt) or _EXAMPLE_RE.match(nxt) or _TRYIT_RE.match(nxt) \
+                        or _ACTIVITY_RE.match(nxt) \
                         or re.match(r"^\s*(HOMEWORK|PRACTICE)\b", nxt) \
                         or _SECTION_HEAD_RE.match(nxt) or _GROUP_STEM_RE.search(nxt.strip()):
                     break
