@@ -238,9 +238,13 @@ async def _gemini_embed(text: str) -> list[float]:
                 json={"model": f"models/{model}", "content": {"parts": [{"text": text[:2048]}]},
                       "taskType": "SEMANTIC_SIMILARITY", "outputDimensionality": 768})
         if r.status_code in {408, 429, 431, 500, 502, 503, 504} and attempt < 4:
+            # A 429 here is almost always a transient per-minute rate limit
+            # (free tier), not a daily/quota exhaustion. Use a short rate-limit
+            # cooldown and retry with backoff instead of benching the provider
+            # for an hour — otherwise a single burst sidelines the free embedder
+            # for the rest of a large-book ingestion.
             if r.status_code == 429:
-                key_manager.mark_quota_exhausted("gemini_embed", r.text[:200])
-                raise RuntimeError("Gemini embed quota exhausted")
+                key_manager.mark_rate_limited("gemini_embed")
             await _retry_sleep(r, attempt); continue
         r.raise_for_status()
         key_manager.mark_success("gemini_embed")
@@ -259,8 +263,13 @@ async def _gemini_embed_batch(texts: list[str]) -> list[list[float]]:
             r = await c.post(f"{settings.GEMINI_BASE_URL}/{model_path}:batchEmbedContents",
                 params={"key": settings.GEMINI_API_KEY}, json={"requests": requests})
         if r.status_code == 429:
-            key_manager.mark_quota_exhausted("gemini_embed", r.text[:200])
-            raise RuntimeError("Gemini batch embed quota exhausted")
+            # Transient per-minute rate limit — short cooldown + retry with
+            # backoff, then fall through to the OpenAI embedder. Do NOT bench
+            # Gemini for an hour on a burst (see _gemini_embed above).
+            key_manager.mark_rate_limited("gemini_embed")
+            if attempt < 4:
+                await _retry_sleep(r, attempt); continue
+            raise RuntimeError("Gemini batch embed rate-limited")
         if r.status_code in {500, 502, 503, 504} and attempt < 4:
             await _retry_sleep(r, attempt); continue
         if r.status_code >= 400:
