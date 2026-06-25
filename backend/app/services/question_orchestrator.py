@@ -446,10 +446,20 @@ async def orchestrate_question_bank(
         questions = _balance_bloom_distribution(questions, target_count=count)
     logger.info(f"[ORCH] After Round 3 dedup/balance — {len(questions)} questions")
 
-    # Top-up: if we're more than 20% below target, do one more small pass
-    shortfall = count - len(questions)
-    if shortfall > max(1, count * 0.2) and chunks_r1:
-        logger.info(f"[ORCH] Round 3 top-up — generating {shortfall} more questions")
+    # Top-up: dedup/balance can leave us below the requested count. Regenerate
+    # quality replacements until we hit the target, bounded by GEN_TOPUP_MAX_ROUNDS
+    # so a thin chapter can't loop forever or run up unbounded API cost. Happy path
+    # (no shortfall) makes zero extra calls.
+    from app.core.config import settings
+    for attempt in range(max(0, int(settings.GEN_TOPUP_MAX_ROUNDS))):
+        shortfall = count - len(questions)
+        if shortfall <= 0 or not chunks_r1:
+            break
+        logger.info(
+            f"[ORCH] Round 3 top-up {attempt + 1}/{settings.GEN_TOPUP_MAX_ROUNDS} "
+            f"— generating {shortfall} more questions"
+        )
+        before = len(questions)
         topup = await generate_questions_from_chunks(
             chunks_r1,
             question_type=question_type,
@@ -462,6 +472,20 @@ async def orchestrate_question_bank(
         )
         questions.extend(topup)
         questions = _dedup_by_prefix(questions)
+        if explicit_difficulty:
+            questions = questions[:count]
+        else:
+            questions = _balance_bloom_distribution(questions, target_count=count)
+        seen_texts.extend(q["question_text"] for q in topup)
+        # No net gain (LLM only returned dups/junk) → stop early rather than burn
+        # the remaining rounds on the same content.
+        if len(questions) <= before:
+            break
+    if len(questions) < count:
+        logger.warning(
+            f"[ORCH] '{chapter_topic}' — only {len(questions)}/{count} questions after "
+            f"top-up (content-limited); storing what we have."
+        )
 
     # Quality passes: recompute numeric model answers, de-ambiguate MCQ options
     from app.services.answer_verifier import verify_generated_questions

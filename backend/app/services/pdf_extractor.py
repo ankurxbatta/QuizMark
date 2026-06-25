@@ -459,11 +459,20 @@ class ChunkAccumulator:
 
         ch_match = None if _is_toc_like_page(raw_text) else _find_chapter_match(raw_text)
         if ch_match:
-            out.extend(self._flush(page_num - 1))
-            self.buffer_page_start = page_num
-            self.current_chapter_num, self.current_chapter_title = ch_match
-            self.current_topic = _resolve_topic(self.current_chapter_title)
-            self.current_section_title = "Introduction"
+            num, title = ch_match
+            # Accept only sequential chapter advances. Front matter / TOC / preface
+            # pages that mention a high chapter number (e.g. a contents line
+            # "12 F Distribution and One-Way ANOVA") must not hijack the counter:
+            # a jump from front matter (0) straight to 12 is rejected, and the
+            # first real chapter must be Ch1. Same-number re-matches are allowed
+            # (e.g. a part-divider page repeating the heading).
+            if num == self.current_chapter_num or num == self.current_chapter_num + 1:
+                out.extend(self._flush(page_num - 1))
+                self.buffer_page_start = page_num
+                self.current_chapter_num = num
+                self.current_chapter_title = title
+                self.current_topic = _resolve_topic(title)
+                self.current_section_title = "Introduction"
 
         for sec_m in _SECTION_RE.finditer(raw_text):
             out.extend(self._flush(page_num - 1))

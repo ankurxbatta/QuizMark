@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     # ── Question generation throughput ────────────────────────────────────────
     GEN_CHAPTER_CONCURRENCY: int = 5        # OpenAI/Anthropic handle higher concurrency
     DEDUP_SIMILARITY_THRESHOLD: float = 0.92
+    # When dedup/validation drops a chapter below its requested count, regenerate
+    # quality replacements for up to this many extra rounds before giving up.
+    GEN_TOPUP_MAX_ROUNDS: int = 3
 
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50

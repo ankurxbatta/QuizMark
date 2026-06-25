@@ -20,7 +20,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from celery.exceptions import SoftTimeLimitExceeded
 
@@ -534,6 +534,8 @@ async def _run_chapters_parallel(
 
     tasks = []
     chapter_labels: list[str] = []
+    # Remember each chapter's title/topic so top-up rounds can regenerate for it.
+    chapter_info: dict[int, tuple[str, str]] = {}
     for ch_num in chapter_nums:
         if chapter_meta is not None and ch_num in chapter_meta:
             chapter_title = chapter_meta[ch_num].get("chapter_title", f"Chapter {ch_num}")
@@ -546,6 +548,7 @@ async def _run_chapters_parallel(
             chapter_title = ch_chunks[0].chapter_title
             topic_tag = ch_chunks[0].topic_tag
         chapter_labels.append(f"Chapter {ch_num}: {chapter_title}")
+        chapter_info[ch_num] = (chapter_title, topic_tag)
         tasks.append(_bounded(ch_num, chapter_title, topic_tag))
 
     await _update_job(db, job_id,
@@ -566,9 +569,76 @@ async def _run_chapters_parallel(
         all_q.extend(questions)
         all_e.extend(embeddings)
 
-    kept_q, kept_e = _dedup_across_chapters(
-        all_q, all_e, threshold=float(settings.DEDUP_SIMILARITY_THRESHOLD)
-    )
+    threshold = float(settings.DEDUP_SIMILARITY_THRESHOLD)
+    kept_q, kept_e = _dedup_across_chapters(all_q, all_e, threshold=threshold)
+
+    # ── Top-up: cross-chapter dedup (and per-chapter validation) can leave a
+    # chapter below its requested count. Regenerate quality replacements for any
+    # short chapter, bounded by GEN_TOPUP_MAX_ROUNDS so a thin chapter can't loop
+    # forever or run up unbounded cost. Replacements keep the same chapter scope,
+    # question_type and difficulty, and pass through the same cosine dedup against
+    # everything already kept. Happy path (no shortfall) makes zero extra calls.
+    max_rounds = max(0, int(settings.GEN_TOPUP_MAX_ROUNDS))
+    for attempt in range(max_rounds):
+        per_chapter: Counter = Counter(q.get("chapter_num") for q in kept_q)
+        short = [
+            cn for cn in chapter_info
+            if per_chapter.get(cn, 0) < count_per_chapter
+        ]
+        if not short:
+            break
+        await _update_job(db, job_id,
+            progress_message=(
+                f"Top-up round {attempt + 1}/{max_rounds}: "
+                f"regenerating for {len(short)} short chapter(s)…"
+            ),
+        )
+        kept_texts = [q["question_text"] for q in kept_q]
+
+        async def _topup_chapter(cn: int, need: int):
+            title, topic_tag = chapter_info[cn]
+            async with sem:
+                return cn, await _generate_chapter(
+                    chapter_num=cn, chapter_title=title, topic_tag=topic_tag,
+                    book_id=book_id, question_type=question_type,
+                    count_per_chapter=need, difficulty=difficulty,
+                    existing_questions=kept_texts,
+                    require_table=require_table, require_figure=require_figure,
+                )
+
+        topup_results = await asyncio.gather(
+            *[_topup_chapter(cn, count_per_chapter - per_chapter.get(cn, 0)) for cn in short],
+            return_exceptions=True,
+        )
+        progressed = False
+        for res in topup_results:
+            if isinstance(res, Exception):
+                continue
+            cn, (new_q, new_e) = res
+            need = count_per_chapter - per_chapter.get(cn, 0)
+            for q, e in zip(new_q, new_e):
+                if need <= 0:
+                    break
+                if e and any(_cosine(e, ke) >= threshold for ke in kept_e if ke):
+                    continue
+                kept_q.append(q)
+                kept_e.append(e)
+                per_chapter[cn] += 1
+                need -= 1
+                progressed = True
+        # No chapter gained a unique question this round → content-limited, stop.
+        if not progressed:
+            break
+
+    still_short = [
+        cn for cn in chapter_info
+        if Counter(q.get("chapter_num") for q in kept_q).get(cn, 0) < count_per_chapter
+    ]
+    if still_short:
+        logger.warning(
+            f"Chapters short of {count_per_chapter} after {max_rounds} top-up rounds "
+            f"(content-limited): {still_short}"
+        )
 
     # Bulk-insert
     inserted = 0
