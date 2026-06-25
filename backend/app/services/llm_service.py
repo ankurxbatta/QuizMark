@@ -445,15 +445,41 @@ def _build_online_client():
     return None
 
 
+class _FallbackGenerationClient:
+    """Question generation with provider rotation: OpenAI → Anthropic → Gemini.
+
+    Unlike a single static client picked at startup by key *presence*, every
+    call routes through key_manager.with_fallback, so an OpenAI outage (e.g. a
+    zero-credit 429 insufficient_quota) rolls over to Anthropic, then Gemini —
+    matching the documented chain and respecting per-provider cooldowns.
+    Per-provider generation models and GENERATION_MAX_TOKENS are preserved.
+    """
+
+    def __init__(self) -> None:
+        self._clients: dict = {}
+        if settings.OPENAI_API_KEY:
+            self._clients["openai_generation"] = OpenAIClient(
+                model=settings.OPENAI_GENERATION_MODEL, max_tokens=settings.GENERATION_MAX_TOKENS)
+        if settings.ANTHROPIC_API_KEY:
+            self._clients["anthropic"] = AnthropicClient(
+                model=settings.ANTHROPIC_GENERATION_MODEL, max_tokens=settings.GENERATION_MAX_TOKENS)
+        if settings.GEMINI_API_KEY:
+            self._clients["gemini"] = GeminiClient(max_tokens=settings.GENERATION_MAX_TOKENS)
+
+    async def generate(self, prompt: str) -> str:
+        providers = [p for p in ("openai_generation", "anthropic", "gemini") if p in self._clients]
+        if not providers:
+            return await slm_service.generate(prompt)
+
+        async def _try(provider: str) -> str:
+            return await self._clients[provider].generate(prompt)
+
+        return await key_manager.with_fallback("generation", providers, _try)
+
+
 def _build_generation_client():
-    """Question generation: OpenAI → Anthropic → Gemini."""
-    if settings.OPENAI_API_KEY:
-        return OpenAIClient(model=settings.OPENAI_GENERATION_MODEL, max_tokens=settings.GENERATION_MAX_TOKENS)
-    if settings.ANTHROPIC_API_KEY:
-        return AnthropicClient(model=settings.ANTHROPIC_GENERATION_MODEL, max_tokens=settings.GENERATION_MAX_TOKENS)
-    if settings.GEMINI_API_KEY:
-        return GeminiClient(max_tokens=settings.GENERATION_MAX_TOKENS)
-    return slm_service
+    """Question generation: OpenAI → Anthropic → Gemini (with runtime fallback)."""
+    return _FallbackGenerationClient()
 
 
 online_service = _build_online_client()
