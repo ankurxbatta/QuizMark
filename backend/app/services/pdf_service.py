@@ -326,6 +326,14 @@ def _teaching_density(text: str) -> float:
     return hits / len(lines)
 
 
+# A boilerplate heading near the top only justifies dropping a whole buffer
+# when the buffer is ACTUALLY boilerplate. Buffers whose teaching density is at
+# or above this threshold are kept even if they begin with a skip signal — this
+# preserves real content (formulas, definitions, worked examples) that is
+# co-located with a "KEY TERMS"/"Chapter Review" heading.
+_SKIP_TEACHING_DENSITY = 0.15
+
+
 def _is_skip_block(text: str) -> bool:
     """True if this block is mostly exercises / boilerplate."""
     if not text.strip():
@@ -336,7 +344,14 @@ def _is_skip_block(text: str) -> bool:
     )
     if len(lines) > 0 and exercise_lines / len(lines) > 0.35:
         return True
-    return bool(_SKIP_SIGNALS.search(text[:300]))
+    # A boilerplate heading (KEY TERMS / CHAPTER REVIEW / APPENDIX / footer …)
+    # only drops the block when it carries little teaching content. A buffer
+    # that merely starts with such a heading but continues into real teaching
+    # material (the old behaviour discarded it wholesale, losing e.g. the
+    # normal-PDF formula that sat on a KEY TERMS page) is kept.
+    if _SKIP_SIGNALS.search(text[:300]):
+        return _teaching_density(text) < _SKIP_TEACHING_DENSITY
+    return False
 
 
 # ── Main public API ───────────────────────────────────────────────────────────
