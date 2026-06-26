@@ -333,7 +333,7 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
 - FIGURE: when a chart/graph helps (e.g. a histogram or scatter to interpret), do NOT assume an image already exists. Write a concise figure SPEC — chart type, axes with labels/units, the values/series to plot, and what it shows — and attach it as the question's figure asset. Refer to it in the stem generically as "the figure below".
 - Attach via an OPTIONAL "assets" array on the question object (at most ONE asset per question):
     table:  {{"kind": "table", "caption": "<short caption, no source label>", "table_markdown": "| Class | Frequency |\\n| 0-10 | 4 |\\n| 10-20 | 9 |"}}
-    figure: {{"kind": "figure", "caption": "<short caption>", "figure_spec": "Histogram; x-axis rainfall (inches) bins 0-2,2-4,4-6; y-axis number of towns; bars 5,8,3; right-skewed."}}
+    figure: {{"kind": "figure", "caption": "<short caption>", "figure_spec": "A right-skewed unimodal distribution curve; x-axis = value, y-axis = frequency; long tail to the right. Qualitative SHAPE only — no specific numbers."}}
   A question that includes a complete table/figure asset and refers to "the table/figure below" is fully self-contained. Never reference an asset you do not include, and never cite a source label like "Table 1.9" / "Figure 2.3".
 - Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - max_marks: L1=2, L2=2, L3=4, L4=6, L5=8
@@ -571,7 +571,7 @@ Good examples:
 - FIGURE: when a chart/graph helps (e.g. a histogram or scatter to interpret), do NOT assume an image already exists. Write a concise figure SPEC — chart type, axes with labels/units, the values/series to plot, and what it shows — and attach it as the question's figure asset. Refer to it in the stem generically as "the figure below".
 - Attach via an OPTIONAL "assets" array on the question object (at most ONE asset per question):
     table:  {{"kind": "table", "caption": "<short caption, no source label>", "table_markdown": "| Class | Frequency |\\n| 0-10 | 4 |\\n| 10-20 | 9 |"}}
-    figure: {{"kind": "figure", "caption": "<short caption>", "figure_spec": "Histogram; x-axis rainfall (inches) bins 0-2,2-4,4-6; y-axis number of towns; bars 5,8,3; right-skewed."}}
+    figure: {{"kind": "figure", "caption": "<short caption>", "figure_spec": "A right-skewed unimodal distribution curve; x-axis = value, y-axis = frequency; long tail to the right. Qualitative SHAPE only — no specific numbers."}}
   A question that includes a complete table/figure asset and refers to "the table/figure below" is fully self-contained. Never reference an asset you do not include, and never cite a source label like "Table 1.9" / "Figure 2.3".
 - Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - Spread questions across different concepts in the source.
@@ -1628,7 +1628,16 @@ async def generate_table_grounded_questions(
         query, {"table_texts": 1, "topic_tag": 1, "section_title": 1, "chapter_title": 1},
     ).to_list(length=80)
 
-    # Distinct, well-formed tables only: >=2 columns, >=2 data rows, no '?' gaps.
+    # Distinct, well-formed tables only: >=2 columns, >=2 data rows, no '?' gaps,
+    # AND a real header row (skip raw data grids whose "headers" are just numbers —
+    # they produce weird column names like '0.50 | 4.25 | 5').
+    def _is_header_row(row: str) -> bool:
+        cells = [c.strip() for c in row.strip("|").split("|") if c.strip()]
+        if len(cells) < 2:
+            return False
+        numeric = sum(1 for c in cells if re.fullmatch(r"[-+]?\$?\d[\d,]*\.?\d*%?", c or ""))
+        return numeric <= len(cells) / 2  # majority of header cells must be text labels
+
     seen: set[str] = set()
     tables: list[tuple[str, str]] = []
     for c in chunks:
@@ -1639,6 +1648,8 @@ async def generate_table_grounded_questions(
                 continue
             data_rows = [r for r in md.splitlines() if r.strip() and (set(r) - {"-", ":", "|", " "})]
             if len(data_rows) < 3:
+                continue
+            if not _is_header_row(data_rows[0]):
                 continue
             key = md[:80]
             if key in seen:
@@ -1702,6 +1713,87 @@ async def generate_table_grounded_questions(
     verified = await verify_generated_questions(valid)
     logger.info(f"[TABLE-GEN] {len(verified)} survived the quality gate")
     return verified[:count]
+
+
+async def generate_figure_grounded_questions(
+    book_id: Optional[str],
+    chapter_num: Optional[int],
+    chapter_topic: str,
+    question_type: str,
+    count: int,
+    difficulty: str = "all",
+    existing_questions: Optional[list[str]] = None,
+) -> list[dict]:
+    """Generate CONCEPTUAL-figure questions directly (focused path, like the
+    table path). Each question tests what a SHAPE/PATTERN MEANS — skewness, mean
+    vs median, correlation direction/strength, spread/outliers — never reading a
+    precise value off the chart, because AI-generated images are reliable only for
+    qualitative shapes. The illustration image is generated ONLY after a question
+    passes the quality gate. Returns gate-verified, image-bearing questions.
+    """
+    from app.services.answer_verifier import verify_generated_questions
+    from app.services.question_assets import realize_figure_images
+
+    qtype = question_type if question_type in {"mcq", "true_false", "short_answer"} else "short_answer"
+    diff = difficulty if difficulty in ("easy", "medium", "hard") else "medium"
+    if qtype == "mcq":
+        type_rules = ('Provide an "options" object (keys A,B,C,D, distinct) and "correct_answer" as the correct '
+                      "letter; distractors plausible but FALSE.")
+    elif qtype == "true_false":
+        type_rules = 'Make a True/False statement; set "correct_answer" to "True" or "False".'
+    else:
+        type_rules = 'Provide a full worked "model_answer".'
+
+    sem = asyncio.Semaphore(3)
+
+    async def _one(_i: int) -> Optional[dict]:
+        prompt = (
+            f"You are an expert statistics instructor writing an exam question for the chapter on {chapter_topic}.\n"
+            "Write ONE question built around a CONCEPTUAL figure that illustrates a SHAPE or PATTERN — choose the one "
+            "most relevant to this chapter: a right-/left-skewed or symmetric distribution, a normal bell curve, a "
+            "positive / negative / no-correlation scatter plot, or a boxplot showing spread and outliers. "
+            "The student SEES this figure, so the question MUST test what the shape or pattern MEANS (e.g. skewness and "
+            "how the mean and median compare, the direction/strength of a correlation, spread and outliers) — NEVER "
+            'reading a precise numeric value off the figure. Refer to it as "the figure below"; do not cite any source label.\n'
+            f"{type_rules}\n"
+            "Get the statistics RIGHT: for a RIGHT-skewed (positive) distribution mean > median; for a LEFT-skewed "
+            "(negative) distribution mean < median; for a symmetric distribution mean ≈ median. A positive correlation "
+            "is an upward-trending scatter, negative is downward, near-zero shows no trend. A boxplot's box spans Q1–Q3 "
+            "(the IQR) with the median inside; points beyond the whiskers are outliers.\n"
+            'Also provide a "figure_spec": a concise description of the qualitative shape to draw (NO specific numbers).\n'
+            f"Difficulty: {diff}.\n"
+            "Respond ONLY as a JSON object with keys: question_text, model_answer, rubric, max_marks, topic_tag, "
+            "difficulty, figure_spec" + (", options, correct_answer" if qtype in {"mcq", "true_false"} else "") + "."
+        )
+        async with sem:
+            try:
+                raw = await generation_service.generate(prompt)
+            except Exception as exc:
+                logger.warning(f"[FIGURE-GEN] generation failed: {_safe_exception_message(exc)}")
+                return None
+        obj = _parse_single_json_obj(raw)
+        if not obj or not obj.get("question_text") or not obj.get("figure_spec"):
+            return None
+        obj["question_type"] = qtype
+        obj.setdefault("rubric", "Award marks for correct interpretation of the figure.")
+        obj.setdefault("max_marks", 3.0)
+        obj.setdefault("topic_tag", chapter_topic or "Statistics")
+        obj.setdefault("difficulty", diff)
+        obj["assets"] = [{"kind": "figure", "caption": "", "figure_spec": obj.pop("figure_spec")}]
+        return obj
+
+    # Generate extra candidates so enough survive the gate; images are only
+    # produced for the (few) that pass, so this adds cheap judge calls, not images.
+    results = await asyncio.gather(*[_one(i) for i in range(count + 3)])
+    raw_qs = [r for r in results if r]
+    logger.info(f"[FIGURE-GEN] built {len(raw_qs)} conceptual-figure candidate(s)")
+    if not raw_qs:
+        return []
+    valid = _validate_questions(raw_qs, qtype)
+    verified = await verify_generated_questions(valid)
+    realized = await realize_figure_images(verified, chapter_num=chapter_num, book_id=book_id)
+    logger.info(f"[FIGURE-GEN] {len(realized)} survived gate + got an image")
+    return realized[:count]
 
 
 def _normalise_assets(q: dict) -> None:

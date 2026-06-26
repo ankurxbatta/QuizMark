@@ -239,13 +239,18 @@ async def _build_asset_directive(
             "does not fit a concept, ask a clean concept question instead. Require a real SKILL (compute/interpret/compare/conclude), not a single-cell lookup."
         )
     if require_figure:
-        # Cost-aware: figures are emitted as specs and the image is generated only
-        # after a question passes the gate, so prefer (don't blindly force) figures.
+        # Figures are AI-generated images, which are reliable ONLY for qualitative
+        # SHAPES/PATTERNS — never for precise data values. So steer every figure
+        # question to a CONCEPTUAL illustration and test what the shape means.
+        # The image is generated only after the question passes the gate.
         parts.append(
-            "FIGURE PREFERRED: build questions around a chart/FIGURE wherever the concept suits visualisation "
-            "(a distribution, a relationship, a comparison). Emit a concise figure spec (chart type, axes, what it "
-            "shows) as a question 'assets' entry — do NOT assume an image already exists. Never force a figure onto "
-            "a concept where a chart is meaningless."
+            "FIGURE QUESTIONS (conceptual only): build EACH question around a CONCEPTUAL figure that illustrates a "
+            "SHAPE or PATTERN — e.g. a right-skewed / left-skewed / symmetric distribution, a normal bell curve, a "
+            "positive / negative / no-correlation scatter pattern, or a boxplot showing spread. The question MUST test "
+            "what the shape or pattern MEANS (skewness, how mean vs median compare, correlation direction/strength, "
+            "spread/outliers) — NEVER reading a precise numeric value off the figure (the image is a qualitative "
+            "illustration, not a data source). Emit a concise figure_spec describing the shape/pattern as the "
+            "question's 'assets' entry; do NOT assume an image already exists."
         )
     directive = "\n".join(parts)
     if blocks:
@@ -289,19 +294,37 @@ async def orchestrate_question_bank(
         f"| difficulty={difficulty}{' (locked)' if explicit_difficulty else ''}"
     )
 
-    # ── Table-grounded path: when the user asks for table questions, ground each
-    # one in a REAL cleaned table from the chapter (reliable + self-contained)
-    # rather than hoping the model invents a complete correct table inline. ─────
-    if require_table:
-        from app.services.question_generator import generate_table_grounded_questions
-        tq = await generate_table_grounded_questions(
-            book_id=book_id, chapter_num=chapter_num, question_type=question_type,
-            count=count, difficulty=difficulty, existing_questions=existing_questions,
+    # ── Dedicated asset paths: tables are grounded in REAL cleaned chapter tables;
+    # figures are conceptual-shape questions whose image is generated only after the
+    # gate. When BOTH toggles are on, split the requested count between them. ──────
+    if require_table or require_figure:
+        from app.services.question_generator import (
+            generate_figure_grounded_questions,
+            generate_table_grounded_questions,
         )
-        if tq:
-            logger.info(f"[ORCH] table-grounded path produced {len(tq)} question(s)")
-            return tq[:count]
-        logger.info("[ORCH] table-grounded path empty — falling back to standard generation")
+        if require_table and require_figure:
+            n_table = (count + 1) // 2
+            n_figure = count - n_table
+        elif require_table:
+            n_table, n_figure = count, 0
+        else:
+            n_table, n_figure = 0, count
+        asset_qs: list[dict] = []
+        if n_table:
+            asset_qs.extend(await generate_table_grounded_questions(
+                book_id=book_id, chapter_num=chapter_num, question_type=question_type,
+                count=n_table, difficulty=difficulty, existing_questions=existing_questions,
+            ))
+        if n_figure:
+            asset_qs.extend(await generate_figure_grounded_questions(
+                book_id=book_id, chapter_num=chapter_num, chapter_topic=chapter_topic,
+                question_type=question_type, count=n_figure, difficulty=difficulty,
+                existing_questions=existing_questions,
+            ))
+        if asset_qs:
+            logger.info(f"[ORCH] asset paths produced {len(asset_qs)} question(s) (table={n_table}, figure={n_figure})")
+            return asset_qs[:count]
+        logger.info("[ORCH] asset paths empty — falling back to standard generation")
 
     # ── Round 0: "Read the chapter carefully" → extract key concepts ──────────
     seed_raw = await deep_retrieve_for_generation(

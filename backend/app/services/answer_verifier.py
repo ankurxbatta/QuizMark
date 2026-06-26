@@ -762,9 +762,16 @@ def _judge_asset_block(question: dict) -> str:
             or figure.get("caption")
             or ""
         ).strip()
-        rendered = " [a chart image is attached]" if figure.get("image_id") else ""
-        if desc or rendered:
-            parts.append(f"ATTACHED FIGURE{rendered}:\n{desc[:1200]}")
+        # The image is generated only AFTER a question passes, so at judge time a
+        # figure usually has just its spec. Tell the judge to treat that figure as
+        # one the student WILL clearly see, otherwise it wrongly fails self-containment.
+        if figure.get("image_id"):
+            note = " [a chart image is attached and visible to the student]"
+        else:
+            note = (" [a clear chart illustrating exactly this WILL be shown to the student directly below the "
+                    "question — treat this figure as fully visible when judging self-containment and answerability]")
+        if desc or note:
+            parts.append(f"ATTACHED FIGURE{note}:\n{desc[:1200]}")
     if not parts:
         return "(No table or figure is attached to this question.)"
     return "\n\n".join(parts)

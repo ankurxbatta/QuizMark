@@ -365,8 +365,9 @@ async def attach_assets_to_questions(
 # render it ONLY here — after the quality gate — for the questions that survived.
 
 _SPEC_IMAGE_PROMPT = (
-    "Draw a clean, labeled statistical chart for a textbook from this specification. "
-    "The chart type, axes, labels and numeric values must EXACTLY match the specification. "
+    "Draw a clean, minimal, labeled statistical diagram for a textbook that illustrates the SHAPE or PATTERN "
+    "described below (e.g. a skewed or symmetric distribution curve, a normal bell curve, a scatter pattern, or "
+    "a boxplot). Show clearly-labeled axes and the qualitative shape; do NOT invent precise numeric tick values. "
     "No watermark, no extra explanatory text.\n\nSpecification:\n{spec}"
 )
 
