@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     # quality replacements for up to this many extra rounds before giving up.
     GEN_TOPUP_MAX_ROUNDS: int = 3
 
+    # ── Question-quality gate (reject un-renderable / unanswerable / wrong) ───
+    # A: deterministic renderability checks (no LLM). B: deepsearch answerability
+    # + correctness judge (one LLM call per surviving question). Rejected
+    # questions are DROPPED from the verified list so the top-up loops regenerate
+    # replacements — keeping the requested count while raising quality.
+    QUALITY_GATE_ENABLED: bool = True          # master switch for both A and B
+    QUALITY_JUDGE_ENABLED: bool = True         # LLM answerability/correctness judge (B)
+    QUALITY_JUDGE_CONCURRENCY: int = 3         # parallel judge LLM calls
+    QUALITY_JUDGE_RETRIEVAL_K: int = 4         # supporting chunks fetched per judged question
+
     # ── Application ──────────────────────────────────────────────────────────
     BATCH_SIZE_LIMIT: int = 50
     BACKUP_RETENTION_DAYS: int = 30

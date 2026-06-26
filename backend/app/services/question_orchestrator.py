@@ -200,9 +200,12 @@ async def _build_asset_directive(
     chapter_num: Optional[int],
     chapter_topic: str,
 ) -> str:
-    """Build a prompt directive (with real chapter tables/figures) that forces
-    every generated question to be based on a table and/or figure. '' if not
-    requested or nothing retrievable."""
+    """Build a prompt directive (with real chapter tables/figures) that BIASES
+    generation toward table/figure questions. require_table/require_figure are
+    PREFERENCES, not hard constraints: the model still decides per question
+    whether an asset genuinely helps (and constructs it from the real numbers),
+    so it never forces an unanswerable asset onto a question. '' if not requested
+    or nothing retrievable."""
     if not (require_table or require_figure):
         return ""
     from app.core.config import settings
@@ -222,13 +225,13 @@ async def _build_asset_directive(
                 blocks.append(b)
     except Exception as exc:
         logger.debug(f"[ORCH] asset directive retrieval skipped: {exc}")
-    want = " and ".join(w for w, c in [("a real data TABLE", require_table),
-                                       ("a real FIGURE/GRAPH", require_figure)] if c)
+    want = " and/or ".join(w for w, c in [("a real data TABLE", require_table),
+                                          ("a real FIGURE/GRAPH", require_figure)] if c)
     directive = (
-        f"ASSET REQUIREMENT: EVERY question MUST be built around {want} from the chapter. "
-        "Reproduce the relevant table inside question_text as a markdown table (with all correct values), "
-        "or explicitly reference the figure, and require the student to read/interpret it to answer. "
-        "Do NOT write questions that ignore the table/figure."
+        f"ASSET PREFERENCE: Where it genuinely helps test the concept, FAVOUR questions built around "
+        f"{want} from the chapter — construct the table from the real numbers below (as a question 'assets' "
+        "entry) or describe the figure as a concise spec ('assets' entry), per the TABLES & FIGURES rules. "
+        "Do NOT force an asset onto a question that does not need one, and never reference an asset you do not include."
     )
     if blocks:
         directive += "\n\n" + "\n\n".join(blocks)
@@ -487,18 +490,31 @@ async def orchestrate_question_bank(
             f"top-up (content-limited); storing what we have."
         )
 
-    # Quality passes: recompute numeric model answers, de-ambiguate MCQ options
-    from app.services.answer_verifier import verify_generated_questions
-    final = await verify_generated_questions(questions[:count])
+    final = questions[:count]
 
-    # Attach optional table/figure assets (bounded; degrades cleanly).
+    # Assets are produced DURING generation now: the model constructs tables from
+    # the real numbers (stored as table HTML) and emits figure SPECS (text only).
+    # Tables and figure specs are already attached and are CHEAP, so the quality
+    # gate below runs on them directly — it can see each question's table/figure
+    # content and correctly judge an asset-bearing question as self-contained.
+
+    # Quality passes: recompute numeric model answers, de-ambiguate MCQ options,
+    # then the quality gate (DROPS un-renderable / unanswerable / wrong questions
+    # — the returned list may shrink; the top-up loops regenerate the shortfall).
+    from app.services.answer_verifier import verify_generated_questions
+    final = await verify_generated_questions(final)
+
+    # ONLY NOW generate the expensive figure IMAGES — for the questions that
+    # PASSED the gate — so we never pay gpt-image-1 for a question that is then
+    # dropped. Bounded by ASSET_MAX_PER_CHAPTER (no new unbounded loop). A figure
+    # question whose image can't be produced is dropped (no dangling reference).
     try:
-        from app.services.question_assets import attach_assets_to_questions
-        final = await attach_assets_to_questions(
+        from app.services.question_assets import realize_figure_images
+        final = await realize_figure_images(
             final, chapter_num=chapter_num, book_id=book_id,
         )
     except Exception as exc:
-        logger.warning(f"[ORCH] asset attachment failed (non-fatal): {exc}")
+        logger.warning(f"[ORCH] figure image realization failed (non-fatal): {exc}")
 
     logger.info(f"[ORCH] Final — {len(final)} questions for '{chapter_topic}'")
     return final

@@ -357,3 +357,108 @@ async def attach_assets_to_questions(
         results = await asyncio.gather(*[_try_attach(q) for q in window])
         attached += sum(1 for ok in results if ok)
     return questions
+
+
+# ── Post-gate figure image realization ───────────────────────────────────────────
+# A figure asset is produced during generation as a TEXT spec only (kind 'figure',
+# image_id=None, _figure_spec=...). The actual gpt-image-1 image is expensive, so we
+# render it ONLY here — after the quality gate — for the questions that survived.
+
+_SPEC_IMAGE_PROMPT = (
+    "Draw a clean, labeled statistical chart for a textbook from this specification. "
+    "The chart type, axes, labels and numeric values must EXACTLY match the specification. "
+    "No watermark, no extra explanatory text.\n\nSpecification:\n{spec}"
+)
+
+
+def _figure_spec_asset(q: dict) -> dict | None:
+    """The question's figure asset still awaiting an image (spec only), if any."""
+    for asset in q.get("assets") or []:
+        if isinstance(asset, dict) and asset.get("kind") == "figure" and not asset.get("image_id"):
+            return asset
+    return None
+
+
+async def _realize_one_figure(q: dict) -> bool:
+    """Generate + attach the image for a question's figure-spec asset.
+    Returns True when the asset now carries an image (or there was nothing to do)."""
+    asset = _figure_spec_asset(q)
+    if asset is None:
+        return True  # no pending figure
+    spec = (asset.get("_figure_spec") or asset.get("alt_text") or asset.get("caption") or "").strip()
+    if not settings.IMAGE_GEN_ENABLED or not spec:
+        return False
+
+    from app.services.llm_service import generate_image
+    try:
+        png = await generate_image(_SPEC_IMAGE_PROMPT.format(spec=spec[:700]))
+    except Exception as exc:
+        logger.warning(f"[asset] figure image generation failed (degrading): {exc}")
+        return False
+    if not png:
+        return False
+
+    from app.services.mongo_vector_store import save_question_asset
+    asset_id = uuid4().hex
+    if not await save_question_asset(asset_id, png):
+        return False
+    asset["image_id"] = asset_id
+    asset["alt_text"] = asset.get("alt_text") or spec[:200]
+    return True
+
+
+def _drop_unrendered_figures(questions: list[dict]) -> list[dict]:
+    """Drop questions whose figure asset has no image (image gen disabled/failed),
+    so the frontend never shows a 'see the figure below' with nothing to render.
+    Also strips the transient ``_figure_spec`` key from surviving assets."""
+    kept: list[dict] = []
+    for q in questions:
+        if _figure_spec_asset(q) is not None:
+            logger.info(
+                "[asset] dropping figure question with no rendered image: %r",
+                (q.get("question_text", "") or "")[:80],
+            )
+            continue
+        for asset in q.get("assets") or []:
+            if isinstance(asset, dict):
+                asset.pop("_figure_spec", None)
+        kept.append(q)
+    return kept
+
+
+async def realize_figure_images(
+    questions: list[dict],
+    chapter_num=None,
+    book_id=None,
+) -> list[dict]:
+    """Generate the actual chart image for every gate-surviving question that
+    carries a figure SPEC asset. Bounded by ASSET_MAX_PER_CHAPTER (no new loop).
+    Fully defensive: any failure degrades to dropping that figure question."""
+    if not questions:
+        return questions
+
+    pending = [q for q in questions if _figure_spec_asset(q) is not None]
+    limit = max(0, int(settings.ASSET_MAX_PER_CHAPTER))
+    if not pending or limit == 0 or not settings.IMAGE_GEN_ENABLED:
+        return _drop_unrendered_figures(questions)
+
+    sem = asyncio.Semaphore(2)
+    realized = 0
+
+    async def _try(q: dict) -> bool:
+        async with sem:
+            try:
+                return await _realize_one_figure(q)
+            except Exception as exc:
+                logger.warning(f"[asset] figure realization failed (non-fatal): {exc}")
+                return False
+
+    batch = max(1, limit)
+    for start in range(0, len(pending), batch):
+        if realized >= limit:
+            break
+        window = pending[start:start + batch]
+        results = await asyncio.gather(*[_try(q) for q in window])
+        realized += sum(1 for ok in results if ok)
+
+    return _drop_unrendered_figures(questions)

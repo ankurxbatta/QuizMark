@@ -274,7 +274,7 @@ _BLOOM_LEVEL_INSTRUCTIONS: dict[str, str] = {
 }
 
 _TARGETED_BLOOM_PROMPT = """\
-You are a statistics assessment author writing exam questions for a business statistics course.
+You are an expert statistics instructor writing exam questions that assess genuine understanding of the chapter's CORE concepts, methods, and interpretation — aligned to what a student is expected to learn in a business statistics course.
 
 SOURCE CONTENT (base all questions strictly on this material):
 {content}
@@ -291,6 +291,13 @@ bloom_level for ALL questions in your output: "{bloom_level}"
 Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive level requirement above.
 
 {uniqueness_block}
+
+━━━ RELEVANCE — assess genuine understanding ━━━
+- Every question MUST test a NAMED statistical concept or skill present in the SOURCE CONTENT (e.g. relative/cumulative frequency, a probability rule, a distribution's use, a sampling-distribution idea, a hypothesis test, interpreting a confidence interval, ANOVA reasoning) — anchor the question to that concept.
+- FORBIDDEN — dataset trivia / pure lookup: never ask the student to merely read a single value from a table or recite an incidental detail of an example's narrative (names, places, one-off dataset counts, e.g. "how many towns received between 9.01 and 11.03 inches?") UNLESS that lookup is a step inside a genuine computation or interpretation. This reinforces the trivial-recall ban.
+- When a table or figure is used, the question must require a SKILL — compute, interpret, compare, draw a conclusion, or justify — NOT "find cell X".
+- Prefer TRANSFERABLE questions about the method/concept over questions bound to one specific dataset's quirks.
+- Stay on THIS chapter's concepts; do not drift to unrelated topics.
 
 ━━━ SHORT ANSWER ━━━
 - Ask about a SPECIFIC concept, formula, condition, or scenario — not vague prompts.
@@ -315,7 +322,19 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
 - Model answer: "True" or "False" + 1–2 sentence justification.
 
 ━━━ ALL TYPES ━━━
+- SELF-CONTAINED: every question must be fully answerable from ONLY what it shows. NEVER reference a table, figure, graph, chart, plot or "data below/above" unless you ALSO include it — either inline in the question text (a markdown table) OR as a structured asset (see TABLES & FIGURES below). If you cannot include it, do not refer to it — ask a different question.
+- NEVER cite a source label such as "Table 1.9", "Figure 2.3", "Example 1.15", or any "Table/Figure/Example/Exercise <number>". The student cannot see the book. Reproduce any needed data inline and refer to it generically (e.g. "the table below", "the following data", "the figure below").
 - If you reproduce a data table in a question, every cell must hold its correct value. Only ever leave a cell blank if THIS question explicitly asks the student to compute that exact value — and then the stem must name it. Never emit a silently incomplete table.
+- NO PLACEHOLDERS: never leave "____", "[blank]", "<...>", "TODO", or a bare "?" standing in for a value, unless the question explicitly asks the student to compute that exact missing cell. Finish every sentence; never end mid-thought.
+
+━━━ TABLES & FIGURES (decide per question) ━━━
+- Decide PER QUESTION whether a table or figure genuinely helps test the concept. MOST questions need NONE — add an asset only when it is essential to the skill being tested, never as decoration.
+- TABLE: when a table helps, CONSTRUCT a clean table from the ACTUAL numbers in the source material and attach it as the question's table asset. Fill EVERY cell with its correct value; leave a cell blank ONLY when THIS question explicitly asks the student to compute that exact cell. Refer to it in the stem generically as "the table below".
+- FIGURE: when a chart/graph helps (e.g. a histogram or scatter to interpret), do NOT assume an image already exists. Write a concise figure SPEC — chart type, axes with labels/units, the values/series to plot, and what it shows — and attach it as the question's figure asset. Refer to it in the stem generically as "the figure below".
+- Attach via an OPTIONAL "assets" array on the question object (at most ONE asset per question):
+    table:  {{"kind": "table", "caption": "<short caption, no source label>", "table_markdown": "| Class | Frequency |\\n| 0-10 | 4 |\\n| 10-20 | 9 |"}}
+    figure: {{"kind": "figure", "caption": "<short caption>", "figure_spec": "Histogram; x-axis rainfall (inches) bins 0-2,2-4,4-6; y-axis number of towns; bars 5,8,3; right-skewed."}}
+  A question that includes a complete table/figure asset and refers to "the table/figure below" is fully self-contained. Never reference an asset you do not include, and never cite a source label like "Table 1.9" / "Figure 2.3".
 - Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - max_marks: L1=2, L2=2, L3=4, L4=6, L5=8
 - difficulty: easy (L1–L2) | medium (L3–L4) | hard (L5)
@@ -325,6 +344,7 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
 Respond ONLY as a valid JSON array. Required keys per question:
 question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty, bloom_level
 MCQ elements may also include an optional options object with keys A, B, C, D.
+Any question MAY also include an optional "assets" array (one table or figure) as described under TABLES & FIGURES.
 
 No preamble. No trailing text. Just the JSON array.
 """
@@ -468,7 +488,7 @@ EXISTING QUESTIONS IN THE BANK (avoid overlap with ALL of these):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PLAIN_TEXT_PROMPT = """\
-You are a statistics assessment author writing exam questions for a business statistics course.
+You are an expert statistics instructor writing exam questions that assess genuine understanding of the chapter's CORE concepts, methods, and interpretation — aligned to what a student is expected to learn in a business statistics course.
 
 SOURCE TEXT:
 {content}
@@ -482,6 +502,13 @@ Generate {count} high-quality exam questions of type "{qtype}".
 {uniqueness_block}
 
 Follow the style rules and examples below carefully.
+
+━━━ RELEVANCE — assess genuine understanding ━━━
+- Every question MUST test a NAMED statistical concept or skill present in the SOURCE TEXT (e.g. relative/cumulative frequency, a probability rule, a distribution's use, a sampling-distribution idea, a hypothesis test, interpreting a confidence interval, ANOVA reasoning) — anchor the question to that concept.
+- FORBIDDEN — dataset trivia / pure lookup: never ask the student to merely read a single value from a table or recite an incidental detail of an example's narrative (names, places, one-off dataset counts, e.g. "how many towns received between 9.01 and 11.03 inches?") UNLESS that lookup is a step inside a genuine computation or interpretation. This reinforces the trivial-recall ban.
+- When a table or figure is used, the question must require a SKILL — compute, interpret, compare, draw a conclusion, or justify — NOT "find cell X".
+- Prefer TRANSFERABLE questions about the method/concept over questions bound to one specific dataset's quirks.
+- Stay on THIS chapter's concepts; do not drift to unrelated topics.
 
 ━━━ SHORT ANSWER ━━━
 - Ask about a SPECIFIC concept, formula, condition, or calculation — not vague "explain" or "describe" prompts.
@@ -533,7 +560,19 @@ Good examples:
   • "True or False: Increasing sample size while holding all else constant produces a wider confidence interval."
 
 ━━━ ALL TYPES ━━━
+- SELF-CONTAINED: every question must be fully answerable from ONLY what it shows. NEVER reference a table, figure, graph, chart, plot or "data below/above" unless you ALSO include it — either inline in the question text (a markdown table) OR as a structured asset (see TABLES & FIGURES below). If you cannot include it, do not refer to it — ask a different question.
+- NEVER cite a source label such as "Table 1.9", "Figure 2.3", "Example 1.15", or any "Table/Figure/Example/Exercise <number>". The student cannot see the book. Reproduce any needed data inline and refer to it generically (e.g. "the table below", "the following data", "the figure below").
 - If you reproduce a data table in a question, every cell must hold its correct value. Only ever leave a cell blank if THIS question explicitly asks the student to compute that exact value — and then the stem must name it. Never emit a silently incomplete table.
+- NO PLACEHOLDERS: never leave "____", "[blank]", "<...>", "TODO", or a bare "?" standing in for a value, unless the question explicitly asks the student to compute that exact missing cell. Finish every sentence; never end mid-thought.
+
+━━━ TABLES & FIGURES (decide per question) ━━━
+- Decide PER QUESTION whether a table or figure genuinely helps test the concept. MOST questions need NONE — add an asset only when it is essential to the skill being tested, never as decoration.
+- TABLE: when a table helps, CONSTRUCT a clean table from the ACTUAL numbers in the source material and attach it as the question's table asset. Fill EVERY cell with its correct value; leave a cell blank ONLY when THIS question explicitly asks the student to compute that exact cell. Refer to it in the stem generically as "the table below".
+- FIGURE: when a chart/graph helps (e.g. a histogram or scatter to interpret), do NOT assume an image already exists. Write a concise figure SPEC — chart type, axes with labels/units, the values/series to plot, and what it shows — and attach it as the question's figure asset. Refer to it in the stem generically as "the figure below".
+- Attach via an OPTIONAL "assets" array on the question object (at most ONE asset per question):
+    table:  {{"kind": "table", "caption": "<short caption, no source label>", "table_markdown": "| Class | Frequency |\\n| 0-10 | 4 |\\n| 10-20 | 9 |"}}
+    figure: {{"kind": "figure", "caption": "<short caption>", "figure_spec": "Histogram; x-axis rainfall (inches) bins 0-2,2-4,4-6; y-axis number of towns; bars 5,8,3; right-skewed."}}
+  A question that includes a complete table/figure asset and refers to "the table/figure below" is fully self-contained. Never reference an asset you do not include, and never cite a source label like "Table 1.9" / "Figure 2.3".
 - Write EVERY mathematical expression as inline LaTeX wrapped in single dollar signs, e.g. $P(x)=\\frac{{\\mu^x e^{{-\\mu}}}}{{x!}}$, $\\bar{{x}}$, $\\sigma^2$, $\\binom{{n}}{{k}}p^k(1-p)^{{n-k}}$. Use \\mu, \\sigma, \\lambda for Greek letters. This applies to the stem, every option, and the model answer.
 - Spread questions across different concepts in the source.
 - max_marks: 2–8 depending on complexity (L1=2, L2=2, L3=4, L4=6, L5=8).
@@ -544,6 +583,7 @@ Good examples:
 Respond ONLY as a valid JSON array with required keys:
 question_text, question_type, model_answer, rubric, max_marks, topic_tag, difficulty, bloom_level
 MCQ elements may also include an optional options or choices object with keys A, B, C, D.
+Any question MAY also include an optional "assets" array (one table or figure) as described under TABLES & FIGURES.
 """
 
 
@@ -923,7 +963,11 @@ async def generate_questions(
 
     # Quality passes: recompute numeric model answers, de-ambiguate MCQ options
     from app.services.answer_verifier import verify_generated_questions
-    return await verify_generated_questions(result)
+    result = await verify_generated_questions(result)
+    # Render any figure-spec image only AFTER the gate (and drop a figure question
+    # whose image can't be produced, so the stem never dangles a missing figure).
+    from app.services.question_assets import realize_figure_images
+    return await realize_figure_images(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1483,6 +1527,121 @@ def _derive_true_false_key(model_answer: str) -> str:
     return "True"
 
 
+# A student-facing question must never cite a book-internal label ("Table 1.9",
+# "Figure 2.3", "Example 1.15", "Exercise 3.4") — the student can't see the book,
+# and it leaks the source. The data should be inline and referred to generically.
+# The real label survives only in DB metadata (source_chunk / page range / book_id /
+# topic_tag), which this sanitiser never touches.
+#   <num> = 12 | 1.9 | 2.3.1 | 1.9a  (must be preceded by a label word, so plain
+#   decimals like "p = 1.9" or "9.01 inches" are left untouched).
+_SOURCE_LABEL_RE = re.compile(
+    r"(?:\b(?:the|a|an)\s+)?"
+    r"\b(?P<label>tables?|figures?|graphs?|charts?|diagrams?|histograms?|plots?"
+    r"|exhibits?|examples?|exercises?|problems?)\s+"
+    r"\d+(?:\.\d+)*[A-Za-z]?\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_source_labels(text: str) -> str:
+    """Genericise book-internal cross-references in STUDENT-FACING text.
+
+    "According to Table 1.9, what …" → "According to the table below, what …"
+    "Figure 6.1 shows …"             → "The figure below shows …"
+    "use the data in Example 1.15"   → "use the data in a worked example"
+    A normal sentence (no labels) and bare decimals are returned unchanged.
+
+    Pure function (unit-testable). Apply ONLY to question_text / options / model
+    answer — never to metadata fields that preserve provenance.
+    """
+    if not text:
+        return text
+
+    def _repl(match: re.Match) -> str:
+        label = match.group("label").lower()
+        if label.startswith("table"):
+            out = "the table below"
+        elif label.startswith((
+            "figure", "graph", "chart", "diagram", "histogram", "plot", "exhibit",
+        )):
+            out = "the figure below"
+        elif label.startswith("example"):
+            out = "a worked example"
+        else:  # exercise / problem
+            out = "the following"
+        # Capitalise when the reference starts a sentence so grammar still reads.
+        prefix = match.string[: match.start()]
+        if not prefix.strip() or re.search(r"[.!?:]\s*$", prefix):
+            out = out[0].upper() + out[1:]
+        return out
+
+    cleaned = _SOURCE_LABEL_RE.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
+def _normalise_assets(q: dict) -> None:
+    """Convert a model-emitted ``assets`` array into the stored asset schema.
+
+    The generator prompts let the model attach (at most one) table or figure:
+      • table  → ``table_markdown`` is rendered to deterministic HTML (kind 'table',
+                 ``table_html`` set) so the existing frontend renders it as-is.
+      • figure → a text ``figure_spec`` is preserved (kind 'figure', no image yet)
+                 in ``_figure_spec``; the expensive image is generated later, only
+                 after the question passes the quality gate.
+    Pure/defensive: an unusable asset is dropped (the question is kept; the gate
+    then catches a now-missing reference). Caps at one asset to match the rest of
+    the pipeline (gate helpers + post-gate figure realization read one asset)."""
+    raw = q.get("assets")
+    if not isinstance(raw, list) or not raw:
+        q.pop("assets", None)
+        return
+    from app.services.question_assets import render_table_html
+    normalised: list[dict] = []
+    for a in raw:
+        if not isinstance(a, dict):
+            continue
+        kind = str(a.get("kind", "")).strip().lower()
+        markdown = _stringify_llm_value(
+            a.get("table_markdown") or a.get("markdown") or a.get("table")
+        )
+        spec = _stringify_llm_value(
+            a.get("figure_spec") or a.get("description") or a.get("spec")
+        )
+        caption = _stringify_llm_value(a.get("caption"))
+        if kind == "table" or (kind != "figure" and markdown):
+            html = _stringify_llm_value(a.get("table_html"))
+            if not html and markdown:
+                html, _ = render_table_html(markdown)
+            if "<table" not in (html or "").lower():
+                continue  # unparseable table → drop asset
+            normalised.append({
+                "kind": "table",
+                "caption": caption,
+                "alt_text": caption or "Data table",
+                "table_html": html,
+                "image_id": None,
+                "source_page": None,
+            })
+        elif kind == "figure" or spec:
+            if not spec:
+                continue
+            normalised.append({
+                "kind": "figure",
+                "caption": caption,
+                "alt_text": caption or spec[:200],
+                "table_html": None,
+                "image_id": None,
+                "source_page": None,
+                "_figure_spec": spec[:1200],
+            })
+        if normalised:
+            break  # one asset per question
+    if normalised:
+        q["assets"] = normalised[:1]
+    else:
+        q.pop("assets", None)
+
+
 def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]:
     """Filter out incomplete or malformed question dicts."""
     valid = []
@@ -1535,5 +1694,14 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
         if bloom not in {"L1", "L2", "L3", "L4", "L5"}:
             bloom = {"easy": "L2", "medium": "L3", "hard": "L5"}.get(diff, "L3")
         q["bloom_level"] = bloom
+        # Strip book-internal source labels from every student-facing field (MCQ
+        # options live inside question_text). Runs BEFORE the quality gate so a
+        # "Table 1.9" reference becomes "the table below" and is then correctly
+        # required to carry an attached table. Metadata fields keep the real label.
+        q["question_text"] = _strip_source_labels(q["question_text"])
+        q["model_answer"] = _strip_source_labels(q["model_answer"])
+        # Normalise any model-emitted table/figure asset into the stored schema
+        # (table → HTML now; figure → spec only, image generated post-gate).
+        _normalise_assets(q)
         valid.append(q)
     return valid

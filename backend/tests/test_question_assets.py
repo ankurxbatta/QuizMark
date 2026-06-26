@@ -1,10 +1,13 @@
 import asyncio
 
 from app.services.question_assets import (
+    _drop_unrendered_figures,
+    _figure_spec_asset,
     build_table_asset,
     markdown_table_to_html,
     render_table_html,
 )
+from app.services.question_generator import _normalise_assets
 
 # A "find the missing probability" table: the P(x) for x=3 is left blank so the
 # student computes it from the constraint that the values sum to 1.
@@ -63,3 +66,72 @@ def test_build_table_asset_no_annotation_when_complete():
 def test_build_table_asset_annotates_even_without_caption():
     asset = asyncio.run(build_table_asset(MISSING_PX))
     assert 'Find the value(s) shown as "?".' in asset["caption"]
+
+
+# ── _normalise_assets — model-emitted assets → stored schema ────────────────────
+
+def test_normalise_table_markdown_becomes_table_html():
+    q = {"assets": [{"kind": "table", "caption": "Frequencies",
+                     "table_markdown": FULL_TABLE}]}
+    _normalise_assets(q)
+    assert len(q["assets"]) == 1
+    asset = q["assets"][0]
+    assert asset["kind"] == "table"
+    assert "<table" in asset["table_html"].lower()
+    assert asset["image_id"] is None
+    assert asset["caption"] == "Frequencies"
+
+
+def test_normalise_figure_spec_is_kept_without_image():
+    spec = "Histogram; x-axis income; y-axis count; bars 4,9,12,6; right-skew."
+    q = {"assets": [{"kind": "figure", "caption": "Income", "figure_spec": spec}]}
+    _normalise_assets(q)
+    asset = q["assets"][0]
+    assert asset["kind"] == "figure"
+    assert asset["image_id"] is None              # image generated post-gate only
+    assert asset["_figure_spec"] == spec
+    assert _figure_spec_asset(q) is asset         # gate/realizer can find it
+
+
+def test_normalise_drops_unparseable_table_asset():
+    # No grid → no <table> → asset dropped (question itself is kept by caller).
+    q = {"assets": [{"kind": "table", "table_markdown": "not a table at all"}]}
+    _normalise_assets(q)
+    assert "assets" not in q
+
+
+def test_normalise_ignores_non_list_assets():
+    q = {"assets": "junk"}
+    _normalise_assets(q)
+    assert "assets" not in q
+
+
+def test_normalise_caps_at_one_asset():
+    q = {"assets": [
+        {"kind": "table", "table_markdown": FULL_TABLE},
+        {"kind": "figure", "figure_spec": "Bar chart of x vs y."},
+    ]}
+    _normalise_assets(q)
+    assert len(q["assets"]) == 1
+
+
+# ── _drop_unrendered_figures — post-gate cleanup ────────────────────────────────
+
+def test_drop_unrendered_figure_question_removed():
+    q = {"question_text": "Using the figure below, estimate the median.",
+         "assets": [{"kind": "figure", "image_id": None, "_figure_spec": "Histogram."}]}
+    assert _drop_unrendered_figures([q]) == []
+
+
+def test_drop_unrendered_keeps_rendered_figure_and_strips_spec():
+    q = {"question_text": "Using the figure below, estimate the median.",
+         "assets": [{"kind": "figure", "image_id": "abc123", "_figure_spec": "Histogram."}]}
+    kept = _drop_unrendered_figures([q])
+    assert len(kept) == 1
+    assert "_figure_spec" not in kept[0]["assets"][0]
+
+
+def test_drop_unrendered_keeps_table_question():
+    q = {"question_text": "Using the table below, compute the mean.",
+         "assets": [{"kind": "table", "table_html": "<table></table>"}]}
+    assert _drop_unrendered_figures([q]) == [q]

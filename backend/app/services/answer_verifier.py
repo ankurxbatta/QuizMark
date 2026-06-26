@@ -24,6 +24,7 @@ import logging
 import math
 import re
 
+from app.core.config import settings
 from app.services.llm_service import llm_service
 
 logger = logging.getLogger(__name__)
@@ -570,9 +571,321 @@ async def verify_objective_numeric(questions: list[dict]) -> list[dict]:
     return questions
 
 
+# ── Question-quality gate ───────────────────────────────────────────────────────
+# Reject (DROP from the returned list) questions that are un-renderable,
+# incomplete, unanswerable, or whose stated answer is wrong — so the orchestrator
+# / ingest top-up loops regenerate replacements rather than show garbage to a
+# student. Two stages:
+#   A. deterministic renderability checks (pure functions, no LLM) — run first.
+#   B. a deepsearch answerability + correctness LLM judge — run on survivors.
+# Both are gated by config flags; B is non-fatal per item (infra error → keep).
+
+# A stem that names a table/figure but doesn't include it can't be answered.
+_TABLE_REF_RE = re.compile(
+    r"\bthe (?:following |data )?table\b|\bfollowing table\b|\bin the table\b|"
+    r"\btable\s+\d+\b|\bthe data (?:below|above)\b|\bdata (?:in|from) the table\b|"
+    r"\bthe table (?:below|above)\b",
+    re.IGNORECASE,
+)
+# Deliberately demonstrative — requires below/above, a number, "in the", "shown",
+# etc. so a generic "graph the function" / "the graph of f(x)" is NOT flagged.
+_FIGURE_REF_RE = re.compile(
+    r"\bshown (?:below|above|in the figure)\b|"
+    r"\bthe (?:figure|graph|chart|plot|histogram|diagram)\s+(?:below|above)\b|"
+    r"\b(?:figure|graph|chart|plot|exhibit)\s+\d+\b|"
+    r"\bin the (?:figure|graph|chart|plot|histogram|diagram)\b|"
+    r"\b(?:according to|based on) the (?:figure|graph|chart|plot|diagram)\b",
+    re.IGNORECASE,
+)
+# Cues that a blank/"?" cell is an intentional "compute this value" prompt.
+_FILL_IN_RE = re.compile(
+    r"\b(find|compute|calculate|determine|fill in|complete the table|missing|"
+    r"the value of|solve for|what is the (?:value|probability|mean|variance))\b",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_MARKERS = ("____", "[blank]", "todo", "<...>", "<…>")
+# A trailing connective / operator → the sentence was cut off mid-thought.
+_DANGLING_TAIL_RE = re.compile(
+    r"(?:,|=|\+|\bthe|\ba|\ban|\bof|\bto|\band|\bor|\bis|\bare|\bwith|\bfor|"
+    r"\bwhere|\bwhen|\bwhich|\bthan|\bbecause|\bso that)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _table_asset(question: dict) -> dict | None:
+    for asset in question.get("assets") or []:
+        if isinstance(asset, dict) and asset.get("kind") == "table":
+            return asset
+    return None
+
+
+def _figure_asset(question: dict) -> dict | None:
+    for asset in question.get("assets") or []:
+        if isinstance(asset, dict) and (asset.get("kind") == "figure" or asset.get("image_id")):
+            return asset
+    return None
+
+
+def _has_inline_table(text: str) -> bool:
+    """True when the stem itself carries a table (HTML or a markdown pipe grid)."""
+    if "<table" in text.lower():
+        return True
+    pipe_lines = [ln for ln in text.splitlines() if ln.count("|") >= 2]
+    return len(pipe_lines) >= 2
+
+
+def _table_content_ok(question: dict, text: str, fill_in_ok: bool) -> bool:
+    """A referenced table is renderable if a well-formed table is present either as
+    an attached asset or inline in the stem (consistent grid, ≥2 cols, no stray
+    '?' unless the question asks the student to compute that cell)."""
+    asset = _table_asset(question)
+    if asset is not None:
+        html = (asset.get("table_html") or "")
+        if "<table" not in html.lower():
+            return False  # unparseable → rendered as <pre>, i.e. garbled
+        if not fill_in_ok and "?" in html:
+            return False  # stray placeholder cell with no compute-this instruction
+        return True
+    if _has_inline_table(text):
+        from app.services.question_assets import render_table_html
+        pipe_block = "\n".join(ln for ln in text.splitlines() if ln.count("|") >= 2)
+        html, n_blanks = render_table_html(pipe_block) if pipe_block else (text, 0)
+        if "<table" not in html.lower():
+            return False
+        if n_blanks and not fill_in_ok:
+            return False
+        return True
+    return False
+
+
+def _delimiters_balanced(text: str) -> bool:
+    has_latex = bool(re.search(r"\\[a-zA-Z]+", text))
+    # Odd '$' only matters when LaTeX is clearly present (avoids currency like $25).
+    if has_latex and text.count("$") % 2 != 0:
+        return False
+    if text.count("(") != text.count(")"):
+        return False
+    if has_latex and text.count("{") != text.count("}"):
+        return False
+    return True
+
+
+def _passes_renderability(question: dict) -> tuple[bool, str]:
+    """Deterministic, LLM-free gate. Returns (keep, reason). Conservative —
+    only flags clear failures. Pure function (unit-testable)."""
+    text = (question.get("question_text") or "").strip()
+    if not text:
+        return False, "empty question text"
+
+    low = text.lower()
+    if "____" in text:
+        return False, "blank placeholder ____"
+    for marker in _PLACEHOLDER_MARKERS:
+        if marker in low:
+            return False, f"placeholder marker {marker!r}"
+
+    fill_in_ok = bool(_FILL_IN_RE.search(text))
+    if re.search(r"[=:]\s*\?", text) and not fill_in_ok:
+        return False, "stray '?' used as a value"
+
+    if not _delimiters_balanced(text):
+        return False, "unbalanced delimiters ($ / parens / braces)"
+    if _DANGLING_TAIL_RE.search(text):
+        return False, "truncated (ends mid-sentence)"
+
+    if _TABLE_REF_RE.search(text) and not _table_content_ok(question, text, fill_in_ok):
+        return False, "references a table that is missing or garbled"
+
+    if _FIGURE_REF_RE.search(text) and _figure_asset(question) is None:
+        return False, "references a figure/graph with no figure asset"
+
+    if question.get("question_type") == "mcq":
+        from app.services.question_generator import _split_mcq_text
+        _stem, options = _split_mcq_text(text)
+        non_empty = {k: v for k, v in options.items() if v and v.strip()}
+        if len(non_empty) < 2:
+            return False, "MCQ has fewer than 2 options"
+        seen_texts = [v.strip().lower() for v in non_empty.values()]
+        if len(set(seen_texts)) < len(seen_texts):
+            return False, "MCQ has duplicate options"
+        correct = (question.get("correct_answer") or "").strip().upper()
+        if correct and correct not in non_empty:
+            return False, f"MCQ correct_answer {correct!r} not among options"
+
+    return True, ""
+
+
+_QUALITY_JUDGE_PROMPT = """You are a strict exam-quality reviewer deciding whether a generated question is good enough to show a student.
+
+QUESTION (type: {qtype}):
+{stem}
+
+{answer_block}
+
+ATTACHED ASSETS (the student sees these together with the question text):
+{asset_block}
+
+SOURCE CONTEXT (textbook excerpts the question was generated from):
+{context}
+
+Judge four things, each strictly:
+1. self_contained: TRUE if a student can answer using ONLY the question text shown above PLUS any table/figure listed under ATTACHED ASSETS. Treat an attached asset as fully visible to the student: a question that says "the table below" / "the figure below" IS self-contained whenever a complete matching table or figure is attached above. FALSE only if it refers to a table, figure, dataset, or value that is NOT present in the question text AND NOT in ATTACHED ASSETS.
+2. answerable_from_source: TRUE if the question is well-posed and answerable (using the attached asset if one is present), and consistent with the source context above.
+3. answer_correct: TRUE if the stated model answer / correct option is actually correct for this question (given the attached asset) according to the source context.
+4. tests_a_meaningful_concept: TRUE if the question assesses a genuine statistical concept, method, or interpretation. FALSE for dataset trivia / pure lookup — merely reading one value from a table or reciting an incidental narrative detail (a name, place, or one-off count) with no underlying statistical skill.
+
+Respond ONLY as valid JSON:
+{{"self_contained": <bool>, "answerable_from_source": <bool>, "answer_correct": <bool>, "tests_a_meaningful_concept": <bool>, "reason": "<short reason>"}}
+"""
+
+
+def _judge_asset_block(question: dict) -> str:
+    """Render the question's attached table/figure as text for the judge.
+
+    The judge otherwise only sees question_text, so a legitimate "refer to the
+    table/figure below" question (with its asset attached) is wrongly judged
+    not-self-contained and dropped. Including the asset content here lets the
+    judge evaluate self-containment as the student actually experiences it."""
+    parts: list[str] = []
+    table = _table_asset(question)
+    if table is not None:
+        html = (table.get("table_html") or "").strip()
+        caption = (table.get("caption") or "").strip()
+        if html:
+            header = "ATTACHED TABLE" + (f" (caption: {caption})" if caption else "")
+            parts.append(f"{header}:\n{html[:2000]}")
+    figure = _figure_asset(question)
+    if figure is not None:
+        desc = (
+            figure.get("_figure_spec")
+            or figure.get("alt_text")
+            or figure.get("caption")
+            or ""
+        ).strip()
+        rendered = " [a chart image is attached]" if figure.get("image_id") else ""
+        if desc or rendered:
+            parts.append(f"ATTACHED FIGURE{rendered}:\n{desc[:1200]}")
+    if not parts:
+        return "(No table or figure is attached to this question.)"
+    return "\n\n".join(parts)
+
+
+def _answer_block(question: dict) -> str:
+    qtype = question.get("question_type")
+    model_answer = question.get("model_answer", "") or ""
+    if qtype == "mcq":
+        return f"Stated correct option: {question.get('correct_answer', '')}\nModel answer: {model_answer}"
+    if qtype == "true_false":
+        return f"Stated answer: {question.get('correct_answer', '')}\nModel answer: {model_answer}"
+    return f"Model answer: {model_answer}"
+
+
+async def _judge_question(question: dict) -> tuple[bool, str]:
+    """Deepsearch answerability + correctness judge (one LLM call). Returns
+    (keep, reason). Non-fatal: any infra/parse failure returns (True, "")."""
+    stem = (question.get("question_text") or "").strip()
+    if not stem:
+        return False, "empty question text"
+
+    try:
+        from app.services.llm_service import slm_service
+        from app.services.question_generator import DbChunk
+        from app.services.retrieval_router import routed_retrieve
+
+        topic = question.get("topic_tag") or ""
+        query = f"{topic} {stem}".strip()[:400]
+        emb = await slm_service.embed(query)
+        k = max(1, int(settings.QUALITY_JUDGE_RETRIEVAL_K))
+        fused = await routed_retrieve(
+            [query], [emb],
+            book_id=question.get("book_id"),
+            chapter_num=question.get("chapter_num"),
+            k=k,
+        )
+        chunks = fused.text_chunks[:k]
+        context = "\n\n".join(DbChunk(c).to_prompt_block()[:1200] for c in chunks)
+    except Exception as exc:
+        logger.warning(f"[GATE] judge retrieval failed (non-fatal, keeping): {exc}")
+        return True, ""
+
+    if not context.strip():
+        # No source evidence retrieved — don't reject on absence of evidence.
+        return True, ""
+
+    raw = await llm_service.generate(_QUALITY_JUDGE_PROMPT.format(
+        qtype=question.get("question_type", "short_answer"),
+        stem=stem,
+        answer_block=_answer_block(question),
+        asset_block=_judge_asset_block(question),
+        context=context[:6000],
+    ))
+    verdict = _parse_json(raw)
+    if not verdict:
+        return True, ""  # unparseable judge output → keep (non-fatal)
+
+    fails = []
+    if verdict.get("self_contained") is False:
+        fails.append("not self-contained")
+    if verdict.get("answerable_from_source") is False:
+        fails.append("not answerable from source")
+    if verdict.get("answer_correct") is False:
+        fails.append("answer incorrect")
+    if verdict.get("tests_a_meaningful_concept") is False:
+        fails.append("dataset trivia / not a meaningful concept")
+    if not fails:
+        return True, ""
+    reason = "; ".join(fails)
+    extra = str(verdict.get("reason") or "").strip()
+    return False, (f"{reason} — {extra[:160]}" if extra else reason)
+
+
+async def apply_quality_gate(questions: list[dict]) -> list[dict]:
+    """Drop un-renderable / unanswerable / incorrect questions. Returns a
+    possibly-SHORTER list so the caller's top-up loop refills the shortfall."""
+    if not settings.QUALITY_GATE_ENABLED or not questions:
+        return questions
+
+    # Stage A — deterministic renderability (pure, no LLM).
+    survivors: list[dict] = []
+    for q in questions:
+        keep, reason = _passes_renderability(q)
+        if keep:
+            survivors.append(q)
+        else:
+            logger.info("[GATE] dropped (renderability: %s): %r", reason, (q.get("question_text", "") or "")[:80])
+
+    # Stage B — deepsearch answerability + correctness judge (LLM, concurrent).
+    if not settings.QUALITY_JUDGE_ENABLED or not survivors:
+        return survivors
+
+    semaphore = asyncio.Semaphore(max(1, int(settings.QUALITY_JUDGE_CONCURRENCY)))
+
+    async def _bounded(q: dict) -> tuple[dict, bool, str]:
+        async with semaphore:
+            try:
+                keep, reason = await _judge_question(q)
+            except Exception as exc:
+                logger.warning(f"[GATE] judge failed (non-fatal, keeping): {exc}")
+                return q, True, ""
+            return q, keep, reason
+
+    results = await asyncio.gather(*[_bounded(q) for q in survivors])
+    kept: list[dict] = []
+    for q, keep, reason in results:
+        if keep:
+            kept.append(q)
+        else:
+            logger.info("[GATE] dropped (judge: %s): %r", reason, (q.get("question_text", "") or "")[:80])
+    if len(kept) < len(questions):
+        logger.info("[GATE] quality gate kept %d/%d questions", len(kept), len(questions))
+    return kept
+
+
 async def verify_generated_questions(questions: list[dict]) -> list[dict]:
     """All post-generation quality passes: numeric recomputation + MCQ ambiguity
-    + math formatting (bare expressions → $-delimited LaTeX for KaTeX)."""
+    + math formatting (bare expressions → $-delimited LaTeX for KaTeX), then the
+    quality gate which DROPS un-renderable / unanswerable / incorrect questions
+    (the returned list may be shorter — top-up loops regenerate the shortfall)."""
     await verify_numeric_model_answers(questions)
     # Fix numerically-wrong objective answers before the ambiguity pass, so the
     # ambiguity judge / distractor rewrites see the corrected correct option.
@@ -580,4 +893,4 @@ async def verify_generated_questions(questions: list[dict]) -> list[dict]:
     await verify_mcq_options(questions)
     from app.services.math_format import latexify_questions
     await latexify_questions(questions)
-    return questions
+    return await apply_quality_gate(questions)
