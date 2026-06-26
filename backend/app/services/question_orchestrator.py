@@ -225,14 +225,29 @@ async def _build_asset_directive(
                 blocks.append(b)
     except Exception as exc:
         logger.debug(f"[ORCH] asset directive retrieval skipped: {exc}")
-    want = " and/or ".join(w for w, c in [("a real data TABLE", require_table),
-                                          ("a real FIGURE/GRAPH", require_figure)] if c)
-    directive = (
-        f"ASSET PREFERENCE: Where it genuinely helps test the concept, FAVOUR questions built around "
-        f"{want} from the chapter — construct the table from the real numbers below (as a question 'assets' "
-        "entry) or describe the figure as a concise spec ('assets' entry), per the TABLES & FIGURES rules. "
-        "Do NOT force an asset onto a question that does not need one, and never reference an asset you do not include."
-    )
+    parts: list[str] = []
+    if require_table:
+        # Prefer (don't hard-force) table questions: when the model builds one it
+        # MUST include the full table in 'assets' (the gate rejects a question that
+        # references a table it didn't include). Allow a clean concept question when
+        # a table genuinely doesn't fit, so generation never fails to 0.
+        parts.append(
+            "PREFER TABLE QUESTIONS: favour questions built around a data TABLE that YOU construct fully from the "
+            "chapter's real numbers below. If you build a table question you MUST include the COMPLETE table (every "
+            "cell filled with its correct value, except a cell the student is asked to compute) as a clean markdown "
+            "table in the question's 'assets' array — never refer to a table you do not include. If a table genuinely "
+            "does not fit a concept, ask a clean concept question instead. Require a real SKILL (compute/interpret/compare/conclude), not a single-cell lookup."
+        )
+    if require_figure:
+        # Cost-aware: figures are emitted as specs and the image is generated only
+        # after a question passes the gate, so prefer (don't blindly force) figures.
+        parts.append(
+            "FIGURE PREFERRED: build questions around a chart/FIGURE wherever the concept suits visualisation "
+            "(a distribution, a relationship, a comparison). Emit a concise figure spec (chart type, axes, what it "
+            "shows) as a question 'assets' entry — do NOT assume an image already exists. Never force a figure onto "
+            "a concept where a chart is meaningless."
+        )
+    directive = "\n".join(parts)
     if blocks:
         directive += "\n\n" + "\n\n".join(blocks)
     return directive
@@ -273,6 +288,20 @@ async def orchestrate_question_bank(
         f"[ORCH] Starting 3-round orchestration for '{chapter_topic}' | target={count} "
         f"| difficulty={difficulty}{' (locked)' if explicit_difficulty else ''}"
     )
+
+    # ── Table-grounded path: when the user asks for table questions, ground each
+    # one in a REAL cleaned table from the chapter (reliable + self-contained)
+    # rather than hoping the model invents a complete correct table inline. ─────
+    if require_table:
+        from app.services.question_generator import generate_table_grounded_questions
+        tq = await generate_table_grounded_questions(
+            book_id=book_id, chapter_num=chapter_num, question_type=question_type,
+            count=count, difficulty=difficulty, existing_questions=existing_questions,
+        )
+        if tq:
+            logger.info(f"[ORCH] table-grounded path produced {len(tq)} question(s)")
+            return tq[:count]
+        logger.info("[ORCH] table-grounded path empty — falling back to standard generation")
 
     # ── Round 0: "Read the chapter carefully" → extract key concepts ──────────
     seed_raw = await deep_retrieve_for_generation(

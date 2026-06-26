@@ -1579,6 +1579,131 @@ def _strip_source_labels(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
+def _parse_single_json_obj(raw: str) -> Optional[dict]:
+    """Parse a single JSON object from an LLM reply (tolerant), unmangle LaTeX."""
+    try:
+        m = re.search(r"\{.*\}", raw or "", re.DOTALL)
+        if not m:
+            return None
+        obj = json.loads(m.group())
+        return unmangle_latex(obj) if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+async def generate_table_grounded_questions(
+    book_id: Optional[str],
+    chapter_num: Optional[int],
+    question_type: str,
+    count: int,
+    difficulty: str = "all",
+    existing_questions: Optional[list[str]] = None,
+) -> list[dict]:
+    """Generate questions grounded in REAL, cleaned data tables from the chapter.
+
+    Asking the model to invent a complete, correct table inline is unreliable —
+    it references tables it never includes, so the quality gate (correctly) drops
+    them. Instead we hand the model an ACTUAL cleaned table from
+    ``pdf_chunks.table_texts`` (the vision-repaired source) and ask for ONE
+    question that exercises a statistical skill on it; the SAME table is attached
+    to the question, so it is guaranteed self-contained and the asset-aware gate
+    passes. Returns gate-verified questions (len <= count); [] to fall back.
+    """
+    from app.services.mongo_vector_store import _get_db
+    from app.services.answer_verifier import verify_generated_questions
+
+    try:
+        db = await _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return []
+
+    query: dict = {"table_texts.0": {"$exists": True}}
+    if book_id:
+        query["book_id"] = book_id
+    if chapter_num is not None:
+        query["chapter_num"] = chapter_num
+    chunks = await db["pdf_chunks"].find(
+        query, {"table_texts": 1, "topic_tag": 1, "section_title": 1, "chapter_title": 1},
+    ).to_list(length=80)
+
+    # Distinct, well-formed tables only: >=2 columns, >=2 data rows, no '?' gaps.
+    seen: set[str] = set()
+    tables: list[tuple[str, str]] = []
+    for c in chunks:
+        topic = c.get("topic_tag") or c.get("chapter_title") or ""
+        for t in (c.get("table_texts") or []):
+            md = (t or "").strip()
+            if not md or "?" in md or md.count("|") < 4:
+                continue
+            data_rows = [r for r in md.splitlines() if r.strip() and (set(r) - {"-", ":", "|", " "})]
+            if len(data_rows) < 3:
+                continue
+            key = md[:80]
+            if key in seen:
+                continue
+            seen.add(key)
+            tables.append((md, topic))
+    if not tables:
+        logger.info("[TABLE-GEN] no clean tables for chapter — falling back to standard generation")
+        return []
+
+    qtype = question_type if question_type in {"mcq", "true_false", "short_answer"} else "short_answer"
+    if qtype == "mcq":
+        type_rules = ('Provide an "options" object with keys A, B, C, D (each distinct) and "correct_answer" '
+                      "as the single correct letter; distractors must be plausible but FALSE.")
+    elif qtype == "true_false":
+        type_rules = 'Make a True/False statement; set "correct_answer" to "True" or "False".'
+    else:
+        type_rules = 'Provide a full worked "model_answer".'
+    diff = difficulty if difficulty in ("easy", "medium", "hard") else "medium"
+
+    sem = asyncio.Semaphore(3)
+
+    async def _one(md: str, topic: str) -> Optional[dict]:
+        prompt = (
+            f"You are an expert statistics instructor. Here is a real data table from the chapter on {topic}:\n\n"
+            f"{md}\n\n"
+            f"Write ONE {qtype} exam question (difficulty: {diff}) that requires the student to apply a genuine "
+            "statistical SKILL to THIS table — compute, interpret, compare, or draw a conclusion (NEVER a trivial "
+            'single-cell lookup). The student SEES this exact table directly below the question, so refer to it as '
+            '"the table below" and do NOT reproduce the table in your text. Do NOT cite any source label or table number.\n'
+            f"{type_rules}\n"
+            "Respond ONLY as a JSON object with keys: question_text, model_answer, rubric, max_marks, topic_tag, difficulty"
+            + (", options, correct_answer" if qtype in {"mcq", "true_false"} else "")
+            + "."
+        )
+        async with sem:
+            try:
+                raw = await generation_service.generate(prompt)
+            except Exception as exc:
+                logger.warning(f"[TABLE-GEN] generation failed: {_safe_exception_message(exc)}")
+                return None
+        obj = _parse_single_json_obj(raw)
+        if not obj or not obj.get("question_text"):
+            return None
+        obj["question_type"] = qtype
+        obj.setdefault("rubric", "Award marks for correct use of the table.")
+        obj.setdefault("max_marks", 3.0)
+        obj.setdefault("topic_tag", topic or "Statistics")
+        obj.setdefault("difficulty", diff)
+        obj["assets"] = [{"kind": "table", "caption": "", "table_markdown": md}]
+        return obj
+
+    # A couple extra to survive gate attrition, bounded.
+    targets = tables[: count + 2]
+    results = await asyncio.gather(*[_one(md, topic) for md, topic in targets])
+    raw_qs = [r for r in results if r]
+    logger.info(f"[TABLE-GEN] built {len(raw_qs)} table-grounded candidates from {len(targets)} real tables")
+    if not raw_qs:
+        return []
+    valid = _validate_questions(raw_qs, qtype)
+    verified = await verify_generated_questions(valid)
+    logger.info(f"[TABLE-GEN] {len(verified)} survived the quality gate")
+    return verified[:count]
+
+
 def _normalise_assets(q: dict) -> None:
     """Convert a model-emitted ``assets`` array into the stored asset schema.
 
