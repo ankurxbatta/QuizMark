@@ -316,10 +316,16 @@ Generate EXACTLY {count} questions of type "{qtype}" that satisfy the cognitive 
 - Every distractor must be factually FALSE as an answer to the stem — never a
   rephrasing or equivalent formulation of the correct option.
 - Model answer: correct letter + brief explanation.
+- Rubric: the student only SELECTS an option — there is NO place to write an
+  interpretation or justification. Use a SINGLE all-or-nothing criterion, e.g.
+  "Full marks for selecting the correct option." NEVER split it into "correct
+  calculation" / "correct interpretation" marks.
 
 ━━━ TRUE/FALSE ━━━
 - Test application or interpretation, NOT just a copied definition.
 - Model answer: "True" or "False" + 1–2 sentence justification.
+- Rubric: the student only SELECTS True or False — use a SINGLE criterion
+  ("Full marks for the correct selection"). NEVER ask for written interpretation.
 
 ━━━ ALL TYPES ━━━
 - SELF-CONTAINED: every question must be fully answerable from ONLY what it shows. NEVER reference a table, figure, graph, chart, plot or "data below/above" unless you ALSO include it — either inline in the question text (a markdown table) OR as a structured asset (see TABLES & FIGURES below). If you cannot include it, do not refer to it — ask a different question.
@@ -539,6 +545,7 @@ BAD example (avoid): "Based on the text, explain in your own words what conditio
   (e.g. if the correct option is "P(X ≤ 5)", a distractor must not be "the
   area under the pdf up to 5" — that is the same statement in other words).
 - Model answer: start with the correct letter + brief explanation, e.g. "B. Increasing n lowers the standard error."
+- Rubric: the student only SELECTS an option — there is NO place to write an interpretation or justification. Use a SINGLE all-or-nothing criterion, e.g. "Full marks for selecting the correct option." NEVER split it into "correct calculation" / "correct interpretation" marks.
 - Never omit the options. Preferred format: put the A-D options inside question_text. If you use a separate options/choices field, it must be an object with keys A, B, C, D.
 
 Good examples:
@@ -554,6 +561,7 @@ BAD example (avoid): "Which term best completes: '____ is the chi-square distrib
 - Test application or interpretation, NOT just a copied definition.
 - Prefer statements involving a specific numerical consequence, formula condition, or practical rule.
 - Model answer: "True" or "False" + 1–2 sentence justification referencing the source concept.
+- Rubric: the student only SELECTS True or False — use a SINGLE criterion ("Full marks for the correct selection"). NEVER ask for written interpretation.
 
 Good examples:
   • "True or False: When n = 80, substituting the sample SD for σ in a confidence interval formula introduces significant bias."
@@ -1896,6 +1904,13 @@ def _validate_questions(questions: list[dict], expected_type: str) -> list[dict]
             _normalise_mcq(q, raw_question_text)
         elif q["question_type"] == "true_false":
             q["correct_answer"] = _derive_true_false_key(q["model_answer"])
+        # Select-only types: the student PICKS an option and never writes prose, so
+        # there is nowhere to "interpret the result" or justify an answer. Any
+        # multi-criterion rubric the LLM emitted (e.g. "1 mark: correct calculation;
+        # 1 mark: correct interpretation") is meaningless here — override it with a
+        # single all-or-nothing select criterion. Marking is deterministic on the key.
+        if q["question_type"] in {"mcq", "true_false"}:
+            q["rubric"] = "Full marks for selecting the correct option; no marks otherwise."
         # Normalise max_marks
         try:
             q["max_marks"] = float(q["max_marks"])
