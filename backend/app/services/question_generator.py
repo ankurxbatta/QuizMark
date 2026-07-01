@@ -493,6 +493,31 @@ EXISTING QUESTIONS IN THE BANK (avoid overlap with ALL of these):
 #  Prompt templates
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Auto-rejection criteria — SINGLE SOURCE OF TRUTH.
+#  These mirror, in plain language, exactly what the post-generation quality gate
+#  (answer_verifier._passes_renderability + _judge_question) DROPS. Injected into
+#  the generation prompt so the model self-censors against the same checklist that
+#  would otherwise discard its output. When you tighten the gate, update this block
+#  too (and vice-versa) so generation and validation never drift apart.
+#  NOTE: this is prompt-level steering for a frozen hosted model — there is no
+#  training/reward; the model simply sees the reject rules up front.
+# ─────────────────────────────────────────────────────────────────────────────
+_REJECTION_CRITERIA = """\
+━━━ AUTO-REJECTION CHECK — a question matching ANY rule below is DISCARDED before the student ever sees it ━━━
+Producing a rejected question WASTES the slot and the request comes back short, so DO NOT emit one. Reject if the question:
+1. Refers to a table, figure, graph, chart, dataset, or "data below/above" WITHOUT attaching it. This is NOT a ban on data/figure questions — the fix is to ATTACH what you reference: an inline markdown table, or a `figure_spec` / table entry in the question's `assets` array. A figure question that carries a `figure_spec` asset is CORRECT and passes the gate (its image is drawn later). Only a DANGLING reference — one with nothing attached — is rejected.
+2. Cites a book source label — "Table 1.9", "Figure 2.3", "Example 1.15", "Exercise 4", or any "Table/Figure/Example/Exercise <number>".
+3. Contains a placeholder — "____", "[blank]", "<...>", "TODO", or a bare "?" standing in for a value — UNLESS the stem explicitly asks the student to compute that exact missing cell.
+4. Has unbalanced math delimiters: every "$" must be paired, and every "{", "(", "[" must be closed.
+5. Is truncated or ends mid-sentence.
+6. (MCQ) has fewer than 4 options, has duplicate/equivalent options, or names a correct answer that is not one of the listed options.
+7. Cannot be answered using ONLY the question text plus its own attached asset (not self-contained).
+8. Has a model answer whose numeric result is wrong for the data the question gives.
+
+SELF-CHECK: before you output, re-read every question against rules 1–8 and FIX or REPLACE any that would be rejected. Output ONLY questions that pass all eight."""
+
+
 _PLAIN_TEXT_PROMPT = """\
 You are an expert statistics instructor writing exam questions that assess genuine understanding of the chapter's CORE concepts, methods, and interpretation — aligned to what a student is expected to learn in a business statistics course.
 
@@ -506,6 +531,8 @@ Generate {count} high-quality exam questions of type "{qtype}".
 
 {blooms_guide}
 {uniqueness_block}
+
+{rejection_criteria}
 
 Follow the style rules and examples below carefully.
 
@@ -793,6 +820,7 @@ async def _generate_from_chunk(
         qtype=question_type,
         blooms_guide=blooms_guide,
         uniqueness_block=uniqueness_block,
+        rejection_criteria=_REJECTION_CRITERIA,
     )
     try:
         raw = await generation_service.generate(prompt)
@@ -946,6 +974,7 @@ async def generate_questions(
         qtype=question_type,
         blooms_guide=blooms_guide,
         uniqueness_block=uniqueness_block,
+        rejection_criteria=_REJECTION_CRITERIA,
     )
     try:
         logger.info("[GEN] Generating questions directly...")
@@ -1542,11 +1571,26 @@ def _derive_true_false_key(model_answer: str) -> str:
 # topic_tag), which this sanitiser never touches.
 #   <num> = 12 | 1.9 | 2.3.1 | 1.9a  (must be preceded by a label word, so plain
 #   decimals like "p = 1.9" or "9.01 inches" are left untouched).
+# Words that are ALSO ordinary imperatives ("Plot 3 points", "Graph 2 functions",
+# "Chart 5 values") only denote a book reference when a CUE word precedes them or
+# the number is a decimal ("Chart 3.1"). A bare "Plot 3" is left alone.
+_CUE = (r"in|on|see|from|per|of|using|use|with|refer(?:ring)?\s+to|according\s+to"
+        r"|based\s+on|shown\s+in|given\s+in|listed\s+in|the|a|an")
+
 _SOURCE_LABEL_RE = re.compile(
+    # 1) Unambiguous book-label words — match with any number.
     r"(?:\b(?:the|a|an)\s+)?"
-    r"\b(?P<label>tables?|figures?|graphs?|charts?|diagrams?|histograms?|plots?"
-    r"|exhibits?|examples?|exercises?|problems?)\s+"
-    r"\d+(?:\.\d+)*[A-Za-z]?\b",
+    r"\b(?P<label>tables?|figures?|figs?\.?|exhibits?|examples?|exercises?|problems?)\s+"
+    r"\d+(?:\.\d+)*[A-Za-z]?\b"
+    r"|"
+    # 2) Ambiguous plotting words preceded by a CUE word (the cue is re-emitted).
+    r"\b(?P<cue>" + _CUE + r")\s+"
+    r"(?P<clabel>graphs?|charts?|diagrams?|histograms?|plots?)\s+"
+    r"\d+(?:\.\d+)*[A-Za-z]?\b"
+    r"|"
+    # 3) Ambiguous plotting words carrying a DECIMAL number (e.g. "Chart 3.1").
+    r"\b(?P<dlabel>graphs?|charts?|diagrams?|histograms?|plots?)\s+"
+    r"\d+\.\d+(?:\.\d+)*[A-Za-z]?\b",
     re.IGNORECASE,
 )
 
@@ -1566,11 +1610,12 @@ def _strip_source_labels(text: str) -> str:
         return text
 
     def _repl(match: re.Match) -> str:
-        label = match.group("label").lower()
+        # The label may come from any of the three alternation branches.
+        label = (match.group("label") or match.group("clabel") or match.group("dlabel")).lower()
         if label.startswith("table"):
             out = "the table below"
         elif label.startswith((
-            "figure", "graph", "chart", "diagram", "histogram", "plot", "exhibit",
+            "fig", "graph", "chart", "diagram", "histogram", "plot", "exhibit",
         )):
             out = "the figure below"
         elif label.startswith("example"):
@@ -1581,6 +1626,11 @@ def _strip_source_labels(text: str) -> str:
         prefix = match.string[: match.start()]
         if not prefix.strip() or re.search(r"[.!?:]\s*$", prefix):
             out = out[0].upper() + out[1:]
+        # A cue word ("in", "see", …) that qualified an ambiguous plotting word is
+        # re-emitted so "In Graph 2, …" → "In the figure below, …" keeps its lead-in.
+        cue = match.group("cue")
+        if cue:
+            out = f"{cue} {out}"
         return out
 
     cleaned = _SOURCE_LABEL_RE.sub(_repl, text)
@@ -1832,7 +1882,10 @@ def _normalise_assets(q: dict) -> None:
         spec = _stringify_llm_value(
             a.get("figure_spec") or a.get("description") or a.get("spec")
         )
-        caption = _stringify_llm_value(a.get("caption"))
+        # The caption is rendered to the student verbatim by the frontend, so it
+        # must be genericised too — otherwise a "Table 1.9: …" caption leaks the
+        # book label even though question_text was already stripped.
+        caption = _strip_source_labels(_stringify_llm_value(a.get("caption")))
         if kind == "table" or (kind != "figure" and markdown):
             html = _stringify_llm_value(a.get("table_html"))
             if not html and markdown:

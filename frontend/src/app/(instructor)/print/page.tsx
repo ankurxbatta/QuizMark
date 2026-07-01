@@ -38,30 +38,57 @@ function Assets({ assets }: { assets?: QAsset[] }) {
   );
 }
 
+// The backend caps /questions/?limit at 200, so anything that needs the full
+// set (an "all questions" print, or a quiz whose ids may live past the first
+// page) has to page through with skip until the data is exhausted / resolved.
+const PAGE_SIZE = 200;
+
 export default function PrintPage() {
   const [title, setTitle] = useState("Question Paper");
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [missingIds, setMissingIds] = useState<string[]>([]);
   const [answers, setAnswers] = useState(false);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
-    setLoading(true); setErr("");
+    setLoading(true); setErr(""); setMissingIds([]);
     try {
       const params = new URLSearchParams(window.location.search);
       const withAns = params.get("answers") === "1";
       setAnswers(withAns);
-      const { data: all } = await api.get<Question[]>("/questions/?limit=200");
-      const byId = new Map(all.map((q) => [q.id, q]));
       const quizId = params.get("quiz");
       let qs: Question[];
       if (quizId) {
         const { data: quiz } = await api.get<Quiz>(`/quizzes/${quizId}`);
         setTitle(quiz.title || "Quiz");
-        qs = quiz.question_ids.map((i) => byId.get(i)).filter(Boolean) as Question[];
+        // Resolve the quiz's question ids by paging until every id is found
+        // (or the question bank is exhausted). Never silently drop ids.
+        const needed = new Set(quiz.question_ids);
+        const byId = new Map<string, Question>();
+        for (let skip = 0; byId.size < needed.size; skip += PAGE_SIZE) {
+          const { data } = await api.get<Question[]>(`/questions/?limit=${PAGE_SIZE}&skip=${skip}`);
+          for (const q of data) if (needed.has(q.id)) byId.set(q.id, q);
+          if (data.length < PAGE_SIZE) break; // reached the end of the bank
+        }
+        const resolved: Question[] = [];
+        const missing: string[] = [];
+        for (const id of quiz.question_ids) {
+          const q = byId.get(id);
+          if (q) resolved.push(q); else missing.push(id);
+        }
+        setMissingIds(missing);
+        qs = resolved;
       } else {
         setTitle("Question Bank — All Questions");
-        qs = [...all].sort((a, b) => (a.chapter_num || 0) - (b.chapter_num || 0));
+        // Page through the entire bank rather than trusting a single capped call.
+        const all: Question[] = [];
+        for (let skip = 0; ; skip += PAGE_SIZE) {
+          const { data } = await api.get<Question[]>(`/questions/?limit=${PAGE_SIZE}&skip=${skip}`);
+          all.push(...data);
+          if (data.length < PAGE_SIZE) break;
+        }
+        qs = all.sort((a, b) => (a.chapter_num || 0) - (b.chapter_num || 0));
       }
       setQuestions(qs);
     } catch (e: any) {
@@ -128,6 +155,14 @@ export default function PrintPage() {
                 {answers ? "Answer Key" : "Question Paper"} · {questions.length} question{questions.length !== 1 ? "s" : ""} · Total marks: {questions.reduce((s, q) => s + (q.max_marks || 0), 0)}
               </div>
             </div>
+            {missingIds.length > 0 && (
+              <div style={{ border: "1px solid #dc2626", background: "#fef2f2", color: "#991b1b",
+                borderRadius: 8, padding: "10px 14px", margin: "0 0 18px", fontSize: 13, fontFamily: "sans-serif" }}>
+                <b>Warning:</b> {missingIds.length} question{missingIds.length !== 1 ? "s" : ""} in this quiz could not be
+                found and {missingIds.length !== 1 ? "are" : "is"} not shown below (id{missingIds.length !== 1 ? "s" : ""}: {missingIds.join(", ")}).
+                {" "}They may have been deleted from the question bank.
+              </div>
+            )}
             {!answers && (
               <div className="nameline"><span>Name: ____________________________</span><span>Date: ____________</span><span>Score: ______</span></div>
             )}

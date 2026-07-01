@@ -27,6 +27,7 @@ each round's output feeds directly into the next round as context.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter
 from typing import Optional
@@ -285,6 +286,7 @@ async def orchestrate_question_bank(
     Returns:
         Validated list of question dicts, len <= count.
     """
+    from app.core.config import settings
     existing_questions = list(existing_questions or [])
     # An explicit easy/medium/hard request is a HARD constraint: we suppress
     # Bloom's-distribution rebalancing and keep every question in that band.
@@ -397,100 +399,122 @@ async def orchestrate_question_bank(
     # Accumulate uniqueness context
     seen_texts = list(existing_questions) + [q["question_text"] for q in questions]
 
-    # ── Round 2: Coverage audit → gap-fill per missing Bloom's level ──────────
-    if explicit_difficulty:
-        # Difficulty is locked → no Bloom's rebalancing. Only fill a raw count
-        # shortfall, and keep it inside the requested band's primary level.
-        primary = _DIFFICULTY_PRIMARY_BLOOM[difficulty]
-        shortfall = count - len(questions)
-        gaps = (
-            [{"bloom_level": primary, "needed": shortfall,
-              "retrieval_suffix": _BLOOMS_RETRIEVAL_SUFFIX[primary]}]
-            if shortfall > 0 else []
+    # ── Rounds 2 & 2b: Bloom + concept coverage (LARGE banks only) ────────────
+    # These coverage rounds only meaningfully help when there are enough questions
+    # to spread across Bloom's levels / chapter concepts. For a small request you
+    # can't, so they are pure wasted latency — skip them and let Round 1 + the
+    # top-up loops reach the count (the quality gate still runs regardless).
+    if count < settings.GEN_FULL_COVERAGE_MIN_COUNT:
+        logger.info(
+            f"[ORCH] Skipping Bloom/concept coverage rounds "
+            f"(count={count} < GEN_FULL_COVERAGE_MIN_COUNT={settings.GEN_FULL_COVERAGE_MIN_COUNT})"
         )
     else:
-        gaps = _audit_bloom_gaps(questions, target_count=count)
-    logger.info(f"[ORCH] Round 2 — {len(gaps)} gaps: {[g['bloom_level'] for g in gaps]}")
+        # Concurrency budget shared by both coverage rounds. Fills are independent,
+        # so they run concurrently; cross-fill duplicates are removed by the Round 3
+        # dedup, and each fill is wrapped so a transient failure (e.g. an embed
+        # error during retrieval) never discards questions already generated.
+        #
+        # IMPORTANT — nested concurrency: orchestrate_question_bank itself runs
+        # INSIDE the chapter-level Semaphore(GEN_CHAPTER_CONCURRENCY) in
+        # ingest_tasks._run_chapters_parallel. If this intra-chapter fan-out also
+        # used GEN_CHAPTER_CONCURRENCY, effective in-flight gap-fills would multiply
+        # (e.g. 5 chapters × 5 fills = 25) before the inner Semaphore(3) generators,
+        # with no global limiter. Use a distinct, SMALLER intra-chapter constant so
+        # per-chapter coverage fan-out stays bounded (~2) regardless of chapter fan-out.
+        coverage_sem = asyncio.Semaphore(
+            max(1, int(getattr(settings, "GEN_COVERAGE_CONCURRENCY", 2)))
+        )
 
-    # Process each gap sequentially so each gap's output feeds the next's context.
-    # Gap-filling is enrichment — a failure (e.g. a transient embed error during
-    # retrieval) must never discard the questions already generated.
-    for gap in gaps:
-        bloom_level = gap["bloom_level"]
-        needed = gap["needed"]
-        logger.info(f"[ORCH] Round 2 — filling {bloom_level} gap, need {needed} questions")
-
-        try:
-            # Level-specific retrieval query
-            focused_topic = f"{gap['retrieval_suffix']} {chapter_topic}"
-            raw_chunks_r2 = await deep_retrieve_for_generation(
-                topic=focused_topic,
-                book_id=book_id,
-                chapter_num=chapter_num,
-                k=8,
+        # ── Round 2: Coverage audit → gap-fill per missing Bloom's level ──────
+        if explicit_difficulty:
+            # Difficulty is locked → no Bloom's rebalancing. Only fill a raw count
+            # shortfall, and keep it inside the requested band's primary level.
+            primary = _DIFFICULTY_PRIMARY_BLOOM[difficulty]
+            shortfall = count - len(questions)
+            gaps = (
+                [{"bloom_level": primary, "needed": shortfall,
+                  "retrieval_suffix": _BLOOMS_RETRIEVAL_SUFFIX[primary]}]
+                if shortfall > 0 else []
             )
-            chunks_r2 = [DbChunk(doc) for doc in raw_chunks_r2]
+        else:
+            gaps = _audit_bloom_gaps(questions, target_count=count)
+        logger.info(f"[ORCH] Round 2 — {len(gaps)} gaps: {[g['bloom_level'] for g in gaps]}")
 
-            if not chunks_r2:
-                logger.warning(f"[ORCH] Round 2 — no chunks for {bloom_level} gap, skipping")
-                continue
-
-            gap_questions = await generate_targeted_bloom_questions(
-                chunks=chunks_r2,
-                question_type=question_type,
-                count=needed,
-                bloom_level=bloom_level,
-                existing_questions=seen_texts,
-                book_id=book_id,
-                chapter_num=chapter_num,
-                seed_exercises=seed_exercises,
-                asset_directive=asset_directive,
-            )
-        except Exception as exc:
-            logger.warning(f"[ORCH] Round 2 — {bloom_level} gap fill failed (non-fatal): {exc}")
-            continue
-        logger.info(f"[ORCH] Round 2 — {bloom_level} gap filled with {len(gap_questions)} questions")
-        questions.extend(gap_questions)
-        seen_texts.extend(q["question_text"] for q in gap_questions)
-
-    logger.info(f"[ORCH] After Round 2 — {len(questions)} total questions")
-
-    # ── Round 2b: Concept coverage gap-fill ───────────────────────────────────
-    if chapter_concepts:
-        joined_qs = " || ".join(q.get("question_text", "").lower() for q in questions)
-        uncovered = [c for c in chapter_concepts if c.lower() not in joined_qs]
-        if uncovered:
-            logger.info(f"[ORCH] Round 2b — {len(uncovered)} uncovered concepts: {uncovered}")
-            for concept in uncovered[:5]:  # cap so we don't explode the run
+        async def _fill_gap(gap: dict) -> list[dict]:
+            bloom_level = gap["bloom_level"]
+            async with coverage_sem:
                 try:
-                    focused = f"{concept} {chapter_topic}"
-                    raw_cc = await deep_retrieve_for_generation(
-                        topic=focused, book_id=book_id, chapter_num=chapter_num, k=6,
+                    focused_topic = f"{gap['retrieval_suffix']} {chapter_topic}"
+                    raw_chunks_r2 = await deep_retrieve_for_generation(
+                        topic=focused_topic, book_id=book_id, chapter_num=chapter_num, k=8,
                     )
-                    cc_chunks = [DbChunk(doc) for doc in raw_cc]
-                    if not cc_chunks:
-                        continue
-                    cc_bloom = (
-                        _DIFFICULTY_PRIMARY_BLOOM[difficulty]
-                        if explicit_difficulty else "L3"
-                    )
-                    cc_qs = await generate_targeted_bloom_questions(
-                        chunks=cc_chunks,
+                    chunks_r2 = [DbChunk(doc) for doc in raw_chunks_r2]
+                    if not chunks_r2:
+                        logger.warning(f"[ORCH] Round 2 — no chunks for {bloom_level} gap, skipping")
+                        return []
+                    out = await generate_targeted_bloom_questions(
+                        chunks=chunks_r2,
                         question_type=question_type,
-                        count=1,
-                        bloom_level=cc_bloom,  # locked to band when difficulty is explicit
+                        count=gap["needed"],
+                        bloom_level=bloom_level,
                         existing_questions=seen_texts,
                         book_id=book_id,
                         chapter_num=chapter_num,
                         seed_exercises=seed_exercises,
                         asset_directive=asset_directive,
                     )
+                    logger.info(f"[ORCH] Round 2 — {bloom_level} gap filled with {len(out)} questions")
+                    return out
                 except Exception as exc:
-                    logger.warning(f"[ORCH] Round 2b — concept {concept!r} fill failed (non-fatal): {exc}")
-                    continue
-                if cc_qs:
-                    questions.extend(cc_qs)
-                    seen_texts.extend(q["question_text"] for q in cc_qs)
+                    logger.warning(f"[ORCH] Round 2 — {bloom_level} gap fill failed (non-fatal): {exc}")
+                    return []
+
+        for gap_questions in await asyncio.gather(*[_fill_gap(g) for g in gaps]):
+            questions.extend(gap_questions)
+            seen_texts.extend(q["question_text"] for q in gap_questions)
+
+        logger.info(f"[ORCH] After Round 2 — {len(questions)} total questions")
+
+        # ── Round 2b: Concept coverage gap-fill ──────────────────────────────
+        if chapter_concepts:
+            joined_qs = " || ".join(q.get("question_text", "").lower() for q in questions)
+            uncovered = [c for c in chapter_concepts if c.lower() not in joined_qs]
+            if uncovered:
+                logger.info(f"[ORCH] Round 2b — {len(uncovered)} uncovered concepts: {uncovered}")
+                cc_bloom = (
+                    _DIFFICULTY_PRIMARY_BLOOM[difficulty] if explicit_difficulty else "L3"
+                )
+
+                async def _fill_concept(concept: str) -> list[dict]:
+                    async with coverage_sem:
+                        try:
+                            focused = f"{concept} {chapter_topic}"
+                            raw_cc = await deep_retrieve_for_generation(
+                                topic=focused, book_id=book_id, chapter_num=chapter_num, k=6,
+                            )
+                            cc_chunks = [DbChunk(doc) for doc in raw_cc]
+                            if not cc_chunks:
+                                return []
+                            return await generate_targeted_bloom_questions(
+                                chunks=cc_chunks,
+                                question_type=question_type,
+                                count=1,
+                                bloom_level=cc_bloom,  # locked to band when difficulty is explicit
+                                existing_questions=seen_texts,
+                                book_id=book_id,
+                                chapter_num=chapter_num,
+                                seed_exercises=seed_exercises,
+                                asset_directive=asset_directive,
+                            )
+                        except Exception as exc:
+                            logger.warning(f"[ORCH] Round 2b — concept {concept!r} fill failed (non-fatal): {exc}")
+                            return []
+
+                for cc_qs in await asyncio.gather(*[_fill_concept(c) for c in uncovered[:5]]):
+                    if cc_qs:
+                        questions.extend(cc_qs)
+                        seen_texts.extend(q["question_text"] for q in cc_qs)
 
     # ── Round 3: Dedup + balance + top-up if still short ─────────────────────
     questions = _dedup_by_prefix(questions)
@@ -505,7 +529,6 @@ async def orchestrate_question_bank(
     # quality replacements until we hit the target, bounded by GEN_TOPUP_MAX_ROUNDS
     # so a thin chapter can't loop forever or run up unbounded API cost. Happy path
     # (no shortfall) makes zero extra calls.
-    from app.core.config import settings
     for attempt in range(max(0, int(settings.GEN_TOPUP_MAX_ROUNDS))):
         shortfall = count - len(questions)
         if shortfall <= 0 or not chunks_r1:
@@ -515,7 +538,7 @@ async def orchestrate_question_bank(
             f"— generating {shortfall} more questions"
         )
         before = len(questions)
-        topup = await generate_questions_from_chunks(
+        topup = await generate_questions_from_chunks(  # settings imported at function top
             chunks_r1,
             question_type=question_type,
             count=shortfall,
@@ -550,23 +573,81 @@ async def orchestrate_question_bank(
     # gate below runs on them directly — it can see each question's table/figure
     # content and correctly judge an asset-bearing question as self-contained.
 
-    # Quality passes: recompute numeric model answers, de-ambiguate MCQ options,
-    # then the quality gate (DROPS un-renderable / unanswerable / wrong questions
-    # — the returned list may shrink; the top-up loops regenerate the shortfall).
-    from app.services.answer_verifier import verify_generated_questions
-    final = await verify_generated_questions(final)
+    # Quality passes + gate + figure-image realization, bundled into one helper so
+    # the post-gate top-up loop below can re-run the WHOLE pass on freshly
+    # generated replacements (not just the cheap text gate).
+    from app.services.answer_verifier import verify_generated_questions, verify_hard_difficulty
+    from app.services.question_assets import realize_figure_images, ImageBudget
 
-    # ONLY NOW generate the expensive figure IMAGES — for the questions that
-    # PASSED the gate — so we never pay gpt-image-1 for a question that is then
-    # dropped. Bounded by ASSET_MAX_PER_CHAPTER (no new unbounded loop). A figure
-    # question whose image can't be produced is dropped (no dangling reference).
-    try:
-        from app.services.question_assets import realize_figure_images
-        final = await realize_figure_images(
-            final, chapter_num=chapter_num, book_id=book_id,
+    # Cumulative image budget for the WHOLE run: _gate_and_realize is called once
+    # for the initial gate and again on every post-gate top-up round, so a per-call
+    # cap would let a chapter realize ASSET_MAX_PER_CHAPTER images PER round. Share
+    # one budget so the sum of realized gpt-image-1 images across all rounds stays
+    # bounded by ASSET_MAX_PER_CHAPTER.
+    image_budget = ImageBudget(int(getattr(settings, "ASSET_MAX_PER_CHAPTER", 4)))
+
+    async def _gate_and_realize(qs: list[dict]) -> list[dict]:
+        # For an explicit HARD request, first DROP questions that aren't genuinely
+        # multi-step (a one-step computation masquerading as hard). Runs before the
+        # gate so the shortfall counts toward the top-up loop's refill.
+        if difficulty == "hard":
+            qs = await verify_hard_difficulty(qs)
+        # Quality passes: recompute numeric model answers, de-ambiguate MCQ
+        # options, then the quality gate (DROPS un-renderable / unanswerable /
+        # wrong questions — the returned list may shrink).
+        qs = await verify_generated_questions(qs)
+        # ONLY NOW generate the expensive figure IMAGES — for gate survivors only
+        # — so we never pay gpt-image-1 for a question that is then dropped.
+        # Bounded by ASSET_MAX_PER_CHAPTER. A figure question whose image can't be
+        # produced is dropped (no dangling reference).
+        try:
+            qs = await realize_figure_images(
+                qs, chapter_num=chapter_num, book_id=book_id, budget=image_budget,
+            )
+        except Exception as exc:
+            logger.warning(f"[ORCH] figure image realization failed (non-fatal): {exc}")
+        return qs
+
+    final = await _gate_and_realize(final)
+
+    # Post-gate top-up: the quality gate and figure-image realization can DROP
+    # questions, leaving us below the requested count — this is exactly why
+    # "ask for 2, get 1" happened: there was no refill AFTER the gate (the earlier
+    # top-up loop runs BEFORE it). Regenerate just the shortfall, push it through
+    # the SAME gate, and merge. Bounded by GEN_TOPUP_MAX_ROUNDS so a thin or
+    # strict chapter can't loop forever or run up unbounded API cost.
+    for attempt in range(max(0, int(settings.GEN_TOPUP_MAX_ROUNDS))):
+        shortfall = count - len(final)
+        if shortfall <= 0 or not chunks_r1:
+            break
+        logger.info(
+            f"[ORCH] Post-gate top-up {attempt + 1}/{settings.GEN_TOPUP_MAX_ROUNDS} "
+            f"— {len(final)}/{count} survived the gate, generating {shortfall} more"
         )
-    except Exception as exc:
-        logger.warning(f"[ORCH] figure image realization failed (non-fatal): {exc}")
+        before = len(final)
+        extra = await generate_questions_from_chunks(
+            chunks_r1,
+            question_type=question_type,
+            count=shortfall,
+            difficulty=difficulty,
+            existing_questions=seen_texts,
+            seed_exercises=seed_exercises,
+            asset_directive=asset_directive,
+            extra_context=specialist_block,
+        )
+        extra = await _gate_and_realize(extra)
+        seen_texts.extend(q["question_text"] for q in extra)
+        final = _dedup_by_prefix(final + extra)[:count]
+        # No net gain (LLM/gate only yielded dups or junk) → stop rather than burn
+        # the remaining rounds on the same content.
+        if len(final) <= before:
+            break
+
+    if len(final) < count:
+        logger.warning(
+            f"[ORCH] '{chapter_topic}' — only {len(final)}/{count} questions after "
+            f"post-gate top-up (content-limited / strict gate); storing what we have."
+        )
 
     logger.info(f"[ORCH] Final — {len(final)} questions for '{chapter_topic}'")
     return final

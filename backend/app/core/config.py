@@ -16,7 +16,16 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_MINUTES: int = 30
-    MAX_FAILED_LOGIN_ATTEMPTS: int = 3
+    # A low threshold (was 3) lets an attacker who only knows a *username*
+    # deliberately lock that account out with a handful of bad passwords — a
+    # targeted-lockout DoS that is especially dangerous for the sole admin.
+    # Raised to 10 to preserve brute-force protection while making griefing
+    # costlier. NOTE (auth.py owner): the fuller fix is exponential backoff on
+    # repeated failures plus non-enumerating register/login responses (so an
+    # attacker cannot confirm which usernames exist); those live in auth.py.
+    MAX_FAILED_LOGIN_ATTEMPTS: int = 10
+    # Minutes an account stays locked after MAX_FAILED_LOGIN_ATTEMPTS. Tunable
+    # so ops can shorten the DoS window without lowering the attempt threshold.
     LOCKOUT_DURATION_MINUTES: int = 5
     ADMIN_ENABLED: bool = True
     ADMIN_USERNAME: str = "admin"
@@ -126,9 +135,26 @@ class Settings(BaseSettings):
     # ── Question generation throughput ────────────────────────────────────────
     GEN_CHAPTER_CONCURRENCY: int = 5        # OpenAI/Anthropic handle higher concurrency
     DEDUP_SIMILARITY_THRESHOLD: float = 0.92
+    # Drop generated questions that are near-duplicates (cosine >= threshold above)
+    # of questions ALREADY stored for the same book, so separate generation runs
+    # don't accumulate equivalent questions. Off → only within-run dedup applies.
+    GEN_BANK_DEDUP_ENABLED: bool = True
     # When dedup/validation drops a chapter below its requested count, regenerate
     # quality replacements for up to this many extra rounds before giving up.
     GEN_TOPUP_MAX_ROUNDS: int = 3
+    # Bloom's coverage rounds (gap-fill + concept-coverage) only meaningfully help
+    # LARGE banks — for a tiny request you can't spread questions across 5 levels,
+    # so the extra sequential LLM calls are wasted latency. Skip them when the
+    # requested count is below this. Round 1 + the top-up loops still hit the count;
+    # the quality gate still runs. Set to 0 to always run full coverage.
+    GEN_FULL_COVERAGE_MIN_COUNT: int = 6
+    # When difficulty="hard", verify each question genuinely requires multi-step
+    # reasoning (≥2 chained steps / combines concepts / evaluative) and DROP the
+    # ones that collapse to a single step, so the top-up loop regenerates them.
+    # One cheap LLM call per hard question; runs ONLY for hard. Off → rely on the
+    # prompt instruction + the deterministic _is_trivial_recall guard alone.
+    GEN_HARD_VERIFY_ENABLED: bool = True
+    GEN_HARD_VERIFY_CONCURRENCY: int = 3       # parallel hard-difficulty judge calls
 
     # ── Question-quality gate (reject un-renderable / unanswerable / wrong) ───
     # A: deterministic renderability checks (no LLM). B: deepsearch answerability

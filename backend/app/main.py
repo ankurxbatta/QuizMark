@@ -106,8 +106,18 @@ async def ensure_mongo_indexes():
         await db["users"].create_index("username", unique=True)
         await db["questions"].create_index("topic_tag")
         await db["questions"].create_index("created_at")
+        # Compound index for chapter-scoped question lookups (book + chapter).
+        await db["questions"].create_index([("book_id", 1), ("chapter_num", 1)])
+        # Quiz assignment lookups filter by the student they are assigned to.
+        await db["quizzes"].create_index("assigned_student_ids")
         await db["submissions"].create_index("student_id")
         await db["submissions"].create_index("question_id")
+        # UNIQUE compound index backing the resubmission-race fix: guarantees one
+        # submission per (student, question) so a concurrent double-submit raises
+        # DuplicateKeyError (caught in the submission handler) instead of dup rows.
+        await db["submissions"].create_index(
+            [("student_id", 1), ("question_id", 1)], unique=True
+        )
         await db["submissions"].create_index("is_flagged")
         await db["submissions"].create_index("is_marked")
         await db["submissions"].create_index([("is_marked", 1), ("auto_confidence", 1)])

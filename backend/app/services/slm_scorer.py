@@ -26,6 +26,15 @@ from typing import Optional
 from app.services.llm_service import slm_service
 from app.core.config import settings
 
+# ── HIGH-route full-credit gate ───────────────────────────────────────────────
+# The no-LLM HIGH shortcut is only taken when an answer is UNAMBIGUOUSLY full
+# credit: very high semantic alignment to the model answer AND strong coverage of
+# the rubric's key terms. Anything less (a partial or merely-plausible answer)
+# falls through to the LLM path so a real correctness check is applied. These are
+# deliberately strict; override via settings if product tuning is needed.
+_FULL_CREDIT_SEM = getattr(settings, "SLM_FULL_CREDIT_SEM", 0.92)
+_FULL_CREDIT_KW = getattr(settings, "SLM_FULL_CREDIT_KW", 0.60)
+
 
 @dataclass
 class SLMResult:
@@ -60,10 +69,18 @@ def _extract_keywords(rubric: str) -> list[str]:
 
 
 def _keyword_coverage(student_answer: str, keywords: list[str]) -> float:
+    """Fraction of rubric keywords present in the answer.
+
+    Matching is word/token based, NOT substring: we tokenise the answer with the
+    same pattern used to extract keywords and test set membership. Substring
+    matching (`kw in text`) over-counted spurious hits — e.g. the keyword "var"
+    matching inside "variance", or "mean" inside "meaning" — which inflated
+    coverage and pushed fluent-but-wrong answers onto the no-LLM fast path.
+    """
     if not keywords:
         return 0.5
-    text = student_answer.lower()
-    hits = sum(1 for kw in keywords if kw in text)
+    tokens = set(re.findall(r"\b[a-z][a-z0-9\-]{2,}\b", student_answer.lower()))
+    hits = sum(1 for kw in keywords if kw in tokens)
     return hits / len(keywords)
 
 
@@ -110,15 +127,26 @@ async def slm_pre_score(
     # Blend: keyword 40%, semantic 60%
     confidence = round(0.40 * kw_score + 0.60 * sem_score, 4)
 
-    # Provisional mark from semantic similarity
-    provisional_mark = round(sem_score * max_marks, 2)
-
-    if confidence >= settings.CONFIDENCE_HIGH:
+    # ── Route selection ───────────────────────────────────────────────────────
+    # The HIGH (no-LLM) shortcut is restricted to answers that are clearly full
+    # credit. Previously ANY confidence >= CONFIDENCE_HIGH accepted
+    # `sem * max_marks` as the FINAL mark with no correctness check, which:
+    #   • over-marked fluent-but-wrong answers (rubric terms reused → high
+    #     confidence → a partial mark it never earned), and
+    #   • under-marked correct paraphrases (capped at ~sem*max, e.g. 80%).
+    # Now HIGH awards FULL marks only when semantic alignment AND keyword
+    # coverage are both very high; every partial case is sent to the LLM (we
+    # prefer the LLM when in doubt).
+    clearly_full_credit = sem_score >= _FULL_CREDIT_SEM and kw_score >= _FULL_CREDIT_KW
+    if clearly_full_credit:
         route = "HIGH"
+        provisional_mark = float(max_marks)
     elif confidence >= settings.CONFIDENCE_MID:
         route = "MID"
+        provisional_mark = round(sem_score * max_marks, 2)
     else:
         route = "LOW"
+        provisional_mark = round(sem_score * max_marks, 2)
 
     return SLMResult(
         keyword_coverage=round(kw_score, 4),

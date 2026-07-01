@@ -19,7 +19,7 @@ import base64
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -495,6 +495,30 @@ def _dedup_across_chapters(
     return kept_q, kept_e
 
 
+def _drop_bank_duplicates(
+    questions: list[dict],
+    embeddings: list[list[float]],
+    bank_embeddings: list[list[float]],
+    threshold: float,
+) -> tuple[list[dict], list[list[float]], int]:
+    """Drop questions whose embedding is >= `threshold` cosine to ANY already-stored
+    (bank) question embedding. Returns (kept_q, kept_e, dropped_count). Pure/testable.
+    A question with no embedding is always kept (can't compare)."""
+    bank = [e for e in bank_embeddings if e]
+    if not bank:
+        return list(questions), list(embeddings), 0
+    kept_q: list[dict] = []
+    kept_e: list[list[float]] = []
+    dropped = 0
+    for q, e in zip(questions, embeddings):
+        if e and any(_cosine(e, be) >= threshold for be in bank):
+            dropped += 1
+            continue
+        kept_q.append(q)
+        kept_e.append(e)
+    return kept_q, kept_e, dropped
+
+
 async def _run_chapters_parallel(
     *,
     db,
@@ -507,6 +531,7 @@ async def _run_chapters_parallel(
     difficulty: str,
     existing_q_texts: list[str],
     chapter_failures: list[str],
+    existing_bank_embeddings: list[list[float]] | None = None,  # embeddings of questions already stored for this book
     chapter_meta: dict | None = None,  # {ch_num: {"chapter_title", "topic_tag"}} for from-book path
     require_table: bool = False,
     require_figure: bool = False,
@@ -572,6 +597,28 @@ async def _run_chapters_parallel(
     threshold = float(settings.DEDUP_SIMILARITY_THRESHOLD)
     kept_q, kept_e = _dedup_across_chapters(all_q, all_e, threshold=threshold)
 
+    # ── Bank-dedup: drop questions that are near-duplicates of ones ALREADY
+    # stored for this book. The within-run dedup above only compares this run's
+    # questions to each other; without this, separate generation requests (e.g.
+    # "5 easy MCQ" then "5 medium MCQ") never get compared, so semantically
+    # equivalent questions accumulate across runs. Reuses the same cosine
+    # threshold. Dropped shortfalls are refilled by the top-up loop below.
+    bank_e: list[list[float]] = (
+        [e for e in existing_bank_embeddings if e]
+        if (existing_bank_embeddings and getattr(settings, "GEN_BANK_DEDUP_ENABLED", True))
+        else []
+    )
+
+    def _dup_of_bank(e: list[float] | None) -> bool:
+        return bool(e) and any(_cosine(e, be) >= threshold for be in bank_e)
+
+    kept_q, kept_e, _bank_dropped = _drop_bank_duplicates(kept_q, kept_e, bank_e, threshold)
+    if _bank_dropped:
+        logger.info(
+            f"[GEN] bank-dedup dropped {_bank_dropped} question(s) already ~present "
+            f"in the bank for book '{book_id}' (threshold {threshold})"
+        )
+
     # ── Top-up: cross-chapter dedup (and per-chapter validation) can leave a
     # chapter below its requested count. Regenerate quality replacements for any
     # short chapter, bounded by GEN_TOPUP_MAX_ROUNDS so a thin chapter can't loop
@@ -620,6 +667,8 @@ async def _run_chapters_parallel(
                 if need <= 0:
                     break
                 if e and any(_cosine(e, ke) >= threshold for ke in kept_e if ke):
+                    continue
+                if _dup_of_bank(e):  # also reject near-duplicates of the stored bank
                     continue
                 kept_q.append(q)
                 kept_e.append(e)
@@ -753,6 +802,12 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
     # Seed uniqueness context from existing questions in the DB
     existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)
     existing_q_texts: list[str] = [d.get("question_text", "") for d in existing_q_docs if d.get("question_text")]
+    # Bank embeddings (THIS book only) for insert-time near-duplicate dedup, so
+    # separate generation runs don't accumulate semantically equivalent questions.
+    _bank_docs = await db["questions"].find(
+        {"book_id": book_id, "embedding": {"$ne": None}}, {"embedding": 1}
+    ).to_list(length=2000)
+    existing_bank_embeddings: list[list[float]] = [d["embedding"] for d in _bank_docs if d.get("embedding")]
 
     # ── Step 5: Generate questions per chapter (parallel) ─────────────────────
     total_created = await _run_chapters_parallel(
@@ -764,6 +819,7 @@ async def _run_ingest(job_id: str, pdf_bytes: bytes, question_type: str, count_p
         difficulty="all",
         existing_q_texts=existing_q_texts,
         chapter_failures=chapter_failures,
+        existing_bank_embeddings=existing_bank_embeddings,
     )
 
     # ── Done ──────────────────────────────────────────────────────────────────
@@ -820,8 +876,25 @@ def generate_from_book_task(self, job_id: str, book_id: str, question_type: str,
 async def _run_generate_from_book(job_id: str, book_id: str, question_type: str, count_per_chapter: int, chapter_nums: list | None = None, difficulty: str = "all", require_table: bool = False, require_figure: bool = False):
     db = get_mongo_db()
     now = datetime.now(timezone.utc)
-    await db["ingest_jobs"].update_one(
-        {"_id": job_id},
+
+    # ── Idempotency guard (mirrors mark_submission_task's atomic claim) ──────────
+    # With task_acks_late=True and a hard 2100s SIGKILL, a timeout/crash redelivers
+    # this message and would otherwise re-run generation from scratch — re-charging
+    # LLM + gpt-image-1 calls and duplicating questions. Atomically move the job to
+    # `processing` ONLY if it isn't already owned by a live run or finished. A run
+    # is considered "live" while its heartbeat is fresh; a stale heartbeat means the
+    # previous worker crashed, so we may reclaim it.
+    stale_before = now - timedelta(seconds=int(getattr(settings, "GEN_STALE_CLAIM_SECONDS", 2100)))
+    claim = await db["ingest_jobs"].find_one_and_update(
+        {
+            "_id": job_id,
+            "status": {"$ne": IngestJobStatus.done.value},
+            "$or": [
+                {"status": {"$ne": IngestJobStatus.processing.value}},
+                {"last_heartbeat_at": {"$lt": stale_before}},
+                {"last_heartbeat_at": None},
+            ],
+        },
         {"$set": {
             "status": IngestJobStatus.processing.value,
             "started_at": now,
@@ -829,6 +902,13 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
             "last_heartbeat_at": now,
         }},
     )
+    if claim is None:
+        logger.info(
+            "generate_from_book job %s is already completed or owned by a live "
+            "worker (redelivery under acks_late); skipping duplicate run.",
+            job_id,
+        )
+        return
 
     # Discover chapters via a lightweight distinct query (no full chunk load)
     pipeline = [
@@ -856,6 +936,25 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         if not chapter_nums or m["_id"] in chapter_nums
     ]
 
+    # ── Total-question cap ───────────────────────────────────────────────────────
+    # count_per_chapter is capped (~50) elsewhere, but the chapter count is not:
+    # aggregate() pulls up to 200 chapters, so 200 × 50 = 10 000 questions could be
+    # attempted in a single 2100s task — which can't finish, hits the time limit and
+    # redelivers forever. Cap the TOTAL work so one run stays finishable: keep only
+    # as many chapters as fit under GEN_MAX_TOTAL_QUESTIONS at this per-chapter count.
+    max_total = max(1, int(getattr(settings, "GEN_MAX_TOTAL_QUESTIONS", 1000)))
+    per_chapter = max(1, int(count_per_chapter))
+    max_chapters = max(1, max_total // per_chapter)
+    if len(selected_chapters) > max_chapters:
+        logger.warning(
+            "generate_from_book job %s: %d chapters × %d q/chapter = %d exceeds "
+            "GEN_MAX_TOTAL_QUESTIONS=%d; truncating to first %d chapters (~%d questions).",
+            job_id, len(selected_chapters), per_chapter,
+            len(selected_chapters) * per_chapter, max_total, max_chapters,
+            max_chapters * per_chapter,
+        )
+        selected_chapters = selected_chapters[:max_chapters]
+
     diff_label = f" [{difficulty}]" if difficulty != "all" else ""
     await _update_job(db, job_id,
         total_chapters=len(selected_chapters),
@@ -865,6 +964,12 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
     # Seed uniqueness context from existing questions in the DB
     existing_q_docs = await db["questions"].find({}, {"question_text": 1}).to_list(length=500)
     existing_q_texts: list[str] = [d.get("question_text", "") for d in existing_q_docs if d.get("question_text")]
+    # Bank embeddings (THIS book only) for insert-time near-duplicate dedup, so
+    # separate generation runs don't accumulate semantically equivalent questions.
+    _bank_docs = await db["questions"].find(
+        {"book_id": book_id, "embedding": {"$ne": None}}, {"embedding": 1}
+    ).to_list(length=2000)
+    existing_bank_embeddings: list[list[float]] = [d["embedding"] for d in _bank_docs if d.get("embedding")]
 
     chapter_failures: list[str] = []
     chapter_nums_ordered = [m["_id"] for m in selected_chapters]
@@ -883,6 +988,7 @@ async def _run_generate_from_book(job_id: str, book_id: str, question_type: str,
         difficulty=difficulty,
         existing_q_texts=existing_q_texts,
         chapter_failures=chapter_failures,
+        existing_bank_embeddings=existing_bank_embeddings,
         chapter_meta=chapter_meta_map,
         require_table=require_table,
         require_figure=require_figure,

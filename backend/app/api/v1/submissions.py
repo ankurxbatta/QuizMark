@@ -4,6 +4,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_instructor
@@ -93,7 +94,13 @@ async def submit_answer(
         "submitted_at": now,
         "marked_at": None,
     }
-    await db["submissions"].insert_one(sub_doc)
+    try:
+        await db["submissions"].insert_one(sub_doc)
+    except DuplicateKeyError:
+        # Concurrent double-submit lost the race against the UNIQUE
+        # (student_id, question_id) index — return the same clean 409 as the
+        # fast-path pre-check so exactly one submission is ever created.
+        raise HTTPException(409, "You have already submitted an answer for this question")
     mark_submission_task.delay(sub_doc["_id"])
     return _sub_out(sub_doc, question)
 

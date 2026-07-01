@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import Cookies from "js-cookie";
 import { Download, FileCheck, FileText } from "lucide-react";
 import api, { API_URL } from "@/lib/api";
 
@@ -16,17 +17,22 @@ export default function ExportPage() {
   const scopeParam = selected === "all" ? "all=1" : `quiz=${selected}`;
   const selectedQuiz = quizzes.find((q) => q.id === selected);
 
+  // A plain `<a href download>` can't attach an Authorization header, so the JWT
+  // is passed as a ?token= query param (the backend accepts it as a fallback,
+  // same pattern as the SSE /stream and /assets endpoints).
+  const tokenParam = `token=${encodeURIComponent(Cookies.get("token") || "")}`;
+
   const exports = [
     {
       title: "Marks & Feedback Export",
       description: "CSV with Student ID, Question ID, Mark, Max Mark, Feedback, Override Flag, and Timestamp for every submission.",
-      url: `${API_URL}/api/v1/export/marks`,
+      url: `${API_URL}/api/v1/export/marks?${tokenParam}`,
       filename: "marks_export.csv",
     },
     {
       title: "Full Audit Log Export",
       description: "CSV of all marking events, overrides, and login activity with timestamps.",
-      url: `${API_URL}/api/v1/export/audit`,
+      url: `${API_URL}/api/v1/export/audit?${tokenParam}`,
       filename: "audit_log.csv",
     },
   ];

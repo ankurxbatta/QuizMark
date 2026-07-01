@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -30,6 +32,35 @@ from app.tasks.ingest_tasks import ingest_pdf_task, generate_from_book_task, ing
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
+
+async def _read_upload_within_limit(file: UploadFile) -> bytes:
+    """Read an upload while enforcing UPLOAD_MAX_SIZE_MB *before* buffering the
+    entire body.
+
+    Rejects early on a declared size (Content-Length / ``file.size``) when
+    available, then streams the body in bounded 1 MiB chunks and aborts with a
+    413 the moment the cumulative size crosses the limit — so an oversized (or
+    lying) upload never gets fully materialised in memory.
+    """
+    max_bytes = settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024
+    declared = getattr(file, "size", None)
+    if declared is not None and declared > max_bytes:
+        raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 def _q_out(doc: dict) -> dict:
     doc = dict(doc)
@@ -49,12 +80,13 @@ async def extract_chapters(
     file: UploadFile = File(...),
     _: dict = Depends(require_instructor),
 ):
-    raw_bytes = await file.read()
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(415, "Only PDF files are supported.")
-    if len(raw_bytes) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
-    return {"chapters": extract_chapters_from_pdf(raw_bytes, max_pages=settings.PDF_MAX_PAGES)}
+    raw_bytes = await _read_upload_within_limit(file)
+    chapters = await asyncio.to_thread(
+        extract_chapters_from_pdf, raw_bytes, max_pages=settings.PDF_MAX_PAGES
+    )
+    return {"chapters": chapters}
 
 
 # ── Async full-book ingest ─────────────────────────────────────────────────────
@@ -67,14 +99,12 @@ async def generate_async(
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    raw_bytes = await file.read()
     filename = (file.filename or "").lower()
-    if len(raw_bytes) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
     if not filename.endswith(".pdf"):
         raise HTTPException(415, "Async ingestion only supports PDF files.")
+    raw_bytes = await _read_upload_within_limit(file)
 
-    info = get_pdf_info(raw_bytes)
+    info = await asyncio.to_thread(get_pdf_info, raw_bytes)
     now = datetime.now(timezone.utc)
     job_id = str(uuid.uuid4())
 
@@ -217,15 +247,13 @@ async def ingest_book_to_library(
     """
     from app.services.mongo_vector_store import get_checkpoint, save_checkpoint, save_book_pdf
 
-    raw_bytes = await file.read()
     filename = (file.filename or "upload.pdf")
-    if len(raw_bytes) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(415, "Only PDF files are supported.")
+    raw_bytes = await _read_upload_within_limit(file)
 
     book_hash = hashlib.sha256(raw_bytes).hexdigest()[:16]
-    info = get_pdf_info(raw_bytes)
+    info = await asyncio.to_thread(get_pdf_info, raw_bytes)
     if info.get("error") or not info.get("pages"):
         # Reject unreadable PDFs here instead of queueing a job doomed to fail
         raise HTTPException(
@@ -233,7 +261,14 @@ async def ingest_book_to_library(
             f"Could not read this PDF ({info.get('error') or 'no pages found'}). "
             "The file may be corrupt, encrypted, or not a real PDF.",
         )
-    book_id = filename.rsplit(".", 1)[0]
+    # Derive book_id from file CONTENT (not the bare filename) so two different
+    # PDFs sharing a name can't collide across the ~9 book-scoped collections,
+    # while re-uploading identical content stays stable/idempotent. Prefix with a
+    # slug of the filename for human readability. (book_hash is a sha256 of the
+    # raw bytes.) NOTE: rows written before this change used the filename-stem
+    # scheme and are not migrated.
+    _slug = re.sub(r"[^a-z0-9]+", "-", filename.rsplit(".", 1)[0].lower()).strip("-")[:40]
+    book_id = f"{_slug}-{book_hash}" if _slug else book_hash
     now = datetime.now(timezone.utc)
 
     checkpoint = await get_checkpoint(book_hash)
@@ -441,18 +476,37 @@ async def delete_book(
     await delete_table_index(book_id)
     await delete_exercise_index(book_id)
 
-    # Collect generated asset image ids before the questions are removed so the
-    # GridFS images don't leak.
+    # Collect generated asset image ids AND question ids before the questions are
+    # removed, so the GridFS images don't leak and so quizzes/submissions
+    # pointing at these questions can be cascaded.
     asset_ids: list[str] = []
+    question_ids: list[str] = []
     async for q in db["questions"].find(
-        {"book_id": book_id, "assets.image_id": {"$ne": None}}, {"assets": 1}
+        {"book_id": book_id}, {"assets": 1}
     ):
+        question_ids.append(q["_id"])
         for a in q.get("assets", []) or []:
             if a.get("image_id"):
                 asset_ids.append(a["image_id"])
     if asset_ids:
         await delete_question_assets(asset_ids)
     await db["questions"].delete_many({"book_id": book_id})
+
+    # Cascade: pull the deleted question ids out of every quiz and remove their
+    # submissions, so no quiz references a dead question and no orphan
+    # submissions linger. Best-effort — failures here must not fail the delete.
+    if question_ids:
+        try:
+            await db["quizzes"].update_many(
+                {"question_ids": {"$in": question_ids}},
+                {"$pull": {"question_ids": {"$in": question_ids}}},
+            )
+        except Exception as exc:
+            logger.warning(f"[delete_book] quiz cascade failed (non-fatal): {exc}")
+        try:
+            await db["submissions"].delete_many({"question_id": {"$in": question_ids}})
+        except Exception as exc:
+            logger.warning(f"[delete_book] submission cascade failed (non-fatal): {exc}")
     # Job _ids are UUIDs — match on the book_id field, not _id
     await db["ingest_jobs"].delete_many({"book_id": book_id})
     for h in hashes:
@@ -614,20 +668,28 @@ async def generate_from_upload(
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    raw_bytes = await file.read()
     filename = (file.filename or "").lower()
-    if len(raw_bytes) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"File exceeds {settings.UPLOAD_MAX_SIZE_MB} MB limit.")
+    raw_bytes = await _read_upload_within_limit(file)
 
     chunks = None
     info: dict = {}
 
     if filename.endswith(".pdf"):
-        info = get_pdf_info(raw_bytes)
-        chunks = parse_pdf_into_chunks(raw_bytes, max_pages=settings.PDF_MAX_PAGES)
+        info = await asyncio.to_thread(get_pdf_info, raw_bytes)
+        chunks = await asyncio.to_thread(
+            parse_pdf_into_chunks, raw_bytes, max_pages=settings.PDF_MAX_PAGES
+        )
         if not chunks:
             raise HTTPException(422, "No usable text extracted.")
         questions_data = await generate_questions_from_chunks(chunks, question_type, count, topic_filter=topic_filter)
+        # This quick path bypassed generate_questions()'s post-gen passes, so run
+        # them here: drop un-answerable/incorrect questions via the quality gate,
+        # then realise any figure-spec images (book_id/chapter_num unknown here —
+        # that's fine, realize_figure_images tolerates None).
+        from app.services.answer_verifier import verify_generated_questions
+        from app.services.question_assets import realize_figure_images
+        questions_data = await verify_generated_questions(questions_data)
+        questions_data = await realize_figure_images(questions_data)
     elif filename.endswith(".txt"):
         content = raw_bytes.decode("utf-8", errors="ignore")
         if not content.strip():
@@ -1053,3 +1115,18 @@ async def delete_question(
     ]
     if asset_ids:
         await delete_question_assets(asset_ids)
+
+    # Cascade: drop this id from any quiz that references it, and remove its
+    # submissions, so no quiz points at a dead question and no orphan
+    # submissions linger. Best-effort — a failure here must not fail the delete.
+    try:
+        await db["quizzes"].update_many(
+            {"question_ids": question_id},
+            {"$pull": {"question_ids": question_id}},
+        )
+    except Exception as exc:
+        logger.warning(f"[delete_question] quiz cascade failed (non-fatal): {exc}")
+    try:
+        await db["submissions"].delete_many({"question_id": question_id})
+    except Exception as exc:
+        logger.warning(f"[delete_question] submission cascade failed (non-fatal): {exc}")

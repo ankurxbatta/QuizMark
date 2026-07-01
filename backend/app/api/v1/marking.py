@@ -12,12 +12,17 @@ from app.tasks.marking_tasks import mark_submission_task
 router = APIRouter()
 
 
-def _sub_out(sub: dict) -> dict:
+def _sub_out(sub: dict, question: dict | None = None) -> dict:
     out = dict(sub)
     out["id"] = out.pop("_id")
-    out.setdefault("question_text", None)
-    out.setdefault("question_type", None)
-    out.setdefault("max_marks", None)
+    if question:
+        out["question_text"] = question.get("question_text")
+        out["question_type"] = question.get("question_type")
+        out["max_marks"] = question.get("max_marks")
+    else:
+        out.setdefault("question_text", None)
+        out.setdefault("question_type", None)
+        out.setdefault("max_marks", None)
     return out
 
 
@@ -58,7 +63,11 @@ async def override_mark(
     await db["audit_logs"].insert_one(log_doc)
 
     updated = await db["submissions"].find_one({"_id": submission_id})
-    return _sub_out(updated)
+    question = await db["questions"].find_one(
+        {"_id": updated["question_id"]},
+        {"question_text": 1, "question_type": 1, "max_marks": 1},
+    )
+    return _sub_out(updated, question)
 
 
 @router.get("/flagged")

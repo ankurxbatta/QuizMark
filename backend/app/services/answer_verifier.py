@@ -672,7 +672,11 @@ def _delimiters_balanced(text: str) -> bool:
 
 def _passes_renderability(question: dict) -> tuple[bool, str]:
     """Deterministic, LLM-free gate. Returns (keep, reason). Conservative —
-    only flags clear failures. Pure function (unit-testable)."""
+    only flags clear failures. Pure function (unit-testable).
+
+    KEEP IN SYNC with question_generator._REJECTION_CRITERIA: that constant
+    restates these same reject rules in the generation prompt so the model
+    avoids producing what this gate would drop. Change one → change the other."""
     text = (question.get("question_text") or "").strip()
     if not text:
         return False, "empty question text"
@@ -692,6 +696,17 @@ def _passes_renderability(question: dict) -> tuple[bool, str]:
         return False, "unbalanced delimiters ($ / parens / braces)"
     if _DANGLING_TAIL_RE.search(text):
         return False, "truncated (ends mid-sentence)"
+
+    # Book-internal cross-references ("Table 1.9", "Figure 2.3", "Fig. 6.1",
+    # "Example 1.15") must NEVER reach a student — they leak the source and point at
+    # something the student cannot see. Generation genericises these to "the table
+    # below" (via _strip_source_labels) before the gate; this is the final backstop
+    # that DROPS anything that slips through so the top-up loop regenerates it
+    # cleanly with the data reproduced as an attached asset. ("the table below" has
+    # no trailing number, so a legitimately-attached asset is never caught here.)
+    from app.services.question_generator import _SOURCE_LABEL_RE
+    if _SOURCE_LABEL_RE.search(text):
+        return False, "cites a book source label (e.g. 'Table 1.9')"
 
     if _TABLE_REF_RE.search(text) and not _table_content_ok(question, text, fill_in_ok):
         return False, "references a table that is missing or garbled"
@@ -844,6 +859,77 @@ async def _judge_question(question: dict) -> tuple[bool, str]:
     reason = "; ".join(fails)
     extra = str(verdict.get("reason") or "").strip()
     return False, (f"{reason} — {extra[:160]}" if extra else reason)
+
+
+_HARD_DIFFICULTY_PROMPT = """You are checking whether an exam question is genuinely HARD — i.e. it demands higher-order, multi-step work, not a one-step lookup or a single isolated computation.
+
+QUESTION (type: {qtype}):
+{stem}
+
+MODEL ANSWER:
+{model_answer}
+
+A question counts as genuinely hard ONLY if it does AT LEAST ONE of:
+  (a) requires TWO or more chained steps where a later step depends on an earlier result;
+  (b) COMBINES two or more distinct concepts/formulas; or
+  (c) EVALUATES, JUSTIFIES, or CRITIQUES a method, assumption, or conclusion with reasoned argument.
+
+It is NOT hard if it can be answered by a single recalled fact, a one-line lookup, or a single isolated computation.
+
+Respond ONLY as JSON: {{"multi_step": true or false, "reason": "<brief>"}}"""
+
+
+async def verify_hard_difficulty(questions: list[dict]) -> list[dict]:
+    """For difficulty='hard' questions, DROP any that aren't genuinely multi-step
+    (one cheap LLM judge call each, concurrent). Questions not marked hard pass
+    through untouched. Non-fatal: any infra/parse failure keeps the question.
+    Gated by GEN_HARD_VERIFY_ENABLED; the caller's top-up loop refills drops."""
+    if not settings.GEN_HARD_VERIFY_ENABLED or not questions:
+        return questions
+
+    targets = [q for q in questions if str(q.get("difficulty", "")).strip().lower() == "hard"]
+    if not targets:
+        return questions
+
+    semaphore = asyncio.Semaphore(max(1, int(settings.GEN_HARD_VERIFY_CONCURRENCY)))
+
+    async def _is_multi_step(q: dict) -> bool:
+        stem = (q.get("question_text") or "").strip()
+        if not stem:
+            return False
+        async with semaphore:
+            try:
+                raw = await llm_service.generate(_HARD_DIFFICULTY_PROMPT.format(
+                    qtype=q.get("question_type", "short_answer"),
+                    stem=stem,
+                    model_answer=(q.get("model_answer") or "")[:1000],
+                ))
+            except Exception as exc:
+                logger.warning(f"[HARD] verify failed (non-fatal, keeping): {exc}")
+                return True
+        verdict = _parse_json(raw)
+        if not verdict:
+            return True  # unparseable → keep (non-fatal)
+        # Drop only on an explicit negative. Normalise quoted/loose model output
+        # ("false"/"no"/0) so a stringified boolean still counts as "not multi-step"
+        # instead of slipping through as truthy.
+        ms = verdict.get("multi_step")
+        if ms is False:
+            return False
+        if isinstance(ms, str) and ms.strip().lower() in {"false", "no", "0"}:
+            return False
+        if ms == 0:
+            return False
+        return True
+
+    verdicts = await asyncio.gather(*[_is_multi_step(q) for q in targets])
+    drop_ids = {id(q) for q, keep in zip(targets, verdicts) if not keep}
+    if drop_ids:
+        for q in targets:
+            if id(q) in drop_ids:
+                logger.info("[HARD] dropped (not multi-step): %r", (q.get("question_text", "") or "")[:80])
+        logger.info("[HARD] kept %d/%d hard questions", len(targets) - len(drop_ids), len(targets))
+    return [q for q in questions if id(q) not in drop_ids]
 
 
 async def apply_quality_gate(questions: list[dict]) -> list[dict]:

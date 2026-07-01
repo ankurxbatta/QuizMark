@@ -1,16 +1,48 @@
 import csv
 import io
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from fastapi.responses import StreamingResponse
+from jose import JWTError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_db
-from app.core.security import require_instructor
+from app.core.security import decode_token
 
 router = APIRouter()
 
 QUESTION_BATCH_SIZE = 500
+
+
+def require_instructor_with_token(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+) -> dict:
+    """
+    Auth for browser-initiated CSV downloads.
+
+    An `<a href download>` cannot attach an Authorization header, so we accept
+    the JWT either from the normal `Authorization: Bearer` header OR, as a
+    fallback, from a `?token=` query param (same pattern as the SSE
+    /jobs/{id}/stream and /assets/{id} endpoints). Instructor role is required.
+    """
+    raw = None
+    if authorization and authorization.lower().startswith("bearer "):
+        raw = authorization[7:].strip()
+    if not raw:
+        raw = token
+    if not raw:
+        raise HTTPException(401, "Authentication required")
+    try:
+        claims = decode_token(raw)
+    except JWTError:
+        raise HTTPException(401, "Invalid or expired token")
+    if not claims.get("sub"):
+        raise HTTPException(401, "Invalid or expired token")
+    if claims.get("role") != "instructor":
+        raise HTTPException(403, "Instructor access required")
+    return claims
 
 
 def safe_csv_value(value):
@@ -29,7 +61,7 @@ def _csv_row(values: list) -> str:
 @router.get("/marks")
 async def export_marks(
     db: AsyncIOMotorDatabase = Depends(get_db),
-    _: dict = Depends(require_instructor),
+    _: dict = Depends(require_instructor_with_token),
 ):
     async def generate():
         yield _csv_row([
@@ -100,7 +132,7 @@ async def export_marks(
 @router.get("/audit")
 async def export_audit(
     db: AsyncIOMotorDatabase = Depends(get_db),
-    _: dict = Depends(require_instructor),
+    _: dict = Depends(require_instructor_with_token),
 ):
     async def generate():
         yield _csv_row(["id", "event_type", "actor_id", "submission_id", "detail", "timestamp"])

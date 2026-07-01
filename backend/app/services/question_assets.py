@@ -427,19 +427,43 @@ def _drop_unrendered_figures(questions: list[dict]) -> list[dict]:
     return kept
 
 
+class ImageBudget:
+    """Mutable, cumulative cap on the number of figure images realized across
+    MULTIPLE realize_figure_images calls within a single orchestration run.
+
+    realize_figure_images is called once per gate pass and again on every
+    post-gate top-up round, so a per-CALL cap (ASSET_MAX_PER_CHAPTER) would let a
+    chapter realize up to ASSET_MAX_PER_CHAPTER × (1 + top-up rounds) gpt-image-1
+    images. Threading one ImageBudget through every call makes the cap apply to
+    the SUM across the run instead."""
+
+    def __init__(self, remaining: int):
+        self.remaining = max(0, int(remaining))
+
+    def take(self, n: int) -> None:
+        self.remaining = max(0, self.remaining - max(0, int(n)))
+
+
 async def realize_figure_images(
     questions: list[dict],
     chapter_num=None,
     book_id=None,
+    budget: "ImageBudget | None" = None,
 ) -> list[dict]:
     """Generate the actual chart image for every gate-surviving question that
-    carries a figure SPEC asset. Bounded by ASSET_MAX_PER_CHAPTER (no new loop).
+    carries a figure SPEC asset. Bounded by ASSET_MAX_PER_CHAPTER per call, and —
+    when a cumulative ``budget`` is supplied — by the run-wide remaining budget so
+    the total across repeated calls (top-up loop) can't exceed the chapter cap.
     Fully defensive: any failure degrades to dropping that figure question."""
     if not questions:
         return questions
 
     pending = [q for q in questions if _figure_spec_asset(q) is not None]
     limit = max(0, int(settings.ASSET_MAX_PER_CHAPTER))
+    if budget is not None:
+        # Cumulative cap: never realize more than the run has left, regardless of
+        # how many times this function is invoked across the top-up loop.
+        limit = min(limit, budget.remaining)
     if not pending or limit == 0 or not settings.IMAGE_GEN_ENABLED:
         return _drop_unrendered_figures(questions)
 
@@ -461,5 +485,8 @@ async def realize_figure_images(
         window = pending[start:start + batch]
         results = await asyncio.gather(*[_try(q) for q in window])
         realized += sum(1 for ok in results if ok)
+
+    if budget is not None:
+        budget.take(realized)
 
     return _drop_unrendered_figures(questions)

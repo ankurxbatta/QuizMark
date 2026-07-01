@@ -13,6 +13,7 @@ from app.core.security import (
     require_instructor,
     login_limiter,
     register_limiter,
+    get_client_ip,
 )
 from app.core.config import settings
 from app.schemas.schemas import LoginRequest, TokenResponse, UserOut
@@ -36,7 +37,7 @@ def _user_out(doc: dict) -> dict:
 
 @router.post("/register", response_model=UserOut, status_code=201)
 async def register(payload: RegisterRequest, request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     register_limiter.check(ip)
     username = payload.username.strip()
     if not username:
@@ -72,7 +73,7 @@ async def list_students(
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     login_limiter.check(ip)
     user = await db["users"].find_one({"username": payload.username})
     if not user:

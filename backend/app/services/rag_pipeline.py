@@ -118,7 +118,7 @@ def _parse_llm_json(raw: str, max_marks: float) -> dict:
         }
 
     return {
-        "mark": min(float(data.get("mark", 0)), max_marks),
+        "mark": max(0.0, min(float(data.get("mark", 0)), max_marks)),
         "feedback": str(data.get("feedback", "")),
         "flagged": bool(data.get("flagged", False)),
         "confidence": float(data.get("confidence", 0.5)),
@@ -144,6 +144,96 @@ def _extract_mcq_correct(question_text: str, model_answer: str) -> str | None:
 def _extract_true_false(model_answer: str) -> str | None:
     match = re.search(r"\b(true|false)\b", model_answer, re.IGNORECASE)
     return match.group(1).capitalize() if match else None
+
+
+_TF_TRUE = {"t", "true", "yes", "y", "correct"}
+_TF_FALSE = {"f", "false", "no", "n", "incorrect"}
+
+
+def _normalize_tf(value: str | None) -> bool | None:
+    """Map a true/false answer to a bool. Accepts 't'/'true'/'yes' → True,
+    'f'/'false'/'no' → False (case/whitespace/punctuation insensitive)."""
+    if value is None:
+        return None
+    token = value.strip().lower().strip(".!?)( \t")
+    if token in _TF_TRUE:
+        return True
+    if token in _TF_FALSE:
+        return False
+    return None
+
+
+def _parse_mcq_options(question_text: str) -> dict[str, str]:
+    """Best-effort extraction of A–D option texts from the question stem.
+
+    Handles the common newline/line-separated format ("A. text", "B) text").
+    Used only as a fallback to map an option-TEXT submission back to its letter.
+    """
+    options: dict[str, str] = {}
+    for line in question_text.splitlines():
+        m = re.match(r"\s*[\(\[]?\s*([A-Da-d])\s*[.):\-\]]\s+(.+?)\s*$", line)
+        if m:
+            letter = m.group(1).upper()
+            if letter not in options:
+                options[letter] = m.group(2).strip()
+    return options
+
+
+def _norm_option_text(text: str) -> str:
+    """Lowercase + collapse whitespace + drop surrounding punctuation so option
+    text can be compared regardless of trailing periods/spacing."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", text.lower())).strip()
+
+
+def _normalize_mcq_letter(value: str | None, options: dict[str, str] | None = None) -> str | None:
+    """Map a submitted MCQ answer to its option letter (A–D).
+
+    Handles bare letters, decorated letters ("B)", "(B)", "B.", "B -"),
+    "B) The mean" (letter + text), and — when `options` are available — a raw
+    option-TEXT submission matched back to its letter.
+    """
+    if value is None:
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    # Leading letter, optionally wrapped/followed by punctuation.
+    m = re.match(r"^[\(\[\{]?\s*([A-Da-d])\s*(?:[.):\-\]\}]|$)", s)
+    if m:
+        return m.group(1).upper()
+    # Fall back to matching the submission against option texts.
+    if options:
+        target = _norm_option_text(s)
+        if target:
+            for letter, opt_text in options.items():
+                if _norm_option_text(opt_text) == target:
+                    return letter.upper()
+    return None
+
+
+def _objective_is_correct(
+    student_answer: str, correct: str, question_type: str, question: dict
+) -> bool:
+    """Robust equality check for MCQ / true-false fast-path marking.
+
+    Normalises both sides before comparing so that option text, decorated
+    letters, or word/letter true-false variants are not spuriously zeroed.
+    """
+    if question_type == "true_false":
+        s = _normalize_tf(student_answer)
+        c = _normalize_tf(correct)
+        if s is not None and c is not None:
+            return s == c
+        # Unrecognised form on either side — fall back to a lenient string match.
+        return student_answer.strip().lower().rstrip(".") == correct.strip().lower().rstrip(".")
+
+    # MCQ
+    options = _parse_mcq_options(question.get("question_text", ""))
+    s = _normalize_mcq_letter(student_answer, options)
+    c = _normalize_mcq_letter(correct, options)
+    if s is not None and c is not None:
+        return s == c
+    return False
 
 
 def _build_concept_queries(question_text: str, rubric: str) -> list[str]:
@@ -346,7 +436,9 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
             await _persist(db, submission_id, 0.0, feedback, True, slm)
             return _result(0.0, feedback, True, slm)
 
-        is_correct = student_answer.lower().rstrip(".") == correct.lower().rstrip(".")
+        is_correct = _objective_is_correct(
+            student_answer, correct, question["question_type"], question
+        )
 
         mark = float(question["max_marks"] if is_correct else 0.0)
         feedback = (
@@ -377,9 +469,13 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
 
     # ── HIGH: accept SLM result ───────────────────────────────────────────────
     if slm.route == "HIGH":
+        # HIGH is now reserved for clearly full-credit answers (see slm_scorer):
+        # the provisional mark is full marks, awarded without an LLM call because
+        # semantic alignment and rubric-term coverage are both very high.
         feedback = (
-            f"Answer covers {slm.keyword_coverage:.0%} of key rubric terms "
-            f"with strong semantic alignment to the model answer."
+            f"Full marks — the answer aligns strongly with the model answer "
+            f"({slm.semantic_similarity:.0%} semantic match) and covers "
+            f"{slm.keyword_coverage:.0%} of the key rubric terms."
         )
         await _persist(db, submission_id, slm.provisional_mark, feedback, False, slm)
         return _result(slm.provisional_mark, feedback, False, slm)

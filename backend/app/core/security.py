@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from app.core.config import settings
 
@@ -59,8 +59,41 @@ def require_instructor(claims: dict = Depends(get_current_user)) -> dict:
     return claims
 
 
+def get_client_ip(request: Request) -> str:
+    """Best-effort real client IP for rate-limiting keys.
+
+    Behind a reverse proxy / load balancer, ``request.client.host`` is the
+    proxy's address, so every client shares one rate-limit bucket. When present
+    we use the LEFT-MOST entry of ``X-Forwarded-For`` (the original client).
+
+    SECURITY ASSUMPTION: ``X-Forwarded-For`` is client-controllable and trivially
+    spoofable unless a *trusted* reverse proxy overwrites/sets it. Deployments
+    MUST terminate ingress behind such a proxy (nginx/ALB/Cloudflare) that
+    strips inbound XFF and appends the true peer. Without that, an attacker can
+    rotate the header to dodge the limiter — but that is strictly no worse than
+    today's per-proxy-IP bucketing, and correct behind a proper proxy.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 class SlidingWindowLimiter:
-    """Minimal in-process per-key rate limiter (suitable for single-instance deployments)."""
+    """Minimal in-process per-key rate limiter (suitable for single-instance deployments).
+
+    TODO(scale): this state lives in one process's memory, so each replica keeps
+    its own window — N replicas allow ~N× the intended rate, and a restart wipes
+    counters. Before horizontal scaling, back this with the shared Redis already
+    configured for Celery (``settings.CELERY_BROKER_URL``) using an atomic
+    INCR + EXPIRE (or a sorted-set sliding window) keyed by client IP, so the
+    limit is enforced cluster-wide. Left in-process for now to avoid adding a
+    Redis round-trip on the hot auth path in the current single-replica deploy.
+    """
 
     def __init__(self, max_calls: int, window_seconds: float = 60.0):
         self.max_calls = max_calls
