@@ -21,6 +21,7 @@ All settings live in `.env`. Run `setup.sh` (Mac/Linux) or `setup.bat` (Windows)
 | Variable | Default | Description |
 |---|---|---|
 | `ENVIRONMENT` | `development` | `development` or `production`. In production the API docs (`/docs`, `/redoc`) are disabled and demo-data seeding refuses to run. |
+| `PUBLIC_API_URL` | — | Production only (`deploy.sh` / `docker-compose.prod.yml`): public https URL the browser uses to reach the API, baked into the frontend build. Unused in development. |
 
 ---
 
@@ -31,7 +32,8 @@ All settings live in `.env`. Run `setup.sh` (Mac/Linux) or `setup.bat` (Windows)
 | `SECRET_KEY` | — | JWT signing secret. Required. |
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm. Do not change. |
 | `JWT_EXPIRY_MINUTES` | `30` | Token lifetime in minutes. |
-| `MAX_FAILED_LOGIN_ATTEMPTS` | `3` | Failed logins before account lockout. |
+| `SESSION_MAX_MINUTES` | `720` | Absolute session cap: `/auth/refresh` renews tokens until the original login is this old, then forces re-login. |
+| `MAX_FAILED_LOGIN_ATTEMPTS` | `10` | Failed logins before account lockout. |
 | `LOCKOUT_DURATION_MINUTES` | `5` | Lockout duration. |
 | `ADMIN_ENABLED` | `true` | Creates admin account on first startup. |
 | `ADMIN_USERNAME` | `admin` | Admin login username. |
@@ -162,11 +164,18 @@ after a book finishes ingesting (and auto-backfilled on startup for existing boo
 | `INDEX_BUILD_BATCH_SIZE` | `10` | Items per enrichment LLM call during index builds (results cached by content hash). |
 | `RRF_K` | `60` | Reciprocal-rank fusion constant for multi-index retrieval. |
 | `EXPANSION_NEIGHBORS` | `2` | Parent chunks pulled into results via specialist cross-links. |
+| `RERANK_ENABLED` | `true` | Phase 4: lexical per-specialist rerank of each result list before fusion (deterministic, no LLM calls). |
+| `RERANK_ALPHA` | `0.5` | Blend weight: original vector rank vs lexical signal. `1.0` disables the lexical signal. |
 
 Disabling any index falls back to chunk-only retrieval for that modality. Generation
 retrieval routes sub-queries by intent (conceptual/computational/visual) across the
 indexes and fuses results; marking gets heuristically-routed canonical formulas,
 figures and tables in its context with no added LLM or embedding calls.
+
+Retrieval quality is measurable with the Phase 4 eval harness: write a golden-query
+set (template in `eval/golden/example.json`) and run
+`python3 scripts/eval_retrieval.py --golden <file>` — it reports hit@k / MRR / nDCG
+per specialist index, so changes like `RERANK_ENABLED` can be compared objectively.
 
 ---
 

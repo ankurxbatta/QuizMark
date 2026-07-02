@@ -1,5 +1,10 @@
 # Deployment Options & Cost Analysis
 
+> **Decision (2026-07-02): deploying on AWS** — see `DEPLOYMENT_CLOUD.md` for the
+> concrete plan (EC2 + Atlas-on-AWS + S3 backups, `deploy.sh` +
+> `docker-compose.prod.yml`). This document is the provider research that
+> preceded the decision, kept for reference.
+
 > Research compiled 2026-06-16. All prices are current 2026 figures gathered from vendor pricing pages and reputable aggregators (sources linked at the bottom of each section). **Verify live prices before committing** — several providers changed pricing in mid-2026 (notably Hetzner on 15 Jun 2026 and Oracle's free tier on 15 Jun 2026).
 
 ---

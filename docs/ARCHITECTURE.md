@@ -162,7 +162,10 @@ Instructor requests generation
     Round 0:  extract_chapter_concepts
               LLM decomposes topic into key concepts + retrieval sub-queries
 
-    Round 1:  deep_retrieve (4 parallel MongoDB vector searches)
+    Round 1:  deep_retrieve (4 parallel MongoDB vector searches, routed across
+              the specialist indexes by sub-query intent; each result list is
+              lexically reranked against its sub-query, then RRF-fused with
+              parent-chunk cross-link expansion — retrieval_router.py + reranker.py)
               → surfaces most testable chunks by teaching density
               → generates ~70% of target count across Bloom's levels
                  L1 recall · L2 understand · L3 apply · L4 analyse · L5 evaluate

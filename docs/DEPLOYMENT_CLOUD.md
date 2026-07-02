@@ -1,8 +1,9 @@
-# QuizMark — Secure, Scalable Cloud Deployment Plan (College)
+# QuizMark — Secure, Scalable Cloud Deployment Plan (College, AWS)
 
-A pragmatic path from this repo to a college-grade deployment. Phase 1 serves a
-department (≤ ~2,000 students) on one VM for roughly **$40–70/month + AI usage**;
-Phase 2 scales out without re-architecting.
+A pragmatic path from this repo to a college-grade deployment **on AWS** (decision
+2026-07-02). Phase 1 serves a department (≤ ~2,000 students) on one EC2 instance
+for roughly **$75–130/month + Atlas M10 (~$60) + AI usage**; Phase 2 scales out
+without re-architecting.
 
 ---
 
@@ -19,31 +20,44 @@ Phase 2 scales out without re-architecting.
   per-question generation/marking; the free Gemini embedding tier is NOT
   college-grade (you exhausted it in one afternoon of testing — get paid quota).
 
-## 1. Architecture (Phase 1 — one VM, all containers)
+## 1. Architecture (Phase 1 — one EC2 instance, all containers)
 
 ```
-Internet → Cloudflare (DNS + TLS + WAF/rate limit)
-        → VM (4 vCPU / 16 GB): Caddy or Nginx reverse proxy
-            ├─ frontend  (Next.js, :3000, internal)
-            ├─ backend   (FastAPI, :8000, internal)
+Internet → Cloudflare (DNS + TLS + WAF/rate limit)   [or Route 53 + ACM + ALB]
+        → EC2 t3.xlarge (4 vCPU / 16 GB, Elastic IP): Caddy or Nginx reverse proxy
+            ├─ frontend  (Next.js, :3000, 127.0.0.1 only)
+            ├─ backend   (FastAPI, :8000, 127.0.0.1 only)
             ├─ workers   (ingest, gen, mark, clean; merge vision/math/embed/deepsearch
             │             queues into 2 workers at low volume)
-            └─ redis     (broker, internal only)
-        → MongoDB Atlas M10 (managed, same region, private/IP-allowlisted)
+            └─ redis     (broker, docker network only)
+        → MongoDB Atlas M10 (deployed ON AWS, same region, IP-allowlisted)
 ```
 
-Provider suggestions: Hetzner CPX41 / DigitalOcean 16 GB / AWS t3.xlarge —
-whatever your college can procure. Region nearest campus.
+**AWS specifics**
+- **Instance**: `t3.xlarge` (4 vCPU / 16 GB) with a 1-year Compute Savings Plan
+  (~$75/mo vs ~$121 on-demand). Starting smaller (`t3.large`, 8 GB) works for a
+  pilot but ingestion + 8 workers will swap; upgrade before go-live.
+- **Storage**: 100 GB gp3 EBS, encrypted, `DeleteOnTermination=false`.
+- **Networking**: Elastic IP; security group allows inbound **80/443 only**
+  (SSH via AWS SSM Session Manager instead of an open port 22 — free and audited).
+- **MongoDB**: Atlas M10 with AWS as the cloud provider, same region as the EC2
+  instance; allowlist the Elastic IP only. (Do NOT use DocumentDB — it has no
+  `$vectorSearch`.)
+- **Backups**: nightly `mongodump` to an S3 bucket with a 30-day lifecycle rule
+  (plus Atlas continuous backup); EBS snapshot weekly via Data Lifecycle Manager.
+- **Cost guardrail**: AWS Budgets alert at your monthly cap; the college's AWS
+  Educate / academic credits often cover a pilot term.
 
 ## 2. Security hardening checklist (do ALL before go-live)
 
 **Network**
-- [ ] Only 80/443 open; SSH key-only on a non-default port or behind Tailscale/VPN.
-- [ ] Redis and all app ports bound to the Docker network / localhost only
-      (the compose file already binds infra ports to 127.0.0.1 — keep that).
-- [ ] Flower and mongo-express: DO NOT deploy in production (remove the services
-      or gate behind VPN). They are unauthenticated admin surfaces.
-- [ ] Atlas: enable IP allowlist (VM's static IP only) + TLS + SCRAM user with
+- [ ] Security group: inbound 80/443 only; shell access via SSM Session Manager
+      (no open port 22).
+- [ ] Redis and all app ports bound to the Docker network / localhost only —
+      `docker-compose.prod.yml` already does this (frontend/backend on 127.0.0.1).
+- [ ] Flower and mongo-express never start in production —
+      `docker-compose.prod.yml` disables them via a never-activated profile.
+- [ ] Atlas: enable IP allowlist (the Elastic IP only) + TLS + SCRAM user with
       least-privilege role on the one database.
 
 **Application**
@@ -52,16 +66,18 @@ whatever your college can procure. Region nearest campus.
 - [ ] `CORS_ORIGINS` = exactly your public frontend origin (https://quiz.college.edu).
 - [ ] JWT expiry: keep 30 min; consider 8h only for instructor role if sessions annoy.
 - [ ] Create per-student accounts via /auth/register batch script; never share logins.
-- [ ] Backups: nightly `mongodump` to object storage (S3/B2) with 30-day retention
+- [ ] Backups: nightly `mongodump` to S3 with a 30-day lifecycle rule
       — Atlas M10 also has continuous backup; enable it.
-- [ ] Keep API keys ONLY in the VM's .env (never in git — already enforced).
+- [ ] Keep API keys ONLY in the instance's .env (never in git — already enforced).
 
 **Operations**
-- [ ] `docker compose pull/build` via a deploy script from a tagged release branch
-      (Stable), never from Develop.
-- [ ] Log rotation (docker `--log-opt max-size=50m`), plus Uptime monitoring
-      (UptimeRobot on /health) and disk alerts at 80%.
-- [ ] OS auto security updates (unattended-upgrades / dnf-automatic).
+- [ ] Deploy with `bash deploy.sh` from the `Stable` branch, never from Develop —
+      the script validates .env (secret strength, PUBLIC_API_URL, Atlas URL),
+      warns off-branch, builds, starts, and health-checks.
+- [ ] Log rotation is set by `docker-compose.prod.yml` (50 MB × 3 per container);
+      add CloudWatch agent or UptimeRobot on /health and disk alerts at 80%.
+- [ ] OS auto security updates (`dnf-automatic` on Amazon Linux 2023 /
+      `unattended-upgrades` on Ubuntu).
 
 ## 3. AI provider setup (the part that actually breaks first)
 
@@ -102,17 +118,21 @@ Trigger: sustained CPU > 70%, marking queue latency > 2 min, or > ~2k active stu
 | 3 | Fix pilot findings; load-test submissions (the unique-index race is covered by tests); enable backups + monitoring alerts |
 | 4 | Department go-live; weekly mongodump restore drill once; document the admin runbook |
 
-**Deploy commands** (VM):
+**Deploy commands** (EC2 instance):
 ```bash
 git clone -b Stable <repo> && cd marking-tools
-cp .env.example .env   # fill secrets + Atlas URI + AI keys
-# remove flower + mongo-express from docker-compose.yml (or create a prod override)
-docker compose up -d --build
+cp .env.example .env   # fill secrets + Atlas URI + AI keys + PUBLIC_API_URL
+bash deploy.sh         # validates .env, builds, starts docker-compose.prod.yml, health-checks
 ```
+`deploy.sh` refuses placeholder secrets and a local-container `MONGODB_URL`
+(unless you opt into `COMPOSE_PROFILES=local-db`), and never starts flower or
+mongo-express. Point the reverse proxy at 127.0.0.1:3000 (app) and
+127.0.0.1:8000 (API, must be reachable at `PUBLIC_API_URL`).
 
 ## 6. What I'd fix in code before go-live (small, known)
 
 1. Redis rate limiter (only if >1 backend replica).
-2. Session UX: 30-min JWT + long ingests means instructors re-login mid-job;
-   jobs survive (server-side), but consider a refresh-token endpoint.
+2. ~~Session UX: 30-min JWT + long ingests means instructors re-login mid-job~~
+   **Done 2026-07-02**: `POST /auth/refresh` + frontend silent refresh; sessions
+   slide up to `SESSION_MAX_MINUTES` (12 h default), then force re-login.
 3. Export scoping per course if instructors must not see each other's cohorts.

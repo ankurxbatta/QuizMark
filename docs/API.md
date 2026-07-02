@@ -18,7 +18,17 @@ List endpoints support `skip` (default 0) and `limit` (default 100, max 500) que
 ```
 Returns `{ "access_token": "...", "token_type": "bearer" }`.
 
-Rate limited to 10 requests/minute per IP. Three failed attempts lock the account for 5 minutes.
+Rate limited to 10 requests/minute per IP. Ten failed attempts lock the account for 5 minutes.
+
+### `POST /auth/refresh`
+Exchange a still-valid Bearer token for a fresh one (sliding session). No body.
+Returns the same shape as `/auth/login`.
+
+The original login time travels in the token's `auth_time` claim; once the session
+is older than `SESSION_MAX_MINUTES` (default 12 h) refresh returns `401` and the
+user must log in again. The frontend calls this automatically when a token has
+under 10 minutes of life left, so long ingestion/generation jobs no longer log
+instructors out mid-job.
 
 ### `POST /auth/register`
 ```json

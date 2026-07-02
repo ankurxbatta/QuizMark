@@ -58,9 +58,14 @@ flowchart LR
     RT -->|figure intent| F[("figure_index")]
     RT -->|table intent| TB[("table_index")]
     M & F & TB -->|cross-links pull<br/>parent chunks in| C
-    C --> RRF["RRF fusion (k = RRF_K)<br/>rank-merge all result lists"]
+    C --> RR["lexical rerank per list<br/>(reranker.py, RERANK_ALPHA)"]
+    RR --> RRF["RRF fusion (k = RRF_K)<br/>rank-merge all result lists"]
     RRF --> OUT["top-k chunks ranked by teaching_density<br/>+ top formulas / figures / tables"]
 ```
+
+Retrieval quality is measurable offline: `scripts/eval_retrieval.py` scores a
+per-book golden-query set (hit@k / MRR / nDCG per index) so retrieval changes
+can be compared objectively before shipping.
 
 Specialist hits matter twice: they re-rank their **source chunks** into the
 fused result (cross-links), and the raw formulas/figures/tables feed the
@@ -177,6 +182,8 @@ sequenceDiagram
 | `GEN_CHAPTER_CONCURRENCY` | 5 | chapters generated in parallel; lower to 2–3 on rate-limited keys |
 | `DEDUP_SIMILARITY_THRESHOLD` | 0.92 | cross-chapter cosine dedup cut-off |
 | `RRF_K` | (config) | rank-fusion constant for multi-index retrieval |
+| `RERANK_ENABLED` | true | lexical per-list rerank before fusion; `false` restores pure vector order |
+| `RERANK_ALPHA` | 0.5 | vector-rank weight in the rerank blend (1.0 = vector only) |
 | `count_per_chapter` | request param (1–50) | target per chapter; shortfall is reported, not silent |
 
 Failure semantics in one line: **a chapter only fails if Round 1 produces

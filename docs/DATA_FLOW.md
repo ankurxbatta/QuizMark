@@ -64,7 +64,7 @@ flowchart TB
     %% Generation flow
     UI_I -->|"chapters · count · type · difficulty\n· deepsearch on/off"| EP_GEN
     EP_GEN --> W_GEN
-    W_GEN -->|"multi-query retrieval + RRF fusion"| C_CHUNKS
+    W_GEN -->|"multi-query retrieval + lexical rerank + RRF fusion"| C_CHUNKS
     W_GEN -->|"specialist context (L3 formulas, L4 figures/tables)"| C_SPEC
     W_GEN -->|"generate + top-up rounds"| P_OAI
     P_OAI -.->|"quota/429"| P_ANT
@@ -92,7 +92,7 @@ flowchart TB
 ## The five main journeys
 
 1. **Ingest** — PDF → GridFS → resumable page windows (clean → math validation → vision → embed) → `pdf_chunks` with checkpoints; completion triggers the four specialist index builders on their own workers.
-2. **Generate** — instructor request (with the DeepSearch toggle) → worker-gen retrieves fused context (chunks + specialist indexes) → LLM generates → **DeepSearch refines each candidate against book + web evidence** → quality gate drops failures → top-up rounds refill → `questions`.
+2. **Generate** — instructor request (with the DeepSearch toggle) → worker-gen retrieves fused context (chunks + specialist indexes, each list lexically reranked against its sub-query before RRF fusion) → LLM generates → **DeepSearch refines each candidate against book + web evidence** → quality gate drops failures → top-up rounds refill → `questions`.
 3. **Assign** — questions are bundled into named quizzes; a student's assessment is the union of their assigned quizzes.
 4. **Submit & mark** — one submission per (student, question), enforced by a unique index; objective questions are marked deterministically, subjective ones route through the SLM pre-scorer (full-credit shortcut only when unambiguous) into chapter-scoped RAG + LLM.
 5. **Review & export** — instructors override/flag marks (audited), analytics aggregates, CSV exports stream with injection-safe cells.
