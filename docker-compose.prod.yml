@@ -1,0 +1,132 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  QuizMark — Production override  (see docs/DEPLOYMENT_CLOUD.md)
+#
+#  Usage:   bash deploy.sh
+#     or:   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+#  Never use plain `docker compose up` in production — that auto-loads the
+#  dev-only docker-compose.override.yml (source bind-mount + --reload).
+#
+#  What this changes vs. the base file:
+#   • frontend/backend bind to 127.0.0.1 only — a reverse proxy on the VM
+#     (Caddy/Nginx) terminates TLS and forwards to them.
+#   • flower and mongo-express never start (unauthenticated admin surfaces).
+#   • MongoDB defaults to an EXTERNAL cluster (Atlas) via MONGODB_URL in .env.
+#     To run the DB on this VM instead:  COMPOSE_PROFILES=local-db bash deploy.sh
+#     (without the mongodb health gate, the backend may restart a few times
+#     while the local DB warms up — restart: unless-stopped covers this).
+#   • ENVIRONMENT=production forced (disables /docs and demo seeding).
+#   • Log rotation on every container (50 MB × 3 files).
+#
+#  Requires Docker Compose v2.24+ (uses the !override and !reset YAML tags).
+# ═══════════════════════════════════════════════════════════════════════
+
+x-prod-logging: &prod-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+
+  frontend:
+    build:
+      args:
+        # Public URL the BROWSER uses to reach the API, baked at build time,
+        # e.g. https://api.quiz.college.edu (reverse-proxied to 127.0.0.1:8000).
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:?Set PUBLIC_API_URL in .env — public https URL of the backend API}
+    environment:
+      - NEXT_PUBLIC_API_URL=${PUBLIC_API_URL}
+    ports: !override
+      - "127.0.0.1:3000:3000"
+    logging: *prod-logging
+
+  backend:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-ingest:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-vision:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-math:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-clean:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-embed:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-deepsearch:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-gen:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  worker-mark:
+    environment:
+      - ENVIRONMENT=production
+    depends_on: !override
+      broker:
+        condition: service_healthy
+    logging: *prod-logging
+
+  # Unauthenticated admin dashboards — never started in production.
+  # (The "disabled" profile is intentionally never activated.)
+  flower:
+    profiles: ["disabled"]
+
+  mongo-express:
+    profiles: ["disabled"]
+
+  # Local DB is opt-in in prod; the default is MongoDB Atlas via MONGODB_URL.
+  mongodb:
+    profiles: ["local-db"]
+    logging: *prod-logging
+
+  broker:
+    logging: *prod-logging
