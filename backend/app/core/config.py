@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_MINUTES: int = 30
+    # Absolute session lifetime: /auth/refresh keeps renewing 30-min tokens
+    # until the ORIGINAL login is this old, then forces a fresh login. Caps
+    # how long a stolen token can be kept alive by refreshing.
+    SESSION_MAX_MINUTES: int = 720
     # A low threshold (was 3) lets an attacker who only knows a *username*
     # deliberately lock that account out with a handful of bad passwords — a
     # targeted-lockout DoS that is especially dangerous for the sole admin.

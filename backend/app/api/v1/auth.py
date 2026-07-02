@@ -10,6 +10,7 @@ from app.core.security import (
     verify_password,
     hash_password,
     create_access_token,
+    get_current_user,
     require_instructor,
     login_limiter,
     register_limiter,
@@ -103,5 +104,42 @@ async def login(payload: LoginRequest, request: Request, db: AsyncIOMotorDatabas
         {"_id": user["_id"]},
         {"$set": {"failed_attempts": 0, "locked_until": None}},
     )
-    token = create_access_token({"sub": user["_id"], "role": user["role"]})
+    token = create_access_token(
+        {"sub": user["_id"], "role": user["role"], "auth_time": int(now.timestamp())}
+    )
+    return TokenResponse(access_token=token)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh(
+    claims: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """Exchange a still-valid token for a fresh one (sliding session).
+
+    The original login time travels in the ``auth_time`` claim; once the
+    session is older than SESSION_MAX_MINUTES the client must log in again,
+    so a leaked token cannot be renewed indefinitely.
+    """
+    now = datetime.now(timezone.utc)
+    auth_time = claims.get("auth_time") or int(now.timestamp())
+    if now.timestamp() - auth_time > settings.SESSION_MAX_MINUTES * 60:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
+        )
+
+    user = await db["users"].find_one({"_id": claims["sub"]})
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    locked_until = user.get("locked_until")
+    if locked_until is not None:
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if locked_until > now:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account locked")
+
+    token = create_access_token(
+        {"sub": user["_id"], "role": user["role"], "auth_time": auth_time}
+    )
     return TokenResponse(access_token=token)
