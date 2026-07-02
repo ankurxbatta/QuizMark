@@ -39,8 +39,12 @@ info "Checking .env…"
 _val() { grep -m1 "^${1}=" .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'"; }
 _set() {
   local k=$1 v=$2
+  # escape sed-special chars (\ & and the | delimiter) so passwords
+  # containing them don't corrupt the .env line
+  local esc
+  esc=$(printf '%s' "$v" | sed -e 's/[\\&|]/\\&/g')
   if grep -q "^${k}=" .env; then
-    sed -i.bak "s|^${k}=.*|${k}=${v}|" .env && rm -f .env.bak
+    sed -i.bak "s|^${k}=.*|${k}=${esc}|" .env && rm -f .env.bak
   else
     echo "${k}=${v}" >> .env
   fi

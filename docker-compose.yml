@@ -207,7 +207,8 @@ services:
       dockerfile: Dockerfile
     command: celery -A app.tasks.celery_app flower --port=5555
     ports:
-      - "5555:5555"
+      # localhost-only: the dashboard has no auth
+      - "127.0.0.1:5555:5555"
     env_file:
       - .env
     depends_on:
@@ -221,7 +222,8 @@ services:
   broker:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # localhost-only: Redis has no auth configured
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -236,7 +238,8 @@ services:
     image: mongodb/mongodb-atlas-local:latest
     hostname: mongodb
     ports:
-      - "27017:27017"
+      # localhost-only: the DB has no auth configured
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongodata:/data/db
       - mongoconfigdata:/data/configdb
@@ -253,7 +256,8 @@ services:
   mongo-express:
     image: mongo-express:latest
     ports:
-      - "8081:8081"
+      # localhost-only: basic auth is disabled below
+      - "127.0.0.1:8081:8081"
     environment:
       - ME_CONFIG_MONGODB_URL=mongodb://mongodb:27017/?directConnection=true
       - ME_CONFIG_BASICAUTH=false
