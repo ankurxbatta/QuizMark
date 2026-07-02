@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.core.config import settings
+from app.services.reranker import rerank_results
 from app.services.mongo_vector_store import (
     CHUNKS_COLLECTION,
     _get_collection,
@@ -202,34 +203,43 @@ async def routed_retrieve(
     ]
     specialist_searches: list = []
     specialist_kinds: list[str] = []
+    specialist_queries: list[str] = []
     for query, emb in zip(queries, embeddings):
         intent = classify_intent(query)
         if intent == INTENT_COMPUTATIONAL and settings.MATH_INDEX_ENABLED:
             specialist_searches.append(retrieve_formulas(emb, book_id=book_id, chapter_num=chapter_num, k=3))
             specialist_kinds.append("formula")
+            specialist_queries.append(query)
         elif intent == INTENT_VISUAL:
             if settings.FIGURE_INDEX_ENABLED:
                 specialist_searches.append(retrieve_figures(emb, book_id=book_id, chapter_num=chapter_num, k=3))
                 specialist_kinds.append("figure")
+                specialist_queries.append(query)
             if settings.TABLE_INDEX_ENABLED:
                 specialist_searches.append(retrieve_tables(emb, book_id=book_id, chapter_num=chapter_num, k=2))
                 specialist_kinds.append("table")
+                specialist_queries.append(query)
 
     all_results = await asyncio.gather(
         *chunk_searches, *specialist_searches, return_exceptions=True
     )
+    # Phase 4: rerank each result list against its originating sub-query
+    # before fusion (no-op when RERANK_ENABLED is off).
     chunk_lists = [
-        r for r in all_results[:len(chunk_searches)] if isinstance(r, list)
+        rerank_results("text", query, r)
+        for query, r in zip(queries, all_results[:len(chunk_searches)])
+        if isinstance(r, list)
     ]
     specialist_results = all_results[len(chunk_searches):]
 
     formulas_lists: list[list[dict]] = []
     figures_lists: list[list[dict]] = []
     tables_lists: list[list[dict]] = []
-    for kind, result in zip(specialist_kinds, specialist_results):
+    for kind, query, result in zip(specialist_kinds, specialist_queries, specialist_results):
         if not isinstance(result, list):
             continue
-        {"formula": formulas_lists, "figure": figures_lists, "table": tables_lists}[kind].append(result)
+        reranked = rerank_results(kind, query, result)
+        {"formula": formulas_lists, "figure": figures_lists, "table": tables_lists}[kind].append(reranked)
 
     fused = FusedContext(
         text_chunks=rrf_fuse(chunk_lists)[:k],

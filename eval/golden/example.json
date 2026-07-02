@@ -1,0 +1,20 @@
+{
+  "_comment": "Template golden-query set for scripts/eval_retrieval.py. Copy per book, set book_id to the id/hash used at ingestion, and write 10-30 queries an instructor would actually ask. A returned doc counts as relevant if it overlaps expect.pages OR contains any expect.contains substring.",
+  "book_id": "REPLACE_WITH_BOOK_ID",
+  "queries": [
+    {
+      "query": "how is the sample standard deviation calculated",
+      "chapter_num": 4,
+      "expect": {
+        "pages": [118, 119],
+        "contains": ["standard deviation"]
+      }
+    },
+    {
+      "query": "what does a histogram of exam scores show about the distribution",
+      "expect": {
+        "contains": ["histogram"]
+      }
+    }
+  ]
+}

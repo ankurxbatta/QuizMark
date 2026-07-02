@@ -134,6 +134,11 @@ class Settings(BaseSettings):
     EXERCISE_INDEX_ENABLED: bool = True
     INDEX_BUILD_BATCH_SIZE: int = 10          # items per enrichment LLM call
     RRF_K: int = 60                           # reciprocal-rank fusion constant
+    # Phase 4 — lexical per-specialist reranking of each result list before
+    # RRF fusion (deterministic, no LLM calls). ALPHA weights the original
+    # vector rank vs the lexical score; 1.0 disables the lexical signal.
+    RERANK_ENABLED: bool = True
+    RERANK_ALPHA: float = 0.5
     EXPANSION_NEIGHBORS: int = 2              # parent chunks pulled in via cross-links
 
     # ── Question generation throughput ────────────────────────────────────────
