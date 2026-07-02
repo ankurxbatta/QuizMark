@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { Flag, CheckCircle } from "lucide-react";
 import MathText from "@/components/MathText";
@@ -31,12 +31,25 @@ export default function MarkingPage() {
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
   const [retrySuccess, setRetrySuccess] = useState<Record<string, string>>({});
 
+  // Sequence counter so a slow response for a previous tab (or an older
+  // refresh) can never overwrite the latest one.
+  const loadSeq = useRef(0);
   const load = useCallback(() => {
-    const url = tab === "flagged" ? "/submissions?flagged_only=true" : "/submissions/";
-    api.get(url).then((r) => setSubmissions(r.data));
+    const seq = ++loadSeq.current;
+    const url = tab === "flagged" ? "/submissions/?flagged_only=true" : "/submissions/";
+    api.get(url)
+      .then((r) => { if (seq === loadSeq.current) setSubmissions(r.data); })
+      .catch(() => { /* transient — keep the current list */ });
   }, [tab]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Honour deep links like /marking?tab=flagged (used by the dashboard).
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "flagged") {
+      setTab("flagged");
+    }
+  }, []);
 
   const handleOverride = async (id: string) => {
     const o = overrides[id];
@@ -99,7 +112,6 @@ export default function MarkingPage() {
         {submissions.map((s) => {
           const o = overrides[s.id] || { mark: "", feedback: "", reason: "" };
           const isSaved = saved.includes(s.id);
-          const displayMark = s.override_mark ?? s.auto_mark;
           return (
             <div key={s.id} className={`bg-white rounded-xl border shadow-sm p-6 space-y-4 ${s.is_flagged ? "border-red-200" : ""}`}>
               <div className="flex items-start justify-between">

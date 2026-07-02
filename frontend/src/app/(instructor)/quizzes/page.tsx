@@ -46,16 +46,34 @@ export default function QuizzesPage() {
   const [assignIds, setAssignIds] = useState<Set<string>>(new Set());
   const [assignSaving, setAssignSaving] = useState(false);
 
+  // The backend caps /questions/?limit at 200 — page through so quizzes can
+  // include questions beyond the first page (same fix as the print view).
+  const PAGE_SIZE = 200;
+  const loadAllQuestions = async (): Promise<Question[]> => {
+    const all: Question[] = [];
+    for (let skip = 0; ; skip += PAGE_SIZE) {
+      const { data } = await api.get<Question[]>(`/questions/?limit=${PAGE_SIZE}&skip=${skip}`);
+      all.push(...data);
+      if (data.length < PAGE_SIZE) break;
+    }
+    return all;
+  };
+
   const load = async () => {
-    const [q, qs, st] = await Promise.all([
-      api.get("/quizzes/"),
-      api.get("/questions/?limit=200"),
-      api.get("/auth/students"),
-    ]);
-    setQuizzes(q.data);
-    setQuestions(qs.data);
-    setStudents(st.data);
-    setLoading(false);
+    try {
+      const [q, qs, st] = await Promise.all([
+        api.get("/quizzes/"),
+        loadAllQuestions(),
+        api.get("/auth/students"),
+      ]);
+      setQuizzes(q.data);
+      setQuestions(qs);
+      setStudents(st.data);
+    } catch {
+      // transient — keep whatever is currently shown
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => { load(); }, []);
 
@@ -76,12 +94,18 @@ export default function QuizzesPage() {
       else if (editor) await api.put(`/quizzes/${editor.id}`, body);
       setEditor(null);
       await load();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to save quiz. Please try again.");
     } finally { setSaving(false); }
   };
 
   const del = async (quiz: Quiz) => {
     if (!confirm(`Delete quiz "${quiz.title}"? Students will no longer see it.`)) return;
-    await api.delete(`/quizzes/${quiz.id}`);
+    try {
+      await api.delete(`/quizzes/${quiz.id}`);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to delete quiz.");
+    }
     load();
   };
 
@@ -100,6 +124,8 @@ export default function QuizzesPage() {
       await api.put(`/quizzes/${assignQuiz.id}/assignees`, { student_ids: [...assignIds] });
       setAssignQuiz(null);
       await load();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to save assignments. Please try again.");
     } finally { setAssignSaving(false); }
   };
 

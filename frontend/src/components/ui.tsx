@@ -5,14 +5,13 @@ import { Loader2 } from "lucide-react";
 // Shared, lightweight UI primitives so every page looks and behaves the same.
 // Subtle 150ms transitions only — no heavy effects.
 
-type Variant = "primary" | "cta" | "ghost" | "danger" | "subtle";
+type Variant = "primary" | "cta" | "ghost" | "danger";
 
 const VARIANTS: Record<Variant, string> = {
   primary: "bg-brand-600 text-white hover:bg-brand-700 shadow-sm",
   cta: "bg-cta-500 text-white hover:bg-cta-600 shadow-sm",
   ghost: "border border-slate-300 text-slate-700 bg-white hover:bg-slate-50",
   danger: "text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200",
-  subtle: "bg-brand-50 text-brand-700 hover:bg-brand-100",
 };
 
 export function Button({

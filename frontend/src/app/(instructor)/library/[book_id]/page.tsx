@@ -162,6 +162,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
   const [count, setCount]           = useState(10);
   const [requireTable, setRequireTable]   = useState(false);
   const [requireFigure, setRequireFigure] = useState(false);
+  const [deepSearch, setDeepSearch]       = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [genError, setGenError]     = useState("");
 
@@ -261,7 +262,7 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
       : `&chapter_nums=${[...selectedChapters].sort((a, b) => a - b).join(",")}`;
     try {
       const { data } = await api.post(
-        `/questions/generate/from-book?book_id=${encodeURIComponent(bookId)}&question_type=${qtype}&count_per_chapter=${count}&difficulty=${difficulty}${chParam}&require_table=${requireTable}&require_figure=${requireFigure}`
+        `/questions/generate/from-book?book_id=${encodeURIComponent(bookId)}&question_type=${qtype}&count_per_chapter=${count}&difficulty=${difficulty}${chParam}&require_table=${requireTable}&require_figure=${requireFigure}&deepsearch=${deepSearch}`
       );
       setJobs(prev => {
         const next = [data, ...prev];
@@ -468,6 +469,21 @@ export default function BookDetailPage({ params }: { params: Promise<{ book_id: 
                     Graph/figure-based questions (built around a real chapter figure)
                   </label>
                 </div>
+              </div>
+
+              {/* DeepSearch refine */}
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
+                  Quality
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox" checked={deepSearch}
+                    onChange={(e) => setDeepSearch(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  DeepSearch refine (verify &amp; repair each question against the book before validation)
+                </label>
               </div>
 
               {/* Summary */}

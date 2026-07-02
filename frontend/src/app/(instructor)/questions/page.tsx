@@ -79,12 +79,16 @@ export default function QuestionsPage() {
   const [visibilityError, setVisibilityError] = useState("");
 
   const load = async () => {
-    const [questionResponse, studentResponse] = await Promise.all([
-      api.get("/questions/"),
-      api.get("/auth/students"),
-    ]);
-    setQuestions(questionResponse.data);
-    setStudents(studentResponse.data);
+    try {
+      const [questionResponse, studentResponse] = await Promise.all([
+        api.get("/questions/"),
+        api.get("/auth/students"),
+      ]);
+      setQuestions(questionResponse.data);
+      setStudents(studentResponse.data);
+    } catch {
+      // transient — keep whatever is currently shown
+    }
   };
   useEffect(() => { load(); }, []);
 
@@ -98,12 +102,18 @@ export default function QuestionsPage() {
       }
       setForm(EMPTY); setEditId(null); setEditAssets(undefined); setShowForm(false);
       load();
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to save question. Please try again.");
     } finally { setLoading(false); }
   };
 
   const del = async (id: string) => {
     if (!confirm("Delete this question?")) return;
-    await api.delete(`/questions/${id}`);
+    try {
+      await api.delete(`/questions/${id}`);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || "Failed to delete question.");
+    }
     load();
   };
 
@@ -197,8 +207,8 @@ export default function QuestionsPage() {
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-500 uppercase">Max Marks</label>
-                <input type="number" value={form.max_marks}
-                  onChange={(e) => setForm({ ...form, max_marks: parseFloat(e.target.value) })}
+                <input type="number" min={0} value={Number.isFinite(form.max_marks) ? form.max_marks : ""}
+                  onChange={(e) => setForm({ ...form, max_marks: parseFloat(e.target.value) || 0 })}
                   className="w-full mt-1 border border-gray-300 rounded-lg px-3 py-2 text-sm" />
               </div>
               <div>

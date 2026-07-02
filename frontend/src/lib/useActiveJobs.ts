@@ -5,15 +5,15 @@ import api from "@/lib/api";
 // Shared localStorage keys for ingestion / generation job tracking.
 // "active_ingest_jobs"  — IDs of jobs still queued/processing (read by the sidebar badge)
 // "known_ingest_jobs"   — all IDs the generate page knows about (incl. finished, for recovery)
-export const ACTIVE_JOBS_KEY = "active_ingest_jobs";
-export const KNOWN_JOBS_KEY = "known_ingest_jobs";
+const ACTIVE_JOBS_KEY = "active_ingest_jobs";
+const KNOWN_JOBS_KEY = "known_ingest_jobs";
 
-export interface JobLike {
+interface JobLike {
   job_id: string;
   status: string;
 }
 
-export function isJobActive(status: string): boolean {
+function isJobActive(status: string): boolean {
   return status !== "done" && status !== "failed";
 }
 
@@ -34,12 +34,12 @@ function writeIds(key: string, ids: string[]) {
 }
 
 /** IDs of jobs currently queued/processing (any page). */
-export function readActiveJobIds(): string[] {
+function readActiveJobIds(): string[] {
   return readIds(ACTIVE_JOBS_KEY);
 }
 
 /** All known job IDs — prefers the new key, falls back to the legacy active key. */
-export function readKnownJobIds(): string[] {
+function readKnownJobIds(): string[] {
   const known = readIds(KNOWN_JOBS_KEY);
   return known.length > 0 ? known : readIds(ACTIVE_JOBS_KEY);
 }
@@ -48,7 +48,7 @@ export function readKnownJobIds(): string[] {
  * Replace both keys from a page that owns its full job list (generate page):
  * active = still-running jobs, known = every job in the list.
  */
-export function syncJobsToStorage(jobs: JobLike[]) {
+function syncJobsToStorage(jobs: JobLike[]) {
   writeIds(ACTIVE_JOBS_KEY, jobs.filter((j) => isJobActive(j.status)).map((j) => j.job_id));
   writeIds(KNOWN_JOBS_KEY, jobs.map((j) => j.job_id));
 }
@@ -57,7 +57,7 @@ export function syncJobsToStorage(jobs: JobLike[]) {
  * Merge this page's jobs with IDs owned by other pages and persist the active
  * list (library book page). Returns the merged ID list so callers can keep a ref.
  */
-export function mergeActiveJobIds(jobs: JobLike[], otherStoredIds: string[]): string[] {
+function mergeActiveJobIds(jobs: JobLike[], otherStoredIds: string[]): string[] {
   const thisAllIds = jobs.map((j) => j.job_id);
   const thisActiveIds = jobs.filter((j) => isJobActive(j.status)).map((j) => j.job_id);
   const otherIds = otherStoredIds.filter((id) => !thisAllIds.includes(id));
@@ -136,6 +136,5 @@ export function useActiveJobs(options: UseActiveJobsOptions = {}) {
     readKnownJobIds,
     syncJobsToStorage,
     mergeActiveJobIds,
-    isJobActive,
   };
 }

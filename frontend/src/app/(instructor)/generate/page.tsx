@@ -71,16 +71,13 @@ export default function GeneratePage() {
 
     const applyUpdate = (data: JobStatus) => {
       setJobs(prev => {
+        const idx = prev.findIndex(x => x.job_id === data.job_id);
+        if (idx === -1) return prev;
+        // Always merge the update: the progress bar/label is driven by
+        // pages_done / progress_percent, which can advance while status,
+        // progress_message and chapters_done stay the same.
         const newJobs = [...prev];
-        const idx = newJobs.findIndex(x => x.job_id === data.job_id);
-        if (idx !== -1) {
-          // Only update if something changed
-          if (newJobs[idx].status !== data.status ||
-              newJobs[idx].progress_message !== data.progress_message ||
-              newJobs[idx].chapters_done !== data.chapters_done) {
-            newJobs[idx] = { ...newJobs[idx], ...data };
-          }
-        }
+        newJobs[idx] = { ...newJobs[idx], ...data };
         if (data.status === "done" || data.status === "failed") {
           syncJobsToStorage(newJobs);
         }
@@ -181,18 +178,24 @@ export default function GeneratePage() {
   useEffect(() => {
     const ids = readKnownJobIds();
     if (ids.length === 0) return;
-    Promise.all(ids.map(id => api.get(`/questions/jobs/${id}`).then(res => res.data)))
-      .then(data => {
-        setJobs(prev => {
-          // merge with any jobs that might have been uploaded in the split second before this resolves
-          const combined = [...prev];
-          data.forEach(d => {
-            if (!combined.find(x => x.job_id === d.job_id)) combined.push(d);
-          });
-          return combined;
+    // Fetch each job independently: one stale/deleted id (404) must not
+    // prevent recovery of the other, still-valid jobs.
+    Promise.all(
+      ids.map(id =>
+        api.get(`/questions/jobs/${id}`).then(res => res.data as JobStatus).catch(() => null)
+      )
+    ).then(data => {
+      const valid = data.filter((d): d is JobStatus => d !== null);
+      if (valid.length === 0) return;
+      setJobs(prev => {
+        // merge with any jobs that might have been uploaded in the split second before this resolves
+        const combined = [...prev];
+        valid.forEach(d => {
+          if (!combined.find(x => x.job_id === d.job_id)) combined.push(d);
         });
-      })
-      .catch(() => {});
+        return combined;
+      });
+    });
   }, [readKnownJobIds]);
 
   const reset = () => {
@@ -228,7 +231,6 @@ export default function GeneratePage() {
     }
     if (job.progress_percent !== undefined && job.progress_percent > 0) return job.progress_percent;
     if (job.total_chapters > 0) return Math.min((job.chapters_done / job.total_chapters) * 100, 90);
-    if (job.total_pages > 0) return 5;
     return 5;
   };
 

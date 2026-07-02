@@ -112,15 +112,20 @@ export default function AnalyticsPage() {
 
   const load = async () => {
     setLoading(true);
-    const [p, c, q] = await Promise.all([
-      api.get("/analytics/pipeline"),
-      api.get("/analytics/confidence-distribution"),
-      api.get("/analytics/questions"),
-    ]);
-    setPipeline(p.data);
-    setConfDist(c.data);
-    setQuestions(q.data);
-    setLoading(false);
+    try {
+      const [p, c, q] = await Promise.all([
+        api.get("/analytics/pipeline"),
+        api.get("/analytics/confidence-distribution"),
+        api.get("/analytics/questions"),
+      ]);
+      setPipeline(p.data);
+      setConfDist(c.data);
+      setQuestions(q.data);
+    } catch {
+      // transient — keep whatever is currently shown
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);

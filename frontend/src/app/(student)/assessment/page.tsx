@@ -474,16 +474,46 @@ export default function AssessmentPage() {
       .map(([question_id, answer_text]) => ({ question_id, answer_text: answer_text.trim() }))
       .filter((item) => item.answer_text.length > 0);
 
+    // Submit each answer independently. A single failure must not discard the
+    // answers that were already accepted: those would 409 ("already submitted")
+    // on retry and previously made the whole form permanently unsubmittable.
     const ids: string[] = [];
+    const alreadySubmittedQids: string[] = [];
+    let failMsg = "";
     try {
       for (const item of payloads) {
-        const res = await api.post("/submissions/", item, { timeout: 20000 });
-        ids.push(res.data.id);
+        try {
+          const res = await api.post("/submissions/", item, { timeout: 20000 });
+          ids.push(res.data.id);
+        } catch (err: any) {
+          if (err?.response?.status === 409) {
+            // Accepted during an earlier attempt — recover its id below.
+            alreadySubmittedQids.push(item.question_id);
+          } else {
+            failMsg = err?.response?.data?.detail || "Submission failed. Please try again.";
+          }
+        }
+      }
+      if (failMsg) {
+        setError(
+          ids.length > 0
+            ? `${failMsg} Answers already submitted were saved — press Submit again to retry the rest.`
+            : failMsg
+        );
+        return;
+      }
+      if (alreadySubmittedQids.length > 0) {
+        // Look up the ids of answers accepted on a previous attempt so the
+        // results view can show them too.
+        try {
+          const { data } = await api.get<SubmissionResult[]>("/submissions/my");
+          for (const s of data) {
+            if (alreadySubmittedQids.includes(s.question_id) && !ids.includes(s.id)) ids.push(s.id);
+          }
+        } catch { /* results view will still show the rest */ }
       }
       setSubmissionIds(ids);
       setSubmitted(true);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || "Submission failed. Please try again.");
     } finally {
       setSubmitting(false);
     }
