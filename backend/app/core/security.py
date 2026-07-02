@@ -118,13 +118,3 @@ class SlidingWindowLimiter:
 
 login_limiter = SlidingWindowLimiter(max_calls=10, window_seconds=60.0)
 register_limiter = SlidingWindowLimiter(max_calls=5, window_seconds=60.0)
-
-
-def require_student(claims: dict = Depends(get_current_user)) -> dict:
-    """FastAPI dependency: ensures the caller is a student or instructor."""
-    if claims.get("role") not in ("student", "instructor"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Authentication required",
-        )
-    return claims

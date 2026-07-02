@@ -108,6 +108,8 @@ async def ensure_mongo_indexes():
         await db["questions"].create_index("created_at")
         # Compound index for chapter-scoped question lookups (book + chapter).
         await db["questions"].create_index([("book_id", 1), ("chapter_num", 1)])
+        # Legacy per-question assignment lookups (student assessment view).
+        await db["questions"].create_index("assigned_student_ids")
         # Quiz assignment lookups filter by the student they are assigned to.
         await db["quizzes"].create_index("assigned_student_ids")
         await db["submissions"].create_index("student_id")

@@ -13,17 +13,6 @@ class Difficulty(str, enum.Enum):
     hard = "hard"
 
 
-class UserRole(str, enum.Enum):
-    instructor = "instructor"
-    student = "student"
-
-
-class MarkingRoute(str, enum.Enum):
-    HIGH = "HIGH"
-    MID = "MID"
-    LOW = "LOW"
-
-
 class IngestJobStatus(str, enum.Enum):
     queued     = "queued"
     processing = "processing"

@@ -271,6 +271,7 @@ async def orchestrate_question_bank(
     chapter_num: Optional[int] = None,
     require_table: bool = False,
     require_figure: bool = False,
+    deepsearch_enabled: Optional[bool] = None,
 ) -> list[dict]:
     """
     3-round agentic question bank generation for one chapter/topic.
@@ -587,6 +588,20 @@ async def orchestrate_question_bank(
     image_budget = ImageBudget(int(getattr(settings, "ASSET_MAX_PER_CHAPTER", 4)))
 
     async def _gate_and_realize(qs: list[dict]) -> list[dict]:
+        # DeepSearch refine FIRST: repair (complete missing data, correct wrong
+        # facts/numbers, fix would-be-rejected structure) so the gate below keeps
+        # questions instead of dropping them and burning top-up rounds. Fail-open.
+        # Per-request toggle wins; None falls back to the global setting.
+        use_deepsearch = (
+            settings.DEEPSEARCH_REFINE_ENABLED
+            if deepsearch_enabled is None else bool(deepsearch_enabled)
+        )
+        if use_deepsearch and qs:
+            from app.services.deepsearch import refine_questions
+            try:
+                qs = await refine_questions(qs, book_id=book_id, chapter_num=chapter_num)
+            except Exception as exc:
+                logger.warning(f"[ORCH] DeepSearch refine failed (non-fatal): {exc}")
         # For an explicit HARD request, first DROP questions that aren't genuinely
         # multi-step (a one-step computation masquerading as hard). Runs before the
         # gate so the shortfall counts toward the top-up loop's refill.

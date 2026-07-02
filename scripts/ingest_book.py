@@ -21,7 +21,6 @@ import logging
 import os
 import re
 import sys
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,7 +131,6 @@ except ImportError:
     sys.exit("httpx not installed. Run: pip3 install httpx")
 
 try:
-    import pymongo
     from pymongo import MongoClient
 except ImportError:
     sys.exit("pymongo not installed. Run: pip3 install pymongo")
@@ -541,7 +539,7 @@ async def _vision_openai(image_bytes: bytes, context: str) -> str:
         )
     if resp.status_code == 429:
         _openai_vision_state.rate_limited(30)
-        raise RuntimeError(f"OpenAI vision 429")
+        raise RuntimeError("OpenAI vision 429")
     resp.raise_for_status()
     _openai_vision_state.success()
     text = resp.json()["choices"][0]["message"]["content"].strip()

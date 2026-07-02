@@ -480,26 +480,6 @@ def parse_pdf_into_chunks(
     return chunks
 
 
-def _split_into_sub_chunks(text: str, max_chars: int) -> list[str]:
-    """Split a large text block at paragraph boundaries."""
-    if len(text) <= max_chars:
-        return [text]
-
-    paragraphs = re.split(r"\n{2,}", text)
-    sub_chunks = []
-    current = ""
-    for para in paragraphs:
-        if len(current) + len(para) + 2 <= max_chars:
-            current = (current + "\n\n" + para).strip()
-        else:
-            if current:
-                sub_chunks.append(current)
-            current = para
-    if current:
-        sub_chunks.append(current)
-    return sub_chunks if sub_chunks else [text[:max_chars]]
-
-
 def extract_chapters_from_pdf(file_bytes: bytes, max_pages: int = 700) -> list[dict]:
     """
     Quickly scan a PDF and return the list of chapters found in it.
@@ -564,25 +544,3 @@ def get_pdf_info(file_bytes: bytes) -> dict:
         }
     except Exception as e:
         return {"pages": 0, "title": "", "author": "", "error": str(e)}
-
-
-def extract_text_from_pdf(file_bytes: bytes, max_pages: int = 100) -> str:
-    """
-    Legacy flat extraction — kept for backward compatibility with .txt uploads.
-    For textbooks, use parse_pdf_into_chunks() instead.
-    """
-    try:
-        parts = []
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for i, page in enumerate(pdf.pages[:max_pages]):
-                t = page.extract_text()
-                if t:
-                    parts.append(f"--- Page {i + 1} ---\n{t}")
-        if parts:
-            return "\n\n".join(parts)
-    except Exception:
-        pass
-    reader = PdfReader(io.BytesIO(file_bytes))
-    return "\n\n".join(
-        p.extract_text() or "" for p in reader.pages[:max_pages]
-    )

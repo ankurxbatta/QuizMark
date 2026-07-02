@@ -156,6 +156,20 @@ class Settings(BaseSettings):
     GEN_HARD_VERIFY_ENABLED: bool = True
     GEN_HARD_VERIFY_CONCURRENCY: int = 3       # parallel hard-difficulty judge calls
 
+    # ── DeepSearch refiner (repair pass BEFORE the quality gate) ──────────────
+    # For each freshly generated question DeepSearch gathers evidence from every
+    # index (chunks + math/figure/table), optionally the web, and runs one
+    # critic-repair LLM call that completes missing pieces and corrects errors so
+    # the validator keeps the question instead of dropping it. Fail-open: any
+    # refiner error leaves the question unchanged.
+    DEEPSEARCH_REFINE_ENABLED: bool = True
+    DEEPSEARCH_CONCURRENCY: int = 3            # parallel refine LLM calls
+    DEEPSEARCH_RETRIEVAL_K: int = 4            # evidence chunks per question
+    # Web knowledge: inert unless TAVILY_API_KEY is set (https://tavily.com).
+    DEEPSEARCH_WEB_ENABLED: bool = True
+    DEEPSEARCH_WEB_MAX_RESULTS: int = 3
+    TAVILY_API_KEY: Optional[str] = None
+
     # ── Question-quality gate (reject un-renderable / unanswerable / wrong) ───
     # A: deterministic renderability checks (no LLM). B: deepsearch answerability
     # + correctness judge (one LLM call per surviving question). Rejected

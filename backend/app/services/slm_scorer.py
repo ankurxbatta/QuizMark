@@ -1,22 +1,21 @@
 """
 slm_scorer.py  —  Tier-1 SLM pre-scorer.
 
-Runs three lightweight checks on a student answer before deciding
+Runs two lightweight checks on a student answer before deciding
 whether to invoke the full LLM:
 
-  1. Keyword coverage   — what fraction of rubric keywords appear?
-  2. Semantic similarity — cosine distance between answer embedding
+  1. Keyword coverage    — what fraction of rubric keywords appear?
+  2. Semantic similarity — cosine similarity between answer embedding
                            and model-answer embedding (already stored in DB).
-  3. SLM quick score    — phi3:mini asked for a 0-10 integer score only
-                          (no explanation), super-fast.
 
-These three signals are blended into a single confidence float [0, 1].
-The confidence router in rag_pipeline.py uses it to pick the path.
+The two signals are blended into a single confidence float [0, 1].
+The confidence router in rag_pipeline.py uses it to pick the path:
 
-Confidence thresholds (configurable in config.py):
-  >= CONFIDENCE_HIGH  (default 0.85)  → Accept SLM mark, skip LLM entirely
-  >= CONFIDENCE_MID   (default 0.55)  → RAG + offline LLM
-  <  CONFIDENCE_MID                   → RAG wide + online LLM (or flag)
+  HIGH — only when the answer is CLEARLY full credit (semantic similarity AND
+         keyword coverage both above the strict full-credit gates below):
+         accept full marks, skip the LLM entirely.
+  MID  — confidence >= CONFIDENCE_MID (default 0.55): RAG + LLM.
+  LOW  — anything below: RAG wide + LLM + flag when in doubt.
 """
 import math
 import re
@@ -85,7 +84,9 @@ def _keyword_coverage(student_answer: str, keywords: list[str]) -> float:
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    if not a or not b:
+    # Mismatched dimensions (e.g. embeddings from different model versions)
+    # must not silently truncate via zip — treat as "no signal".
+    if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     mag_a = math.sqrt(sum(x * x for x in a))

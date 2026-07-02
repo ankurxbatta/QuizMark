@@ -5,7 +5,8 @@ Tracks health of each provider per capability (embeddings, vision, generation).
 When a provider returns 429 or a quota-exhaustion error it is put in cooldown
 and the next available provider is tried automatically.
 
-Usage stats are stored in MongoDB `api_usage_stats` for the dashboard endpoint.
+In-memory usage stats are exposed via `key_manager.stats()` for the admin
+/api-status endpoint.
 """
 from __future__ import annotations
 
@@ -121,9 +122,6 @@ class ApiKeyManager:
 
     def mark_success(self, provider: str) -> None:
         self._get(provider).record_success()
-
-    def mark_error(self, provider: str, code: int, msg: str) -> None:
-        self._get(provider).record_error(code, msg)
 
     def is_available(self, provider: str) -> bool:
         return self._get(provider).available

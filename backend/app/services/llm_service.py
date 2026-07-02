@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import re
 
 import httpx
 from app.core.config import settings
@@ -30,10 +29,6 @@ from app.services.api_key_manager import key_manager
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
-
-
-def _redact(message: str) -> str:
-    return re.sub(r"([?&]key=)[^&\s']+", r"\1***", message)
 
 
 async def _retry_sleep(resp: httpx.Response, attempt: int) -> None:
@@ -388,11 +383,6 @@ async def generate_image(prompt: str) -> bytes:
             log.warning(f"[image-gen] {provider} failed: {exc}")
             last_exc = exc
     raise RuntimeError(f"All image providers failed: {last_exc}")
-
-
-async def smart_generate_image(prompt: str) -> bytes:
-    """Module-level convenience alias for generate_image."""
-    return await generate_image(prompt)
 
 
 async def smart_describe_image(image_bytes: bytes, context: str = "") -> str:

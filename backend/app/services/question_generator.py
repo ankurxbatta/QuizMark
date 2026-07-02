@@ -1164,30 +1164,6 @@ def _choose_term(sentence: str, terms: list[str], index: int) -> str:
     return terms[index % len(terms)] if terms else "the concept"
 
 
-def _cloze_sentence(sentence: str, term: str) -> str:
-    return re.sub(rf"\b{re.escape(term)}\b", "____", sentence, count=1, flags=re.IGNORECASE)
-
-
-def _distractors(correct: str, terms: list[str]) -> list[str]:
-    generic = [
-        "sampling error",
-        "categorical variable",
-        "relative frequency",
-        "null hypothesis",
-        "standard deviation",
-    ]
-    options = []
-    for term in terms + generic:
-        if term.lower() == correct.lower():
-            continue
-        if term.lower() in {o.lower() for o in options}:
-            continue
-        options.append(term)
-        if len(options) == 3:
-            break
-    return options[:3]
-
-
 def _fallback_questions_from_text(
     content: str,
     question_type: str,
@@ -1216,9 +1192,6 @@ def _fallback_questions_from_text(
 
         if question_type == "mcq":
             # Build a genuine comprehension MCQ — never a trivial cloze
-            wrong = _distractors(term, terms)
-            while len(wrong) < 3:
-                wrong.append("none of the above")
             question_text = (
                 f"Which of the following best describes {term} in the context of {topic_tag}?\n"
                 f"A. {sentence}\n"

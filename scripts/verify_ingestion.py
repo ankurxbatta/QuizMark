@@ -124,6 +124,7 @@ def main():
         log.info(f"[Page Coverage] Expected: {pdf_pages} pages (1-{pdf_pages})")
         log.info(f"[Page Coverage] Covered: {len(covered_pages & expected_pages)} pages")
         log.info(f"[Page Coverage] Missing: {len(missing_pages)} pages: {sorted(missing_pages)[:30]}")
+        log.info(f"[Page Coverage] Extra (beyond PDF): {len(extra_pages_real)} pages: {sorted(extra_pages_real)[:30]}")
 
         # Check if missing pages are blank in PDF
         doc = fitz.open(str(PDF_PATH))
@@ -193,7 +194,7 @@ def main():
 
     # Final stats
     embed_ok = total - len(no_embed) - len(wrong_dim)
-    log.info(f"\nSummary:")
+    log.info("\nSummary:")
     log.info(f"  Chunks: {total}")
     log.info(f"  Embeddings OK: {embed_ok}/{total} ({100*embed_ok//max(total,1)}%)")
     log.info(f"  Chapters: {len(chapters_found)} ({min(chapters_found) if chapters_found else '?'}-{max(chapters_found) if chapters_found else '?'})")

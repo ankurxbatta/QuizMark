@@ -596,6 +596,7 @@ async def generate_from_book(
     difficulty: str = Query("all", enum=["all", "easy", "medium", "hard"]),
     require_table: bool = Query(False, description="If true, every question must be built around a real data table from the chapter."),
     require_figure: bool = Query(False, description="If true, every question must be built around a real figure/graph from the chapter."),
+    deepsearch: bool = Query(True, description="Run the DeepSearch refine pass (evidence-backed repair before the quality gate)."),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
@@ -636,7 +637,7 @@ async def generate_from_book(
         "created_at": now,
     }
     await db["ingest_jobs"].insert_one(job_doc)
-    generate_from_book_task.delay(job_id, book_id, question_type, count_per_chapter, chapter_list, difficulty, require_table, require_figure)
+    generate_from_book_task.delay(job_id, book_id, question_type, count_per_chapter, chapter_list, difficulty, require_table, require_figure, deepsearch)
 
     return {
         "job_id": job_id,
@@ -840,6 +841,8 @@ async def stream_job_status(
         raise HTTPException(401, "Invalid or expired token")
     if not claims.get("sub"):
         raise HTTPException(401, "Invalid or expired token")
+    if claims.get("role") != "instructor":
+        raise HTTPException(403, "Instructor access required")
 
     async def event_generator():
         last_status = None

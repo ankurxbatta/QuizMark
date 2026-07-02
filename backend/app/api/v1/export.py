@@ -47,8 +47,12 @@ def require_instructor_with_token(
 
 def safe_csv_value(value):
     """Neutralise CSV formula injection: prefix =, +, -, @ with an apostrophe."""
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
-        return "'" + value
+    if isinstance(value, str):
+        # Spreadsheets strip leading whitespace/control chars before deciding a
+        # cell is a formula, so check the first character after stripping.
+        stripped = value.lstrip(" \t\r\n")
+        if stripped and stripped[0] in "=+-@":
+            return "'" + value
     return value
 
 

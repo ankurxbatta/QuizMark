@@ -8,22 +8,10 @@ from app.core.database import get_db
 from app.core.security import require_instructor
 from app.schemas.schemas import OverrideRequest, SubmissionOut
 from app.tasks.marking_tasks import mark_submission_task
+# Shared response shaper — same submission payload as the submissions endpoints.
+from app.api.v1.submissions import _sub_out
 
 router = APIRouter()
-
-
-def _sub_out(sub: dict, question: dict | None = None) -> dict:
-    out = dict(sub)
-    out["id"] = out.pop("_id")
-    if question:
-        out["question_text"] = question.get("question_text")
-        out["question_type"] = question.get("question_type")
-        out["max_marks"] = question.get("max_marks")
-    else:
-        out.setdefault("question_text", None)
-        out.setdefault("question_type", None)
-        out.setdefault("max_marks", None)
-    return out
 
 
 @router.put("/{submission_id}/override", response_model=SubmissionOut)

@@ -188,21 +188,6 @@ def _chunk_to_doc(chunk: Any, embedding: list[float], book_id: str, book_hash: s
     return doc
 
 
-async def store_chunk(chunk: Any, embedding: list[float], book_id: str, book_hash: str | None = None) -> str:
-    try:
-        await _ensure_indexes_once()
-        col = await _get_collection(CHUNKS_COLLECTION)
-        doc = _chunk_to_doc(chunk, embedding, book_id, book_hash)
-        if "_id" in doc:
-            await col.replace_one({"_id": doc["_id"]}, doc, upsert=True)
-            return str(doc["_id"])
-        result = await col.insert_one(doc)
-        return str(result.inserted_id)
-    except Exception as exc:
-        logger.warning(f"store_chunk failed (non-fatal): {exc}")
-        return ""
-
-
 async def store_chunks_bulk(
     chunks: list,
     embeddings: list[list[float]],
@@ -347,35 +332,6 @@ async def delete_chunks_created_after(book_hash: str, since: datetime) -> int:
     except Exception as exc:
         logger.warning(f"delete_chunks_created_after failed (non-fatal): {exc}")
         return 0
-
-
-async def get_chunk_stats(book_id: str | None = None) -> dict:
-    try:
-        col = await _get_collection(CHUNKS_COLLECTION)
-        match = {"$match": {"book_id": book_id}} if book_id else {"$match": {}}
-        pipeline = [
-            match,
-            {"$group": {
-                "_id": None,
-                "total": {"$sum": 1},
-                "with_images": {"$sum": {"$cond": ["$has_images", 1, 0]}},
-                "with_tables": {"$sum": {"$cond": ["$has_tables", 1, 0]}},
-                "with_math": {"$sum": {"$cond": ["$has_math", 1, 0]}},
-            }},
-        ]
-        docs = await col.aggregate(pipeline).to_list(length=1)
-        if docs:
-            d = docs[0]
-            return {
-                "total": d.get("total", 0),
-                "with_images": d.get("with_images", 0),
-                "with_tables": d.get("with_tables", 0),
-                "with_math": d.get("with_math", 0),
-            }
-        return {"total": 0, "with_images": 0, "with_tables": 0, "with_math": 0}
-    except Exception as exc:
-        logger.warning(f"get_chunk_stats failed: {exc}")
-        return {}
 
 
 # ── Book PDF storage (GridFS) ──────────────────────────────────────────────────

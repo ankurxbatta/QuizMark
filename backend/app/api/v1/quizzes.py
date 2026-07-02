@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_db
@@ -134,10 +134,15 @@ async def create_quiz(
 
 @router.get("/", response_model=List[QuizOut])
 async def list_quizzes(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=500),
     db: AsyncIOMotorDatabase = Depends(get_db),
     _: dict = Depends(require_instructor),
 ):
-    docs = await db["quizzes"].find({}).sort("created_at", -1).to_list(length=500)
+    docs = (
+        await db["quizzes"].find({}).sort("created_at", -1)
+        .skip(skip).limit(limit).to_list(length=limit)
+    )
     return [_quiz_out(d) for d in docs]
 
 

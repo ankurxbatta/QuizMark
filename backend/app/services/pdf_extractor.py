@@ -325,7 +325,7 @@ class ChunkAccumulator:
 
     _STATE_KEYS = (
         "current_chapter_num", "current_chapter_title", "current_section_title",
-        "current_topic",
+        "current_topic", "chapters_accepted",
         "buffer_lines", "buffer_image_texts", "buffer_table_texts",
         "buffer_math_spans", "buffer_has_math_font", "buffer_graph_pages",
         "buffer_figure_rects", "buffer_math_rects", "buffer_page_start",
@@ -346,6 +346,7 @@ class ChunkAccumulator:
             self.current_chapter_title = "Unknown"
             self.current_section_title = "Introduction"
             self.current_topic = "General"
+            self.chapters_accepted = 0
             self.buffer_lines: list[str] = []
             self.buffer_image_texts: list[str] = []
             self.buffer_table_texts: list[str] = []
@@ -365,6 +366,7 @@ class ChunkAccumulator:
         self.current_chapter_title = getattr(self, "current_chapter_title", "Unknown")
         self.current_section_title = getattr(self, "current_section_title", "Introduction")
         self.current_topic = getattr(self, "current_topic", "General")
+        self.chapters_accepted = int(getattr(self, "chapters_accepted", 0))
         self.buffer_lines = list(getattr(self, "buffer_lines", []))
         self.buffer_image_texts = list(getattr(self, "buffer_image_texts", []))
         self.buffer_table_texts = list(getattr(self, "buffer_table_texts", []))
@@ -377,6 +379,26 @@ class ChunkAccumulator:
 
     def serialize(self) -> dict:
         return {k: getattr(self, k) for k in self._STATE_KEYS}
+
+    def _accept_chapter(self, num: int) -> bool:
+        """Decide whether a matched chapter heading may move the counter.
+
+        Sequential advances (same number re-match, or +1) are always accepted.
+        Before ANY chapter has been accepted, the first confident heading may be
+        any number — book EXCERPTS legitimately start mid-book (e.g. a chapter
+        4–5 pack), and the TOC/front-matter filters already screen the match.
+        Non-sequential jumps AFTER latching stay rejected so a stray contents
+        line ("12 F Distribution…") cannot hijack the counter. Recovery: if the
+        very first latch was a front-matter false positive (num > 1) and a real
+        "Chapter 1" heading follows before any sequential advance, re-latch to 1.
+        """
+        if num == self.current_chapter_num or num == self.current_chapter_num + 1:
+            return True
+        if self.chapters_accepted == 0 and self.current_chapter_num == 0:
+            return True
+        if num == 1 and self.chapters_accepted == 1 and self.current_chapter_num > 1:
+            return True
+        return False
 
     def _flush(self, page_end: int) -> list[EnhancedChunk]:
         """Emit chunks for whatever is in the buffer; reset the buffer."""
@@ -460,15 +482,11 @@ class ChunkAccumulator:
         ch_match = None if _is_toc_like_page(raw_text) else _find_chapter_match(raw_text)
         if ch_match:
             num, title = ch_match
-            # Accept only sequential chapter advances. Front matter / TOC / preface
-            # pages that mention a high chapter number (e.g. a contents line
-            # "12 F Distribution and One-Way ANOVA") must not hijack the counter:
-            # a jump from front matter (0) straight to 12 is rejected, and the
-            # first real chapter must be Ch1. Same-number re-matches are allowed
-            # (e.g. a part-divider page repeating the heading).
-            if num == self.current_chapter_num or num == self.current_chapter_num + 1:
+            if self._accept_chapter(num):
                 out.extend(self._flush(page_num - 1))
                 self.buffer_page_start = page_num
+                if num != self.current_chapter_num:
+                    self.chapters_accepted += 1
                 self.current_chapter_num = num
                 self.current_chapter_title = title
                 self.current_topic = _resolve_topic(title)

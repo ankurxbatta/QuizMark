@@ -12,10 +12,10 @@ Multi-query retrieval (inspired by Shiksha Copilot):
   each in parallel, then deduplicate. This surfaces all relevant textbook
   material even when the student uses different terminology.
 
-Tier routing:
-  HIGH  (confidence >= CONFIDENCE_HIGH)  → SLM mark accepted, no LLM call
-  MID   (CONFIDENCE_MID <= conf < HIGH)  → RAG top-K  + offline LLM
-  LOW   (confidence < CONFIDENCE_MID)    → RAG wide top-K + online LLM + flag
+Tier routing (see slm_scorer.slm_pre_score):
+  HIGH  (clearly full credit: sem + keyword both very high) → SLM mark, no LLM
+  MID   (confidence >= CONFIDENCE_MID)                      → RAG top-K + LLM
+  LOW   (confidence <  CONFIDENCE_MID)                      → RAG wide top-K + LLM + flag
 """
 from __future__ import annotations
 
