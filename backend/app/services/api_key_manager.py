@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Awaitable, TypeVar
@@ -86,14 +87,28 @@ class _ProviderHealth:
 
 
 def _is_quota_exhaustion(status_code: int, body: str) -> bool:
-    """Distinguish daily/monthly quota exhaustion from transient rate limits."""
-    body_lower = body.lower()
+    """Distinguish daily/monthly quota exhaustion from transient rate limits.
+
+    Only SPECIFIC long-horizon markers may trigger the 1-hour cooldown. Generic
+    429 vocabulary must NOT: Gemini says RESOURCE_EXHAUSTED and OpenAI says
+    rate_limit_exceeded for ordinary PER-MINUTE throttles, and classifying those
+    as daily exhaustion benched a healthy provider for an hour — one burst of
+    embedding calls then starved a whole generation job of providers.
+    """
+    if status_code not in {429, 402, 403}:
+        return False
+    squashed = re.sub(r"[\s_\-]", "", body.lower())
+    # Per-minute / per-second throttles are transient by definition.
+    if "perminute" in squashed or "persecond" in squashed:
+        return False
     quota_phrases = (
-        "quota exceeded", "quota_exceeded", "exhausted", "billing",
-        "resource_exhausted", "insufficient_quota", "rate_limit_exceeded",
-        "per day", "daily limit", "monthly limit", "free tier",
+        "insufficientquota",              # OpenAI: out of credit
+        "billing",                        # payment problems
+        "perday", "dailylimit",           # daily buckets (Gemini free tier)
+        "permonth", "monthlylimit",
+        "quotaexceeded",                  # only after per-minute ruled out above
     )
-    return status_code in {429, 402, 403} and any(p in body_lower for p in quota_phrases)
+    return any(p in squashed for p in quota_phrases)
 
 
 class ApiKeyManager:
