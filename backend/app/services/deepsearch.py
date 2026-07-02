@@ -88,13 +88,69 @@ OUTPUT — respond with ONLY one JSON object, no prose, no code fences:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Web knowledge (optional — inert unless TAVILY_API_KEY is configured)
+#  Web knowledge — OpenAI web_search (uses the existing OPENAI_API_KEY) first,
+#  Tavily as the alternative when configured. Inert when neither is available.
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def web_search(query: str, max_results: int | None = None) -> list[dict]:
-    """Tavily web search. Returns [] when disabled, unconfigured, or on any error."""
+    """Web evidence for the refiner. Returns [] when disabled or on any error."""
+    if not settings.DEEPSEARCH_WEB_ENABLED:
+        return []
+    if settings.OPENAI_API_KEY:
+        results = await _openai_web_search(query)
+        if results:
+            return results
+    return await _tavily_search(query, max_results)
+
+
+async def _openai_web_search(query: str) -> list[dict]:
+    """OpenAI Responses API with the built-in web_search tool.
+
+    One call: the model searches the web and returns a grounded summary with
+    source citations — no separate search-provider account needed.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(
+                f"{settings.OPENAI_BASE_URL}/responses",
+                headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                json={
+                    "model": settings.OPENAI_GENERATION_MODEL,
+                    "tools": [{"type": "web_search"}],
+                    "input": (
+                        "Search the web and summarise, with concrete facts and "
+                        f"formulas where relevant: {query}"
+                    ),
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning(f"[DeepSearch] OpenAI web search failed (non-fatal): {exc}")
+        return []
+
+    texts: list[str] = []
+    urls: list[str] = []
+    for item in data.get("output", []) or []:
+        for part in item.get("content", []) or []:
+            if part.get("type") == "output_text" and part.get("text"):
+                texts.append(part["text"])
+                for ann in part.get("annotations", []) or []:
+                    if ann.get("url"):
+                        urls.append(ann["url"])
+    if not texts:
+        return []
+    return [{
+        "title": "Web search (OpenAI)",
+        "content": " ".join(texts)[:1200],
+        "url": "; ".join(dict.fromkeys(urls))[:300],
+    }]
+
+
+async def _tavily_search(query: str, max_results: int | None = None) -> list[dict]:
+    """Tavily web search. Returns [] when unconfigured or on any error."""
     key = getattr(settings, "TAVILY_API_KEY", None)
-    if not (settings.DEEPSEARCH_WEB_ENABLED and key):
+    if not key:
         return []
     n = max_results or settings.DEEPSEARCH_WEB_MAX_RESULTS
     try:
