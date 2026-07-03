@@ -31,7 +31,9 @@ class IngestJobStatus(str, enum.Enum):
 #
 # submissions:         {_id, student_id, question_id, answer_text,
 #                       auto_mark, auto_feedback, auto_confidence, marking_route,
-#                       slm_keyword_coverage, slm_semantic_sim, slm_raw_score,
+#                       slm_keyword_coverage, slm_semantic_sim, slm_raw_score
+#                         (legacy key names — written by services/pre_scorer.py,
+#                         which no longer involves an SLM),
 #                       override_mark, override_feedback, override_reason,
 #                       is_flagged, is_marked, submitted_at, marked_at}
 #

@@ -140,7 +140,7 @@ What generation guarantees the marking pipeline can rely on:
 | `model_answer` | numeric results deterministically verified (short answer) |
 | MCQ options | exactly one factually correct option |
 | `embedding` | 768-dim, embedded from `question_text + model_answer` |
-| `rubric` | per-mark criteria (used by SLM pre-scorer + LLM marker) |
+| `rubric` | per-mark criteria (used by the marking pre-scorer + LLM marker) |
 
 ---
 

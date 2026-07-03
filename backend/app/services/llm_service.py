@@ -426,13 +426,16 @@ class _SmartAdapter:
 
 
 # ── Module-level singletons ────────────────────────────────────────────────────
+# One canonical name: this adapter does embeddings, vision and generation with
+# provider fallback. (It was historically also exported as `slm_service`, from
+# an era when a local small-language-model backed it — that model is long gone.)
 
-slm_service = _SmartAdapter()
-llm_service = slm_service   # legacy alias
+llm_service = _SmartAdapter()
 
 
-def _build_online_client():
-    """Answer marking: OpenAI → Anthropic → Gemini."""
+def _build_marking_client():
+    """Answer marking client, picked once at startup by key presence:
+    OpenAI, else Anthropic, else Gemini. None disables LLM marking."""
     if not settings.ONLINE_LLM_ENABLED:
         return None
     if settings.OPENAI_API_KEY:
@@ -468,7 +471,7 @@ class _FallbackGenerationClient:
     async def generate(self, prompt: str) -> str:
         providers = [p for p in ("openai_generation", "anthropic", "gemini") if p in self._clients]
         if not providers:
-            return await slm_service.generate(prompt)
+            return await llm_service.generate(prompt)
 
         async def _try(provider: str) -> str:
             return await self._clients[provider].generate(prompt)
@@ -481,5 +484,5 @@ def _build_generation_client():
     return _FallbackGenerationClient()
 
 
-online_service = _build_online_client()
+marking_service = _build_marking_client()
 generation_service = _build_generation_client()

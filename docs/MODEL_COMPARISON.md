@@ -47,7 +47,7 @@ Tested on `IntroductoryBusinessStatistics-OP.pdf` (631 pages, 13 chapters).
 | `gpt-4o-mini` | OpenAI | ~$0.002 | Primary. Good at rubric-following. |
 | `claude-haiku-4-5-20251001` | Anthropic | ~$0.002 | Fallback. Very precise instruction-following. |
 
-Both models reliably follow the rubric structure and produce consistent scores when given clear rubrics. The SLM pre-scorer skips the LLM entirely for high-confidence matches (~30-40% of submissions), reducing cost.
+Both models reliably follow the rubric structure and produce consistent scores when given clear rubrics. The pre-scorer (rubric-keyword + embedding confidence router — no language model) skips the LLM entirely for clearly-full-credit answers (~30-40% of submissions), reducing cost.
 
 ---
 

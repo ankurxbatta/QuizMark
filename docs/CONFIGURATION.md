@@ -78,15 +78,14 @@ All settings live in `.env`. Run `setup.sh` (Mac/Linux) or `setup.bat` (Windows)
 
 | Variable | Default | Description |
 |---|---|---|
-| `GENERATION_LLM_ENABLED` | `true` | Enable LLM question generation. |
-| `GENERATION_LLM_PROVIDER` | `openai` | Primary generation provider. |
-| `GENERATION_LLM_MODEL` | `gpt-4o-mini` | Generation model. |
-| `GENERATION_MAX_TOKENS` | `4096` | Max tokens per generation call. |
-| `ONLINE_LLM_ENABLED` | `true` | Enable LLM answer marking. |
-| `ONLINE_LLM_PROVIDER` | `openai` | Primary marking provider. |
-| `ONLINE_LLM_MODEL` | `gpt-4o-mini` | Marking model. |
+| `GENERATION_MAX_TOKENS` | `4096` | Max tokens per generation call. Generation providers rotate at call time (OpenAI → Anthropic → Gemini) using the per-provider `*_GENERATION_MODEL` settings — there is no single "generation provider" knob. |
+| `ONLINE_LLM_ENABLED` | `true` | Enable LLM answer marking. The marking provider/model are picked at startup by key presence using the `*_MARKING_MODEL` settings. |
 | `LLM_TEMPERATURE` | `0.2` | Generation temperature. |
 | `LLM_MAX_TOKENS` | `1024` | Max tokens per marking call. |
+
+Retired (ignored if still present in `.env`): `GENERATION_LLM_ENABLED`,
+`GENERATION_LLM_PROVIDER`, `GENERATION_LLM_MODEL`, `ONLINE_LLM_PROVIDER`,
+`ONLINE_LLM_MODEL`, `CONFIDENCE_HIGH`.
 
 ---
 
@@ -109,12 +108,16 @@ All settings live in `.env`. Run `setup.sh` (Mac/Linux) or `setup.bat` (Windows)
 
 ---
 
-## Marking Confidence Thresholds
+## Marking Confidence Router (`services/pre_scorer.py`)
+
+The pre-scorer runs no language model — it blends rubric-keyword coverage with
+embedding cosine similarity and routes each subjective answer.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CONFIDENCE_HIGH` | `0.85` | SLM score ≥ this → mark accepted without LLM call. |
-| `CONFIDENCE_MID` | `0.55` | Score between MID and HIGH → RAG + OpenAI marking. Score below MID → wide RAG + OpenAI + flagged for review. |
+| `PRESCORE_FULL_CREDIT_SEM` | `0.92` | Full marks without an LLM call require embedding similarity ≥ this **and**… |
+| `PRESCORE_FULL_CREDIT_KW` | `0.60` | …rubric-keyword coverage ≥ this. Anything less goes to the marking LLM. |
+| `CONFIDENCE_MID` | `0.55` | Blended confidence ≥ this → normal RAG + LLM marking; below → wide RAG + LLM + flagged for review. |
 
 ---
 

@@ -31,7 +31,7 @@ import re
 import httpx
 
 from app.core.config import settings
-from app.services.llm_service import generation_service, slm_service
+from app.services.llm_service import generation_service, llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +210,7 @@ async def _rag_evidence(question: dict, book_id: str | None, chapter_num: int | 
     model_answer = (question.get("model_answer") or "").strip()
     if model_answer:
         queries.append(model_answer[:400])
-    embeddings = await asyncio.gather(*[slm_service.embed(q) for q in queries])
+    embeddings = await asyncio.gather(*[llm_service.embed(q) for q in queries])
     fused = await routed_retrieve(
         queries, embeddings,
         book_id=book_id, chapter_num=chapter_num,

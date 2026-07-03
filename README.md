@@ -161,7 +161,7 @@ backend/app/
     ingestion_chain.py   — LCEL pipeline: clean → chunk → validate → vision → embed
     question_generator.py— DeepSearch retrieval, Bloom's taxonomy generation
     question_orchestrator.py — multi-round agentic question bank generation
-    rag_pipeline.py      — hybrid SLM + RAG marking pipeline
+    rag_pipeline.py      — hybrid pre-score + RAG marking pipeline
     mongo_vector_store.py— 768-dim vector search, checkpoint management
   tasks/
     celery_app.py        — 8 named queues + task routing

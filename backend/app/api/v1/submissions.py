@@ -83,6 +83,7 @@ async def submit_answer(
         "auto_feedback": None,
         "auto_confidence": None,
         "marking_route": None,
+        # legacy "slm_*" key names — see services/pre_scorer.py
         "slm_keyword_coverage": None,
         "slm_semantic_sim": None,
         "slm_raw_score": None,

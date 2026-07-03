@@ -216,11 +216,11 @@ Student submits answer  (one submission per question — duplicates get 409)
         │    if no key can be determined the submission is flagged for
         │    instructor review instead of silently scoring 0)
         ▼
-    SLM pre-scorer  — fast cosine similarity check (short answer only)
-        │
-        ├── HIGH confidence (≥ 0.85) → mark accepted, no LLM call
-        │
-        └── LOW / MID confidence
+    Pre-scorer (pre_scorer.py) — rubric-keyword coverage + embedding cosine;
+        │                        no language model at this tier
+        ├── clearly full credit (sem ≥ 0.92 AND keywords ≥ 0.60)
+        │       → full marks, no LLM call
+        └── everything else (MID / LOW confidence)
                 │
                 ├─ Multi-query RAG (3 parallel vector searches)
                 │    · textbook chunks (pdf_chunks)

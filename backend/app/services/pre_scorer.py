@@ -1,8 +1,10 @@
 """
-slm_scorer.py  —  Tier-1 SLM pre-scorer.
+pre_scorer.py  —  Tier-1 marking pre-scorer (confidence router input).
 
-Runs two lightweight checks on a student answer before deciding
-whether to invoke the full LLM:
+No language model runs at this tier — the old name "SLM scorer" was
+historical (a local small model once produced a score here; it was removed
+long ago). Today this runs two lightweight checks on a student answer
+before deciding whether to invoke the full LLM:
 
   1. Keyword coverage    — what fraction of rubric keywords appear?
   2. Semantic similarity — cosine similarity between answer embedding
@@ -12,7 +14,8 @@ The two signals are blended into a single confidence float [0, 1].
 The confidence router in rag_pipeline.py uses it to pick the path:
 
   HIGH — only when the answer is CLEARLY full credit (semantic similarity AND
-         keyword coverage both above the strict full-credit gates below):
+         keyword coverage both above the strict full-credit gates,
+         PRESCORE_FULL_CREDIT_SEM / PRESCORE_FULL_CREDIT_KW):
          accept full marks, skip the LLM entirely.
   MID  — confidence >= CONFIDENCE_MID (default 0.55): RAG + LLM.
   LOW  — anything below: RAG wide + LLM + flag when in doubt.
@@ -22,27 +25,19 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from app.services.llm_service import slm_service
+from app.services.llm_service import llm_service
 from app.core.config import settings
-
-# ── HIGH-route full-credit gate ───────────────────────────────────────────────
-# The no-LLM HIGH shortcut is only taken when an answer is UNAMBIGUOUSLY full
-# credit: very high semantic alignment to the model answer AND strong coverage of
-# the rubric's key terms. Anything less (a partial or merely-plausible answer)
-# falls through to the LLM path so a real correctness check is applied. These are
-# deliberately strict; override via settings if product tuning is needed.
-_FULL_CREDIT_SEM = getattr(settings, "SLM_FULL_CREDIT_SEM", 0.92)
-_FULL_CREDIT_KW = getattr(settings, "SLM_FULL_CREDIT_KW", 0.60)
 
 
 @dataclass
-class SLMResult:
-    """All signals produced by the Tier-1 SLM pre-scorer."""
+class PreScoreResult:
+    """All signals produced by the Tier-1 pre-scorer."""
     keyword_coverage: float      # 0.0 – 1.0
     semantic_similarity: float   # 0.0 – 1.0  (cosine)
-    slm_raw_score: float         # 0.0 – 1.0  (normalised from 0-10)
+    raw_score: float             # 0.0 – 1.0 (= semantic_similarity; persisted
+                                 #   under the legacy DB key "slm_raw_score")
     confidence: float            # blended signal, 0.0 – 1.0
-    provisional_mark: float      # SLM-estimated mark (for HIGH path)
+    provisional_mark: float      # estimated mark (final only on the HIGH path)
     route: str                   # "HIGH" | "MID" | "LOW"
 
 
@@ -96,30 +91,28 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-async def slm_pre_score(
+async def pre_score(
     question_text: str,
     model_answer: str,
     rubric: str,
     max_marks: float,
     student_answer: str,
     model_answer_embedding: Optional[list[float]] = None,
-) -> SLMResult:
+) -> PreScoreResult:
     """
     Tier-1 pre-scorer using keyword coverage + semantic similarity.
-
-    The local SLM model call has been removed — all generation now goes
-    through Gemini (more accurate, no local compute required).
+    No generative model is called here — at most one embedding call.
 
     Weights: keyword_coverage 40%, semantic_similarity 60%.
-    A HIGH confidence skips the LLM call entirely; MID/LOW route to Gemini.
+    A HIGH route skips the marking LLM entirely; MID/LOW proceed to it.
     """
     # 1. Keyword coverage (fast, no model call)
     keywords = _extract_keywords(rubric)
     kw_score = _keyword_coverage(student_answer, keywords)
 
-    # 2. Semantic similarity via Gemini embeddings
+    # 2. Semantic similarity via the embedding provider chain
     if model_answer_embedding:
-        answer_emb = await slm_service.embed(student_answer)
+        answer_emb = await llm_service.embed(student_answer)
         sem_score = max(0.0, _cosine_similarity(answer_emb, model_answer_embedding))
     else:
         answer_emb, model_emb = await _embed_both(student_answer, model_answer)
@@ -130,15 +123,18 @@ async def slm_pre_score(
 
     # ── Route selection ───────────────────────────────────────────────────────
     # The HIGH (no-LLM) shortcut is restricted to answers that are clearly full
-    # credit. Previously ANY confidence >= CONFIDENCE_HIGH accepted
-    # `sem * max_marks` as the FINAL mark with no correctness check, which:
+    # credit. Previously ANY high blended confidence accepted `sem * max_marks`
+    # as the FINAL mark with no correctness check, which:
     #   • over-marked fluent-but-wrong answers (rubric terms reused → high
     #     confidence → a partial mark it never earned), and
     #   • under-marked correct paraphrases (capped at ~sem*max, e.g. 80%).
     # Now HIGH awards FULL marks only when semantic alignment AND keyword
     # coverage are both very high; every partial case is sent to the LLM (we
     # prefer the LLM when in doubt).
-    clearly_full_credit = sem_score >= _FULL_CREDIT_SEM and kw_score >= _FULL_CREDIT_KW
+    clearly_full_credit = (
+        sem_score >= settings.PRESCORE_FULL_CREDIT_SEM
+        and kw_score >= settings.PRESCORE_FULL_CREDIT_KW
+    )
     if clearly_full_credit:
         route = "HIGH"
         provisional_mark = float(max_marks)
@@ -149,10 +145,10 @@ async def slm_pre_score(
         route = "LOW"
         provisional_mark = round(sem_score * max_marks, 2)
 
-    return SLMResult(
+    return PreScoreResult(
         keyword_coverage=round(kw_score, 4),
         semantic_similarity=round(sem_score, 4),
-        slm_raw_score=round(sem_score, 4),  # reuse sem_score for compatibility
+        raw_score=round(sem_score, 4),
         confidence=confidence,
         provisional_mark=provisional_mark,
         route=route,
@@ -163,6 +159,6 @@ async def _embed_both(text_a: str, text_b: str):
     """Embed two texts concurrently."""
     import asyncio
     return await asyncio.gather(
-        slm_service.embed(text_a),
-        slm_service.embed(text_b),
+        llm_service.embed(text_a),
+        llm_service.embed(text_b),
     )

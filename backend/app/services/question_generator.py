@@ -42,7 +42,7 @@ import re
 from typing import Optional
 
 from app.core.config import settings
-from app.services.llm_service import generation_service, slm_service
+from app.services.llm_service import generation_service, llm_service
 from app.services.pdf_service import TextChunk
 
 logger = logging.getLogger(__name__)
@@ -170,7 +170,7 @@ async def deep_retrieve_for_generation(
     from app.services.retrieval_router import routed_retrieve
 
     queries = await _generate_retrieval_queries(topic, n=4)
-    embeddings = await asyncio.gather(*[slm_service.embed(q) for q in queries])
+    embeddings = await asyncio.gather(*[llm_service.embed(q) for q in queries])
 
     # Intent-routed multi-index retrieval with RRF fusion (MULTI_RAG_DESIGN
     # Phase 3): sub-queries about formulas/charts also hit the specialist
@@ -368,14 +368,14 @@ async def _specialist_context(best_chunk, bloom_level: str, book_id: Optional[st
         if bloom_level == "L3" and settings.MATH_INDEX_ENABLED:
             from app.services.math_index import retrieve_formulas, render_formulas_block
             query = f"{best_chunk.topic_tag} {best_chunk.section_title} formula calculation".strip()
-            q_emb = await slm_service.embed(query)
+            q_emb = await llm_service.embed(query)
             block = render_formulas_block(await retrieve_formulas(q_emb, book_id=book_id, chapter_num=chapter_num, k=5))
             if block:
                 blocks.append(block)
 
         elif bloom_level == "L4" and (settings.FIGURE_INDEX_ENABLED or settings.TABLE_INDEX_ENABLED):
             query = f"{best_chunk.topic_tag} {best_chunk.section_title} data chart interpretation".strip()
-            q_emb = await slm_service.embed(query)
+            q_emb = await llm_service.embed(query)
             if settings.FIGURE_INDEX_ENABLED:
                 from app.services.figure_index import retrieve_figures, render_figures_block
                 block = render_figures_block(await retrieve_figures(q_emb, book_id=book_id, chapter_num=chapter_num, k=3))

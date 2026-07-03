@@ -1,5 +1,5 @@
 """
-rag_pipeline.py  —  Hybrid SLM + RAG + LLM marking pipeline (MongoDB backend).
+rag_pipeline.py  —  Hybrid pre-score + RAG + LLM marking pipeline (MongoDB backend).
 
 RAG context for marking pulls from two sources:
   1. pdf_chunks   — actual textbook sections (text, tables, formulas, image
@@ -12,8 +12,8 @@ Multi-query retrieval (inspired by Shiksha Copilot):
   each in parallel, then deduplicate. This surfaces all relevant textbook
   material even when the student uses different terminology.
 
-Tier routing (see slm_scorer.slm_pre_score):
-  HIGH  (clearly full credit: sem + keyword both very high) → SLM mark, no LLM
+Tier routing (see pre_scorer.pre_score — keyword + embedding signals, no LLM):
+  HIGH  (clearly full credit: sem + keyword both very high) → full marks, no LLM
   MID   (confidence >= CONFIDENCE_MID)                      → RAG top-K + LLM
   LOW   (confidence <  CONFIDENCE_MID)                      → RAG wide top-K + LLM + flag
 """
@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
-from app.services.llm_service import llm_service, online_service, slm_service
-from app.services.slm_scorer import slm_pre_score, SLMResult
+from app.services.llm_service import llm_service, marking_service
+from app.services.pre_scorer import pre_score, PreScoreResult
 from app.services.mongo_vector_store import vector_search, search_similar_questions
 
 logger = logging.getLogger(__name__)
@@ -292,7 +292,7 @@ async def _retrieve_context(
     # ── Source 1: multi-query textbook chunk retrieval ─────────────────────────
     concept_queries = _build_concept_queries(question_text, rubric)
     concept_embeddings = await asyncio.gather(
-        *[slm_service.embed(q) for q in concept_queries]
+        *[llm_service.embed(q) for q in concept_queries]
     )
     k_per_query = max(2, k // len(concept_embeddings))
     chapter_filter = {"chapter_num": chapter_num} if chapter_num is not None else None
@@ -425,16 +425,16 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
         if not correct:
             # No reliable key — flag for the instructor rather than silently
             # giving 0 against an unparseable model answer.
-            slm = SLMResult(
-                keyword_coverage=0.0, semantic_similarity=0.0, slm_raw_score=0.0,
+            prescore = PreScoreResult(
+                keyword_coverage=0.0, semantic_similarity=0.0, raw_score=0.0,
                 confidence=0.0, provisional_mark=0.0, route="LOW",
             )
             feedback = (
                 "Could not determine the answer key for this question automatically — "
                 "an instructor will review and mark this answer."
             )
-            await _persist(db, submission_id, 0.0, feedback, True, slm)
-            return _result(0.0, feedback, True, slm)
+            await _persist(db, submission_id, 0.0, feedback, True, prescore)
+            return _result(0.0, feedback, True, prescore)
 
         is_correct = _objective_is_correct(
             student_answer, correct, question["question_type"], question
@@ -445,20 +445,20 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
             "Correct." if is_correct
             else f"Incorrect — the correct answer is {correct}."
         )
-        slm = SLMResult(
+        prescore = PreScoreResult(
             keyword_coverage=1.0 if is_correct else 0.0,
             semantic_similarity=1.0 if is_correct else 0.0,
-            slm_raw_score=1.0 if is_correct else 0.0,
+            raw_score=1.0 if is_correct else 0.0,
             confidence=1.0,
             provisional_mark=mark,
             route="HIGH",
         )
-        await _persist(db, submission_id, mark, feedback, False, slm)
-        return _result(mark, feedback, False, slm)
+        await _persist(db, submission_id, mark, feedback, False, prescore)
+        return _result(mark, feedback, False, prescore)
 
-    # ── Tier 1: SLM pre-scorer ────────────────────────────────────────────────
+    # ── Tier 1: pre-scorer (keyword coverage + embedding similarity, no LLM) ──
     embedding = question.get("embedding")
-    slm: SLMResult = await slm_pre_score(
+    prescore: PreScoreResult = await pre_score(
         question_text=question["question_text"],
         model_answer=question["model_answer"],
         rubric=question["rubric"],
@@ -467,22 +467,22 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
         model_answer_embedding=embedding,
     )
 
-    # ── HIGH: accept SLM result ───────────────────────────────────────────────
-    if slm.route == "HIGH":
-        # HIGH is now reserved for clearly full-credit answers (see slm_scorer):
+    # ── HIGH: accept pre-score result ─────────────────────────────────────────
+    if prescore.route == "HIGH":
+        # HIGH is reserved for clearly full-credit answers (see pre_scorer):
         # the provisional mark is full marks, awarded without an LLM call because
         # semantic alignment and rubric-term coverage are both very high.
         feedback = (
             f"Full marks — the answer aligns strongly with the model answer "
-            f"({slm.semantic_similarity:.0%} semantic match) and covers "
-            f"{slm.keyword_coverage:.0%} of the key rubric terms."
+            f"({prescore.semantic_similarity:.0%} semantic match) and covers "
+            f"{prescore.keyword_coverage:.0%} of the key rubric terms."
         )
-        await _persist(db, submission_id, slm.provisional_mark, feedback, False, slm)
-        return _result(slm.provisional_mark, feedback, False, slm)
+        await _persist(db, submission_id, prescore.provisional_mark, feedback, False, prescore)
+        return _result(prescore.provisional_mark, feedback, False, prescore)
 
     # ── MID / LOW: RAG retrieval from MongoDB (chunks + questions) ────────────
-    answer_emb = await slm_service.embed(submission["answer_text"])
-    k = settings.TOP_K_RETRIEVAL if slm.route == "MID" else settings.TOP_K_WIDE_RETRIEVAL
+    answer_emb = await llm_service.embed(submission["answer_text"])
+    k = settings.TOP_K_RETRIEVAL if prescore.route == "MID" else settings.TOP_K_WIDE_RETRIEVAL
     context = await _retrieve_context(
         answer_emb,
         question_text=question["question_text"],
@@ -501,12 +501,14 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
         student_answer=submission["answer_text"],
     )
 
-    # ── Tier 3: Gemini generation (all routes) ────────────────────────────────
-    # llm_service and online_service both point to Gemini; use online for LOW
-    # (flagged) answers, llm_service for MID/HIGH fallthrough.
-    if slm.route == "LOW" and online_service is not None:
+    # ── Tier 2: LLM marking ───────────────────────────────────────────────────
+    # marking_service is the dedicated marking client (OpenAI → Anthropic →
+    # Gemini, picked at startup by key presence); llm_service is the general
+    # adapter with per-call provider fallback. LOW answers prefer the marking
+    # client, everything falls back to the general adapter.
+    if prescore.route == "LOW" and marking_service is not None:
         try:
-            raw = await online_service.generate(prompt)
+            raw = await marking_service.generate(prompt)
         except Exception:
             raw = await llm_service.generate(prompt)
     else:
@@ -521,11 +523,11 @@ async def mark_submission(submission_id: str, db: AsyncIOMotorDatabase) -> dict:
             "flagged": True,
             "confidence": 0.0,
         }
-    if slm.route == "LOW":
+    if prescore.route == "LOW":
         res["flagged"] = True
 
-    await _persist(db, submission_id, res["mark"], res["feedback"], res["flagged"], slm)
-    return _result(res["mark"], res["feedback"], res["flagged"], slm)
+    await _persist(db, submission_id, res["mark"], res["feedback"], res["flagged"], prescore)
+    return _result(res["mark"], res["feedback"], res["flagged"], prescore)
 
 
 async def _persist(
@@ -534,18 +536,21 @@ async def _persist(
     mark: float,
     feedback: str,
     flagged: bool,
-    slm: SLMResult,
+    prescore: PreScoreResult,
 ) -> None:
     await db["submissions"].update_one(
         {"_id": submission_id},
         {"$set": {
             "auto_mark": mark,
-            "auto_feedback": f"[Route:{slm.route}|Conf:{slm.confidence:.2f}] {feedback}",
-            "auto_confidence": slm.confidence,
-            "marking_route": slm.route,
-            "slm_keyword_coverage": slm.keyword_coverage,
-            "slm_semantic_sim": slm.semantic_similarity,
-            "slm_raw_score": slm.slm_raw_score,
+            "auto_feedback": f"[Route:{prescore.route}|Conf:{prescore.confidence:.2f}] {feedback}",
+            "auto_confidence": prescore.confidence,
+            "marking_route": prescore.route,
+            # "slm_*" keys are legacy names (the pre-scorer once ran a local
+            # SLM). Kept verbatim so existing submissions and the analytics
+            # aggregations stay consistent across old and new documents.
+            "slm_keyword_coverage": prescore.keyword_coverage,
+            "slm_semantic_sim": prescore.semantic_similarity,
+            "slm_raw_score": prescore.raw_score,
             "is_flagged": flagged,
             "is_marked": True,
             "marked_at": datetime.now(timezone.utc),
@@ -553,11 +558,11 @@ async def _persist(
     )
 
 
-def _result(mark: float, feedback: str, flagged: bool, slm: SLMResult) -> dict:
+def _result(mark: float, feedback: str, flagged: bool, prescore: PreScoreResult) -> dict:
     return {
         "mark": mark,
         "feedback": feedback,
         "flagged": flagged,
-        "route": slm.route,
-        "confidence": slm.confidence,
+        "route": prescore.route,
+        "confidence": prescore.confidence,
     }

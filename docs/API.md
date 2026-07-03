@@ -235,7 +235,7 @@ shows existing results on reload instead of an empty form.
 
 MCQ and True/False submissions are marked instantly by comparing against the
 question's stored `correct_answer` key — no model call. Short answers go
-through the SLM + RAG + LLM marking pipeline.
+through the pre-score + RAG + LLM marking pipeline.
 
 ### `GET /submissions/{submission_id}`
 Get a submission with marking result.

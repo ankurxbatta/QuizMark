@@ -810,13 +810,13 @@ async def _judge_question(question: dict) -> tuple[bool, str]:
         return False, "empty question text"
 
     try:
-        from app.services.llm_service import slm_service
+        from app.services.llm_service import llm_service
         from app.services.question_generator import DbChunk
         from app.services.retrieval_router import routed_retrieve
 
         topic = question.get("topic_tag") or ""
         query = f"{topic} {stem}".strip()[:400]
-        emb = await slm_service.embed(query)
+        emb = await llm_service.embed(query)
         k = max(1, int(settings.QUALITY_JUDGE_RETRIEVAL_K))
         fused = await routed_retrieve(
             [query], [emb],

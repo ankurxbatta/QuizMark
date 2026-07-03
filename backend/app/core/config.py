@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=[".env", "../../.env"],
         env_file_encoding="utf-8",
+        # Retired settings may linger in existing .env files (e.g. the old
+        # CONFIDENCE_HIGH / ONLINE_LLM_PROVIDER knobs) — never crash on them.
+        extra="ignore",
     )
 
     # ── Environment ──────────────────────────────────────────────────────────
@@ -80,15 +83,14 @@ class Settings(BaseSettings):
     OPENAI_IMAGE_MODEL: str = "gpt-image-1"
     ASSET_MAX_PER_CHAPTER: int = 4
 
-    # ── Online LLM (answer marking) ───────────────────────────────────────────
+    # ── LLM marking (subjective answers) ──────────────────────────────────────
+    # false = no LLM marking at all; provider/model are chosen at startup by
+    # key presence (OpenAI → Anthropic → Gemini) using *_MARKING_MODEL below.
     ONLINE_LLM_ENABLED: bool = True
-    ONLINE_LLM_PROVIDER: str = "openai"
-    ONLINE_LLM_MODEL: str = "gpt-4o-mini"
 
-    # ── Generation LLM (question generation) ─────────────────────────────────
-    GENERATION_LLM_ENABLED: bool = True
-    GENERATION_LLM_PROVIDER: str = "openai"
-    GENERATION_LLM_MODEL: str = "gpt-4o-mini"
+    # ── Question generation ───────────────────────────────────────────────────
+    # Provider rotation is runtime fallback (OpenAI → Anthropic → Gemini) using
+    # the per-provider *_GENERATION_MODEL settings; only the budget lives here.
     GENERATION_MAX_TOKENS: int = 4096
 
     # ── RAG ──────────────────────────────────────────────────────────────────
@@ -96,8 +98,11 @@ class Settings(BaseSettings):
     TOP_K_RETRIEVAL: int = 5
     TOP_K_WIDE_RETRIEVAL: int = 10
 
-    # ── Confidence router ────────────────────────────────────────────────────
-    CONFIDENCE_HIGH: float = 0.85
+    # ── Marking confidence router (see services/pre_scorer.py) ────────────────
+    # The no-LLM full-marks shortcut requires BOTH gates; CONFIDENCE_MID splits
+    # the remaining answers into normal vs wide-RAG + flagged marking.
+    PRESCORE_FULL_CREDIT_SEM: float = 0.92
+    PRESCORE_FULL_CREDIT_KW: float = 0.60
     CONFIDENCE_MID: float = 0.55
 
     # ── MongoDB (primary data store + vector store) ───────────────────────────

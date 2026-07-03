@@ -115,10 +115,24 @@ async def api_status(current_user: dict = Depends(require_instructor)):
             "vision_chain": ["openai_vision (gpt-4o-mini)", "anthropic_vision (claude-haiku)"],
             "generation_chain": ["openai (gpt-4o-mini)", "anthropic (claude-haiku)", "gemini (fallback)"],
             "marking_chain": ["openai (gpt-4o-mini)", "anthropic (claude-haiku)", "gemini (fallback)"],
-            "active_generation_provider": settings.GENERATION_LLM_PROVIDER,
-            "active_marking_provider": settings.ONLINE_LLM_PROVIDER,
+            # Generation rotates providers at call time (see rotation_stats for
+            # what is actually being used); marking is a static startup pick.
+            "generation_routing": "runtime fallback across generation_chain",
+            "active_marking_client": _marking_client_label(),
         },
     }
+
+
+def _marking_client_label() -> str:
+    """Truthful marking-client report: derived from the client actually built
+    at startup, not from a config knob."""
+    from app.services.llm_service import marking_service
+
+    if marking_service is None:
+        return "disabled (ONLINE_LLM_ENABLED=false or no API keys)"
+    provider = type(marking_service).__name__.replace("Client", "").lower()
+    model = getattr(marking_service, "model", None)
+    return f"{provider}:{model}" if model else provider
 
 
 @router.post("/clean/book/{book_id}")

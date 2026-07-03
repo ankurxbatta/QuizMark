@@ -182,8 +182,8 @@ async def _retrieve_seed_exercises(
         return []
     try:
         from app.services.exercise_index import retrieve_exercises
-        from app.services.llm_service import slm_service
-        q_emb = await slm_service.embed(chapter_topic)
+        from app.services.llm_service import llm_service
+        q_emb = await llm_service.embed(chapter_topic)
         preferred_kinds = _DIFFICULTY_EXERCISE_KINDS.get(difficulty)
         return await retrieve_exercises(
             q_emb, book_id=book_id, chapter_num=chapter_num, k=6,
@@ -210,10 +210,10 @@ async def _build_asset_directive(
     if not (require_table or require_figure):
         return ""
     from app.core.config import settings
-    from app.services.llm_service import slm_service
+    from app.services.llm_service import llm_service
     blocks: list[str] = []
     try:
-        emb = await slm_service.embed(chapter_topic)
+        emb = await llm_service.embed(chapter_topic)
         if require_table and settings.TABLE_INDEX_ENABLED:
             from app.services.table_index import retrieve_tables, render_tables_block
             b = render_tables_block(await retrieve_tables(emb, book_id=book_id, chapter_num=chapter_num, k=3))
