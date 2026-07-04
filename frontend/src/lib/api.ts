@@ -57,7 +57,13 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       Cookies.remove("token");
       Cookies.remove("role");
-      if (typeof window !== "undefined" && window.location.pathname !== "/") {
+      // The mobile quiz player (/m/…) has its own inline sign-in and must not
+      // be yanked to the desktop login mid-quiz — it handles 401s itself.
+      if (
+        typeof window !== "undefined" &&
+        window.location.pathname !== "/" &&
+        !window.location.pathname.startsWith("/m/")
+      ) {
         window.location.href = "/";
       }
     }

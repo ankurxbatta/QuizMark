@@ -18,3 +18,13 @@
     font-family: inherit;
   }
 }
+
+/* ── Mobile quiz player animations ── */
+@keyframes qslide {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes sheetup {
+  from { transform: translateY(40px); opacity: 0.5; }
+  to { transform: translateY(0); opacity: 1; }
+}

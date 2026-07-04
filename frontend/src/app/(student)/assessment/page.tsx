@@ -41,6 +41,9 @@ interface Quiz {
   id: string;
   title: string;
   description?: string | null;
+  time_limit_minutes?: number | null;
+  timing_mode?: "strict" | "easy";
+  question_count?: number;
   questions: Question[];
 }
 
@@ -377,6 +380,10 @@ export default function AssessmentPage() {
   // every section's questions (quiz order preserved) and is what the submit
   // flow + ResultsView operate on — keeping that contract unchanged.
   const [sections, setSections] = useState<Section[]>([]);
+  // Timed quizzes are taken in the quiz player (one question at a time, live
+  // countdown) — the plain form would bypass the timer, so they render as
+  // launch cards instead.
+  const [timedQuizzes, setTimedQuizzes] = useState<Quiz[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submissionIds, setSubmissionIds] = useState<string[]>([]);
@@ -402,8 +409,13 @@ export default function AssessmentPage() {
       api.get<SubmissionResult[]>("/submissions/my").catch(() => ({ data: [] as SubmissionResult[] })),
     ])
       .then(([quizRes, qRes, sRes]) => {
-        const quizzes = quizRes.data ?? [];
+        const allQuizzes = quizRes.data ?? [];
         const directlyAssigned = qRes.data ?? [];
+
+        // Timed quizzes go to the player; only untimed ones become sections.
+        const timedList = allQuizzes.filter((q) => q.time_limit_minutes);
+        setTimedQuizzes(timedList);
+        const quizzes = allQuizzes.filter((q) => !q.time_limit_minutes);
 
         // Build sections: one per quiz, then a legacy "Assigned questions"
         // section for any directly-assigned question not already in a quiz.
@@ -442,8 +454,9 @@ export default function AssessmentPage() {
         const unansweredCount = allQuestions.filter((q) => !answeredIds.has(q.id)).length;
 
         // If everything assigned has already been answered, jump straight to
-        // results (matches the prior reload-after-submit behavior).
-        if (allQuestions.length > 0 && unansweredCount === 0) {
+        // results (matches the prior reload-after-submit behavior). Skip the
+        // jump when timed quizzes exist — their launch cards must stay visible.
+        if (allQuestions.length > 0 && unansweredCount === 0 && timedList.length === 0) {
           setQuestions(allQuestions);
           setSubmissionIds(mySubs.map((s) => s.id));
           setSubmitted(true);
@@ -549,19 +562,57 @@ export default function AssessmentPage() {
         }
       />
 
-      <main className="max-w-3xl mx-auto px-8 py-10">
+      <main className="max-w-3xl mx-auto px-8 py-10 space-y-10">
+        {/* Timed quizzes launch into the quiz player (mobile-style, one
+            question at a time) so the countdown is enforced. */}
+        {!loading && timedQuizzes.length > 0 && (
+          <section className="space-y-4">
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-bold text-slate-900 tracking-tight">Timed quizzes</h2>
+              <Badge tone="amber">{timedQuizzes.length}</Badge>
+            </div>
+            {timedQuizzes.map((quiz) => (
+              <Card key={quiz.id} className="p-6 flex items-center justify-between gap-4 flex-wrap">
+                <div className="min-w-0">
+                  <h3 className="font-semibold text-slate-900">{quiz.title}</h3>
+                  {quiz.description && (
+                    <p className="text-sm text-slate-500 mt-0.5">{quiz.description}</p>
+                  )}
+                  <div className="flex gap-2 mt-2 flex-wrap">
+                    <Badge tone="blue">
+                      {quiz.question_count ?? 0} question{(quiz.question_count ?? 0) !== 1 ? "s" : ""}
+                    </Badge>
+                    <Badge tone="amber">⏱ {quiz.time_limit_minutes} min</Badge>
+                    {quiz.timing_mode === "strict" && (
+                      <Badge tone="rose">auto-submits when time ends</Badge>
+                    )}
+                  </div>
+                </div>
+                <Button variant="cta" onClick={() => router.push(`/m/quiz/${quiz.id}`)}>
+                  Open quiz
+                </Button>
+              </Card>
+            ))}
+            <p className="text-xs text-slate-400">
+              The timer starts when you press Start inside the quiz — questions stay hidden until then.
+            </p>
+          </section>
+        )}
+
         {loading ? (
           <div className="flex items-center justify-center gap-2 text-sm text-slate-400 py-20">
             <Loader2 size={16} className="animate-spin" /> Loading your assessment…
           </div>
         ) : questions.length === 0 ? (
-          <Card>
-            <EmptyState
-              icon={ClipboardList}
-              title="Nothing to do right now"
-              hint="No quizzes or questions have been assigned to you yet. Please check back later."
-            />
-          </Card>
+          timedQuizzes.length === 0 ? (
+            <Card>
+              <EmptyState
+                icon={ClipboardList}
+                title="Nothing to do right now"
+                hint="No quizzes or questions have been assigned to you yet. Please check back later."
+              />
+            </Card>
+          ) : null
         ) : (
           <form onSubmit={handleSubmit} className="space-y-10">
             {sections.map((section) => (

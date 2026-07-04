@@ -122,6 +122,12 @@ async def ensure_mongo_indexes():
         )
         await db["submissions"].create_index("is_flagged")
         await db["submissions"].create_index("is_marked")
+        # One attempt per (quiz, student) — a double-tap on Start races this
+        # index and the loser resumes the winner's attempt.
+        await db["quiz_attempts"].create_index(
+            [("quiz_id", 1), ("student_id", 1)], unique=True
+        )
+        await db["quiz_attempts"].create_index("student_id")
         await db["submissions"].create_index([("is_marked", 1), ("auto_confidence", 1)])
         await db["audit_logs"].create_index("timestamp")
         await db["ingest_jobs"].create_index("created_at")

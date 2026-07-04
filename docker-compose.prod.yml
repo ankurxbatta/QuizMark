@@ -42,6 +42,9 @@ services:
     logging: *prod-logging
 
   backend:
+    # 4 worker processes: a whole class (~150 students) submitting and
+    # autosaving drafts at once should not queue behind a single event loop.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     ports: !override
       - "127.0.0.1:8000:8000"
     environment:

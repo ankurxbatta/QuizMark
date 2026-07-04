@@ -21,6 +21,7 @@
     "next": "^15.5.15",
     "react": "^18",
     "react-dom": "^18",
+    "react-qr-code": "^2.2.0",
     "tailwind-merge": "^2.3.0"
   },
   "devDependencies": {

@@ -116,5 +116,13 @@ class SlidingWindowLimiter:
             hits.append(now)
 
 
+# Two-tier login limiting. A whole class (~150 students) signing in at quiz
+# start typically shares ONE public IP (campus NAT), so a strict per-IP limit
+# would lock the room out. Brute-force protection is per (ip, account) —
+# auth.py keys login_limiter with "ip:username" — while login_ip_limiter is a
+# high per-IP ceiling that still caps password spraying and floods.
 login_limiter = SlidingWindowLimiter(max_calls=10, window_seconds=60.0)
-register_limiter = SlidingWindowLimiter(max_calls=5, window_seconds=60.0)
+login_ip_limiter = SlidingWindowLimiter(max_calls=300, window_seconds=60.0)
+# Registration is a heavier abuse surface than login, but 5/min starves a lab
+# of students onboarding behind one NAT; 30/min keeps a brake on mass signups.
+register_limiter = SlidingWindowLimiter(max_calls=30, window_seconds=60.0)

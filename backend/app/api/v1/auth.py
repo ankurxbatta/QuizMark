@@ -13,6 +13,7 @@ from app.core.security import (
     get_current_user,
     require_instructor,
     login_limiter,
+    login_ip_limiter,
     register_limiter,
     get_client_ip,
 )
@@ -75,7 +76,10 @@ async def list_students(
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, request: Request, db: AsyncIOMotorDatabase = Depends(get_db)):
     ip = get_client_ip(request)
-    login_limiter.check(ip)
+    # Per-IP ceiling first (classroom-NAT safe), then the per-account
+    # brute-force limit — see the limiter definitions in core/security.py.
+    login_ip_limiter.check(ip)
+    login_limiter.check(f"{ip}:{payload.username.strip().lower()}")
     user = await db["users"].find_one({"username": payload.username})
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")

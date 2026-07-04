@@ -964,9 +964,11 @@ async def list_assessment_questions(
         return [_q_out(d) for d in docs]
 
     student_id = claims["sub"]
-    # A student sees questions assigned directly (legacy) OR via any assigned quiz.
+    # A student sees questions assigned directly (legacy) OR via any assigned
+    # UNTIMED quiz. Timed-quiz questions stay hidden until the student starts
+    # the quiz in the player — that is the moment their clock begins.
     from app.api.v1.quizzes import student_quiz_question_ids
-    quiz_ids = await student_quiz_question_ids(db, student_id)
+    quiz_ids = await student_quiz_question_ids(db, student_id, untimed_only=True)
     query = {"$or": [
         {"assigned_student_ids": student_id},
         {"_id": {"$in": list(quiz_ids)}},

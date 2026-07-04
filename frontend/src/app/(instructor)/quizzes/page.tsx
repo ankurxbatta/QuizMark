@@ -1,10 +1,12 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import MathText from "@/components/MathText";
+import QRCode from "react-qr-code";
 import { Button, PageHeader, Card, EmptyState, Badge } from "@/components/ui";
 import {
   ClipboardList, Plus, Users, Pencil, Trash2, X, Search, Check, CheckCircle2, FileCheck, FileText,
+  Timer, QrCode, Copy, BarChart3, Loader2, Smartphone,
 } from "lucide-react";
 
 interface Quiz {
@@ -14,6 +16,38 @@ interface Quiz {
   question_ids: string[];
   question_count: number;
   assigned_student_ids: string[];
+  time_limit_minutes?: number | null;
+  timing_mode?: "strict" | "easy";
+}
+
+interface AttemptRow {
+  attempt_id: string;
+  student_id: string;
+  username: string;
+  status: "in_progress" | "completed" | "expired";
+  started_at: string;
+  deadline_at?: string | null;
+  finished_at?: string | null;
+  duration_seconds?: number | null;
+  late_by_seconds: number;
+  answered_count: number;
+  marked_count: number;
+  total_questions: number;
+  score?: number | null;
+  max_score?: number | null;
+}
+
+function parseUtc(iso: string): number {
+  // Backend datetimes may arrive without a zone suffix — they are always UTC.
+  return new Date(/Z$|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`).getTime();
+}
+
+function fmtDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  if (m >= 60) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return `${m}m ${rest.toString().padStart(2, "0")}s`;
 }
 interface Question {
   id: string;
@@ -40,11 +74,17 @@ export default function QuizzesPage() {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
+  const [timeLimit, setTimeLimit] = useState<string>(""); // minutes; "" = untimed
+  const [timingMode, setTimingMode] = useState<"strict" | "easy">("strict");
 
   // assignment
   const [assignQuiz, setAssignQuiz] = useState<Quiz | null>(null);
   const [assignIds, setAssignIds] = useState<Set<string>>(new Set());
   const [assignSaving, setAssignSaving] = useState(false);
+
+  // QR + attempts
+  const [qrQuiz, setQrQuiz] = useState<Quiz | null>(null);
+  const [attemptsQuiz, setAttemptsQuiz] = useState<Quiz | null>(null);
 
   // The backend caps /questions/?limit at 200 — page through so quizzes can
   // include questions beyond the first page (same fix as the print view).
@@ -79,17 +119,27 @@ export default function QuizzesPage() {
 
   const openNew = () => {
     setEditor("new"); setTitle(""); setDescription(""); setPicked(new Set()); setSearch("");
+    setTimeLimit(""); setTimingMode("strict");
   };
   const openEdit = (quiz: Quiz) => {
     setEditor(quiz); setTitle(quiz.title); setDescription(quiz.description || "");
     setPicked(new Set(quiz.question_ids)); setSearch("");
+    setTimeLimit(quiz.time_limit_minutes ? String(quiz.time_limit_minutes) : "");
+    setTimingMode(quiz.timing_mode || "strict");
   };
 
   const saveQuiz = async () => {
     if (!title.trim()) return;
     setSaving(true);
     try {
-      const body = { title: title.trim(), description: description.trim(), question_ids: [...picked] };
+      const minutes = parseInt(timeLimit, 10);
+      const body = {
+        title: title.trim(),
+        description: description.trim(),
+        question_ids: [...picked],
+        time_limit_minutes: Number.isFinite(minutes) && minutes > 0 ? minutes : null,
+        timing_mode: timingMode,
+      };
       if (editor === "new") await api.post("/quizzes/", body);
       else if (editor) await api.put(`/quizzes/${editor.id}`, body);
       setEditor(null);
@@ -175,12 +225,26 @@ export default function QuizzesPage() {
                     <Users size={11} />
                     {quiz.assigned_student_ids.length} assigned
                   </Badge>
+                  {quiz.time_limit_minutes ? (
+                    <Badge tone={quiz.timing_mode === "easy" ? "amber" : "rose"}>
+                      <Timer size={11} />
+                      {quiz.time_limit_minutes} min · {quiz.timing_mode === "easy" ? "easy" : "strict"}
+                    </Badge>
+                  ) : null}
                 </div>
                 <div className="flex gap-2 mt-4 pt-4 border-t border-slate-100">
                   <Button variant="primary" icon={Users} className="flex-1" onClick={() => openAssign(quiz)}>
                     Assign
                   </Button>
                   <Button variant="ghost" icon={Pencil} onClick={() => openEdit(quiz)}>Edit</Button>
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <Button variant="ghost" icon={QrCode} className="flex-1" onClick={() => setQrQuiz(quiz)}>
+                    QR code
+                  </Button>
+                  <Button variant="ghost" icon={BarChart3} className="flex-1" onClick={() => setAttemptsQuiz(quiz)}>
+                    Live results
+                  </Button>
                 </div>
                 <div className="flex gap-2 mt-2">
                   <Button variant="ghost" icon={FileCheck} className="flex-1"
@@ -217,6 +281,42 @@ export default function QuizzesPage() {
                 placeholder="Shown to students above the questions"
                 className="w-full mt-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:outline-none"
               />
+            </div>
+
+            <div className="rounded-xl border border-slate-200 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <Timer size={15} className="text-brand-600" />
+                <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  Timer <span className="text-slate-400 normal-case font-normal">(optional)</span>
+                </label>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number" min={1} max={600} value={timeLimit}
+                  onChange={(e) => setTimeLimit(e.target.value)}
+                  placeholder="No limit"
+                  className="w-28 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 focus:outline-none"
+                />
+                <span className="text-sm text-slate-500">minutes per student, counted from when they press Start</span>
+              </div>
+              {timeLimit && parseInt(timeLimit, 10) > 0 && (
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    ["strict", "Strict", "Hard cutoff — when time ends the quiz auto-submits everything the student has filled in."],
+                    ["easy", "Easy", "No cutoff — the student sees a warning that marks may be deducted, and their overtime is recorded for you."],
+                  ] as const).map(([value, label, hint]) => (
+                    <button
+                      key={value} type="button" onClick={() => setTimingMode(value)}
+                      className={`text-left rounded-lg border p-3 transition-colors duration-150 cursor-pointer ${
+                        timingMode === value ? "border-brand-400 bg-brand-50" : "border-slate-200 hover:border-slate-300"
+                      }`}
+                    >
+                      <span className={`text-sm font-semibold ${timingMode === value ? "text-brand-700" : "text-slate-700"}`}>{label}</span>
+                      <span className="block text-xs text-slate-500 mt-1 leading-snug">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div>
@@ -307,7 +407,144 @@ export default function QuizzesPage() {
           </div>
         </Modal>
       )}
+
+      {/* ── QR code modal ───────────────────────────────────────────────── */}
+      {qrQuiz && <QrModal quiz={qrQuiz} onClose={() => setQrQuiz(null)} />}
+
+      {/* ── Live results / attempts modal ───────────────────────────────── */}
+      {attemptsQuiz && <AttemptsModal quiz={attemptsQuiz} onClose={() => setAttemptsQuiz(null)} />}
     </div>
+  );
+}
+
+function QrModal({ quiz, onClose }: { quiz: Quiz; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const url = typeof window !== "undefined" ? `${window.location.origin}/m/quiz/${quiz.id}` : "";
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked — the link is visible to copy manually */ }
+  };
+
+  return (
+    <Modal onClose={onClose} title={`Take "${quiz.title}" on a phone`}>
+      <div className="flex flex-col items-center gap-4">
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <QRCode value={url} size={208} />
+        </div>
+        <p className="text-sm text-slate-600 text-center leading-relaxed">
+          <Smartphone size={14} className="inline mr-1 -mt-0.5 text-brand-600" />
+          Students scan this with their phone camera, sign in with their own
+          username &amp; password, and press <span className="font-semibold">Start</span>.
+          {quiz.time_limit_minutes
+            ? ` Their ${quiz.time_limit_minutes}-minute timer starts the moment they do.`
+            : ""}
+        </p>
+        <div className="flex items-center gap-2 w-full">
+          <code className="flex-1 text-xs bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 truncate">{url}</code>
+          <Button variant="ghost" icon={copied ? Check : Copy} onClick={copy}>
+            {copied ? "Copied" : "Copy"}
+          </Button>
+        </div>
+        <p className="text-xs text-slate-400 text-center">
+          Only students you assigned this quiz to can open it.
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
+function AttemptsModal({ quiz, onClose }: { quiz: Quiz; onClose: () => void }) {
+  const [rows, setRows] = useState<AttemptRow[] | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    const fetchRows = () =>
+      api.get<AttemptRow[]>(`/quizzes/${quiz.id}/attempts`)
+        .then((r) => setRows(r.data))
+        .catch(() => { /* keep last data */ });
+    fetchRows();
+    // live view: refresh while students are taking the quiz
+    pollRef.current = setInterval(() => { fetchRows(); setNow(Date.now()); }, 5000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [quiz.id]);
+
+  const STATUS: Record<AttemptRow["status"], { label: string; tone: "blue" | "green" | "rose" }> = {
+    in_progress: { label: "In progress", tone: "blue" },
+    completed: { label: "Finished", tone: "green" },
+    expired: { label: "Time expired", tone: "rose" },
+  };
+
+  return (
+    <Modal onClose={onClose} title={`Live results — ${quiz.title}`} wide>
+      {rows === null ? (
+        <div className="flex items-center gap-2 text-sm text-slate-400 py-8 justify-center">
+          <Loader2 size={15} className="animate-spin" /> Loading attempts…
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="text-sm text-slate-400 py-8 text-center">
+          No student has started this quiz yet. This view updates live — leave it open during the test.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200">
+                <th className="py-2 pr-3">Student</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Time taken</th>
+                <th className="py-2 pr-3">Over time</th>
+                <th className="py-2 pr-3">Answered</th>
+                <th className="py-2">Score</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((row) => {
+                const st = STATUS[row.status];
+                const running = row.status === "in_progress";
+                const seconds = running
+                  ? (now - parseUtc(row.started_at)) / 1000
+                  : row.duration_seconds ?? 0;
+                return (
+                  <tr key={row.attempt_id}>
+                    <td className="py-2.5 pr-3 font-medium text-slate-800">{row.username}</td>
+                    <td className="py-2.5 pr-3"><Badge tone={st.tone}>{st.label}</Badge></td>
+                    <td className="py-2.5 pr-3 text-slate-700 tabular-nums">
+                      {fmtDuration(seconds)}{running && <span className="text-slate-400"> …</span>}
+                    </td>
+                    <td className="py-2.5 pr-3">
+                      {row.late_by_seconds > 0 ? (
+                        <span className="text-amber-600 font-medium">+{fmtDuration(row.late_by_seconds)}</span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
+                    <td className="py-2.5 pr-3 text-slate-700 tabular-nums">
+                      {row.answered_count}/{row.total_questions}
+                    </td>
+                    <td className="py-2.5 text-slate-700 tabular-nums">
+                      {row.score !== null && row.score !== undefined
+                        ? <>
+                            {row.score % 1 === 0 ? row.score : row.score.toFixed(1)}
+                            <span className="text-slate-400">/{row.max_score ?? "—"}</span>
+                            {row.marked_count < row.answered_count && (
+                              <span className="text-xs text-slate-400"> ({row.answered_count - row.marked_count} marking…)</span>
+                            )}
+                          </>
+                        : <span className="text-slate-300">marking…</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Modal>
   );
 }
 
